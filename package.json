@@ -1,6 +1,6 @@
 {
   "name": "@extoci/fleet",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Discover, connect, and set up machines on your network",
   "license": "MIT",
   "publishConfig": {

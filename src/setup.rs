@@ -1,4 +1,7 @@
-use std::process::Command;
+use std::{
+    io::{self, IsTerminal, Write},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -52,7 +55,58 @@ pub fn init(
     println!();
     ui.ready(color, &name);
     ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
+    offer_codex_login(ui)?;
     Ok(())
+}
+
+fn offer_codex_login(ui: Ui) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    println!();
+    loop {
+        print!("Sign in to Codex to use this device? [Y/n] ");
+        io::stdout().flush().context("show Codex sign-in prompt")?;
+
+        let mut answer = String::new();
+        if io::stdin()
+            .read_line(&mut answer)
+            .context("read Codex sign-in choice")?
+            == 0
+        {
+            return Ok(());
+        }
+
+        match confirmation(&answer) {
+            Some(true) => return run_codex_login(),
+            Some(false) => {
+                ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
+                return Ok(());
+            }
+            None => println!("Please answer yes or no."),
+        }
+    }
+}
+
+fn confirmation(answer: &str) -> Option<bool> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn run_codex_login() -> Result<()> {
+    match Command::new("codex").arg("login").status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => bail!("`codex login` did not complete"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            eprintln!("Codex CLI is not installed. Install it, then run `codex login`.");
+            Ok(())
+        }
+        Err(error) => Err(error).context("start `codex login`"),
+    }
 }
 
 fn ensure_ssh_server() -> Result<()> {
@@ -141,4 +195,19 @@ fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
         bail!("{label} failed: {}", detail.trim())
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirmation;
+
+    #[test]
+    fn codex_login_defaults_to_yes() {
+        assert_eq!(confirmation("\n"), Some(true));
+        assert_eq!(confirmation("Y"), Some(true));
+        assert_eq!(confirmation("yes"), Some(true));
+        assert_eq!(confirmation("n"), Some(false));
+        assert_eq!(confirmation("NO"), Some(false));
+        assert_eq!(confirmation("maybe"), None);
+    }
 }
