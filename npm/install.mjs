@@ -2,7 +2,8 @@ import { chmod, copyFile, mkdir, rename, rm } from "node:fs/promises";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { get } from "node:https";
+import { get as httpGet } from "node:http";
+import { get as httpsGet } from "node:https";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pipeline } from "node:stream/promises";
@@ -57,7 +58,8 @@ await chmod(output, 0o755);
 function download(url, destination, redirects = 0) {
   if (redirects > 8) throw new Error("too many download redirects");
   return new Promise((resolve, reject) => {
-    get(url, { headers: { "User-Agent": "fleet-npm-installer" } }, response => {
+    const client = new URL(url).protocol === "http:" ? httpGet : httpsGet;
+    client(url, { headers: { "User-Agent": "fleet-npm-installer" } }, response => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
         resolve(download(new URL(response.headers.location, url), destination, redirects + 1));
