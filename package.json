@@ -1,0 +1,19 @@
+{
+  "name": "fleet-cli",
+  "version": "0.2.0",
+  "description": "Discover, connect, and set up machines on your network",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "fleet": "./npm/bin/fleet.mjs"
+  },
+  "files": ["npm/bin", "npm/install.mjs", "README.md", "LICENSE"],
+  "scripts": {
+    "postinstall": "node npm/install.mjs",
+    "check": "cargo test && node npm/install.mjs --check",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
