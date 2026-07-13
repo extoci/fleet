@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceColor {
     #[default]
@@ -16,6 +16,15 @@ pub enum DeviceColor {
 }
 
 impl DeviceColor {
+    pub const ALL: [Self; 6] = [
+        Self::Emerald,
+        Self::Cyan,
+        Self::Blue,
+        Self::Violet,
+        Self::Amber,
+        Self::Rose,
+    ];
+
     pub fn ansi(self) -> u8 {
         match self {
             Self::Emerald => 32,
@@ -39,18 +48,10 @@ impl DeviceColor {
     }
 
     pub fn from_name(name: &str) -> Self {
-        const COLORS: [DeviceColor; 6] = [
-            DeviceColor::Emerald,
-            DeviceColor::Cyan,
-            DeviceColor::Blue,
-            DeviceColor::Violet,
-            DeviceColor::Amber,
-            DeviceColor::Rose,
-        ];
         let hash = name.bytes().fold(0usize, |hash, byte| {
             hash.wrapping_mul(31).wrapping_add(byte as usize)
         });
-        COLORS[hash % COLORS.len()]
+        Self::ALL[hash % Self::ALL.len()]
     }
 }
 

@@ -18,17 +18,39 @@ pub fn init(
     ui: Ui,
 ) -> Result<()> {
     let previous = config::load_optional()?;
+    let first_run = previous.is_none();
+    let prompt_for_name = name.is_none();
+    let prompt_for_color = color.is_none();
     let hostname = hostname::get()
         .context("read hostname")?
         .to_string_lossy()
         .into_owned();
-    let name = name
+    let suggested_name = name
         .or_else(|| previous.as_ref().map(|config| config.name.clone()))
         .unwrap_or_else(|| hostname.trim_end_matches(".local").to_lowercase());
-    config::validate_name(&name)?;
-    let color = color
+    config::validate_name(&suggested_name)?;
+    let suggested_color = color
         .or_else(|| previous.as_ref().map(|config| config.color))
-        .unwrap_or_else(|| DeviceColor::from_name(&name));
+        .unwrap_or_else(|| DeviceColor::from_name(&suggested_name));
+
+    let (name, color) = if first_run && io::stdin().is_terminal() {
+        let Some(choices) = onboarding_wizard(
+            suggested_name,
+            suggested_color,
+            prompt_for_name,
+            prompt_for_color,
+            install_service,
+            ui,
+        )?
+        else {
+            ui.muted("Setup cancelled. Nothing was changed.");
+            return Ok(());
+        };
+        choices
+    } else {
+        (suggested_name, suggested_color)
+    };
+
     let config = Config {
         name: name.clone(),
         user: previous
@@ -59,33 +81,147 @@ pub fn init(
     Ok(())
 }
 
+fn onboarding_wizard(
+    suggested_name: String,
+    suggested_color: DeviceColor,
+    prompt_for_name: bool,
+    prompt_for_color: bool,
+    install_service: bool,
+    ui: Ui,
+) -> Result<Option<(String, DeviceColor)>> {
+    println!();
+    println!("{}  Fleet setup", ui.diamond(suggested_color));
+    ui.muted("   One identity for SSH, services, and agents.");
+
+    println!();
+    println!("Device identity");
+    let name = if prompt_for_name {
+        loop {
+            let Some(value) = prompt_with_default("  Name", &suggested_name)? else {
+                return Ok(None);
+            };
+            match config::validate_name(&value) {
+                Ok(()) => break value,
+                Err(error) => println!("  {error}"),
+            }
+        }
+    } else {
+        println!("  Name  {suggested_name}");
+        suggested_name
+    };
+
+    let default_color = if prompt_for_color {
+        DeviceColor::from_name(&name)
+    } else {
+        suggested_color
+    };
+    let color = if prompt_for_color {
+        println!();
+        println!("Device color");
+        ui.muted("  Shown anywhere this device appears in Fleet.");
+        for (index, color) in DeviceColor::ALL.iter().enumerate() {
+            let marker = if *color == default_color { "›" } else { " " };
+            println!(
+                "  {marker} {}  {}  {}",
+                index + 1,
+                ui.diamond(*color),
+                color.label()
+            );
+        }
+        loop {
+            let Some(value) = prompt_with_default("  Color", default_color.label())? else {
+                return Ok(None);
+            };
+            match parse_color(&value) {
+                Some(color) => break color,
+                None => println!("  Choose a number from 1–6 or a color name."),
+            }
+        }
+    } else {
+        println!(
+            "  Color {}  {}",
+            ui.diamond(default_color),
+            default_color.label()
+        );
+        default_color
+    };
+
+    println!();
+    println!("Fleet will configure");
+    println!("  • SSH access with a dedicated Fleet key");
+    if install_service {
+        println!("  • Local discovery as {name}.local");
+        println!("  • A background service that starts automatically");
+    } else {
+        println!("  • Local discovery without a background service");
+    }
+
+    println!();
+    Ok(confirm("Set up this device? [Y/n] ")?.then_some((name, color)))
+}
+
+fn prompt_with_default(label: &str, default: &str) -> Result<Option<String>> {
+    print!("{label} [{default}]: ");
+    io::stdout().flush().context("show setup prompt")?;
+    let mut answer = String::new();
+    if io::stdin()
+        .read_line(&mut answer)
+        .context("read setup choice")?
+        == 0
+    {
+        return Ok(None);
+    }
+    let answer = answer.trim();
+    Ok(Some(if answer.is_empty() {
+        default.to_string()
+    } else {
+        answer.to_string()
+    }))
+}
+
+fn parse_color(value: &str) -> Option<DeviceColor> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Ok(index) = value.parse::<usize>() {
+        return index
+            .checked_sub(1)
+            .and_then(|index| DeviceColor::ALL.get(index))
+            .copied();
+    }
+    DeviceColor::ALL
+        .into_iter()
+        .find(|color| color.label() == value)
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    loop {
+        print!("{prompt}");
+        io::stdout().flush().context("show confirmation prompt")?;
+        let mut answer = String::new();
+        if io::stdin()
+            .read_line(&mut answer)
+            .context("read confirmation")?
+            == 0
+        {
+            return Ok(false);
+        }
+        match confirmation(&answer) {
+            Some(choice) => return Ok(choice),
+            None => println!("Please answer yes or no."),
+        }
+    }
+}
+
 fn offer_codex_login(ui: Ui) -> Result<()> {
     if !io::stdin().is_terminal() {
         return Ok(());
     }
 
     println!();
-    loop {
-        print!("Sign in to Codex to use this device? [Y/n] ");
-        io::stdout().flush().context("show Codex sign-in prompt")?;
-
-        let mut answer = String::new();
-        if io::stdin()
-            .read_line(&mut answer)
-            .context("read Codex sign-in choice")?
-            == 0
-        {
-            return Ok(());
-        }
-
-        match confirmation(&answer) {
-            Some(true) => return run_codex_login(),
-            Some(false) => {
-                ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
-                return Ok(());
-            }
-            None => println!("Please answer yes or no."),
-        }
+    if confirm("Sign in to Codex to use this device? [Y/n] ")? {
+        run_codex_login()
+    } else {
+        ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
+        Ok(())
     }
 }
 
@@ -199,7 +335,8 @@ fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::confirmation;
+    use super::{confirmation, parse_color};
+    use crate::ui::DeviceColor;
 
     #[test]
     fn codex_login_defaults_to_yes() {
@@ -209,5 +346,14 @@ mod tests {
         assert_eq!(confirmation("n"), Some(false));
         assert_eq!(confirmation("NO"), Some(false));
         assert_eq!(confirmation("maybe"), None);
+    }
+
+    #[test]
+    fn color_choices_accept_names_and_numbers() {
+        assert_eq!(parse_color("1"), Some(DeviceColor::Emerald));
+        assert_eq!(parse_color("cyan"), Some(DeviceColor::Cyan));
+        assert_eq!(parse_color("  VIOLET "), Some(DeviceColor::Violet));
+        assert_eq!(parse_color("7"), None);
+        assert_eq!(parse_color("orange"), None);
     }
 }
