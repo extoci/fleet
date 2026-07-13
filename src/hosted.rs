@@ -1,5 +1,5 @@
 use std::{
-    io,
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     thread,
     time::Duration,
@@ -29,7 +29,17 @@ pub struct DiscoveredService {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HostedServiceStatus {
+    pub name: String,
+    pub local_url: String,
+    pub fleet_url: String,
+    pub online: bool,
+}
+
 pub fn expose(name: &str, url: Option<&str>, public_port: Option<u16>, ui: Ui) -> Result<()> {
+    let normalized_name = name.to_ascii_lowercase();
+    let name = normalized_name.as_str();
     validate_name(name)?;
     let source = match url {
         Some(url) => url.to_string(),
@@ -90,6 +100,8 @@ pub fn expose(name: &str, url: Option<&str>, public_port: Option<u16>, ui: Ui) -
 }
 
 pub fn unexpose(name: &str, ui: Ui) -> Result<()> {
+    let normalized_name = name.to_ascii_lowercase();
+    let name = normalized_name.as_str();
     let mut config = config::load()?;
     let previous = config.clone();
     let before = config.services.len();
@@ -108,6 +120,7 @@ pub fn open(selector: &str, ui: Ui) -> Result<()> {
         .map_or((None, selector), |(device, service)| {
             (Some(device), service)
         });
+    let service_name = service_name.to_ascii_lowercase();
     let matches = if let Some(device) = device {
         discovery::resolve(device, Duration::from_secs(2))?
             .into_iter()
@@ -169,6 +182,21 @@ pub fn start_proxies(services: &[HostedService]) -> Result<()> {
     Ok(())
 }
 
+pub fn statuses(device: &str, services: &[HostedService]) -> Vec<HostedServiceStatus> {
+    services
+        .iter()
+        .map(|service| HostedServiceStatus {
+            name: service.name.clone(),
+            local_url: format!(
+                "{}://{}:{}{}",
+                service.scheme, service.target_host, service.target_port, service.path
+            ),
+            fleet_url: public_url(device, service),
+            online: target_online(service),
+        })
+        .collect()
+}
+
 pub fn encode(service: &HostedService) -> String {
     format!(
         "{}|{}|{}|{}",
@@ -194,8 +222,52 @@ pub fn decode(value: &str, address: &str) -> Option<DiscoveredService> {
 }
 
 fn proxy(mut client: TcpStream, service: &HostedService) -> Result<()> {
-    let mut target = TcpStream::connect((service.target_host.as_str(), service.target_port))
-        .with_context(|| format!("connect to {}:{}", service.target_host, service.target_port))?;
+    let mut target = match TcpStream::connect((service.target_host.as_str(), service.target_port)) {
+        Ok(target) => target,
+        Err(_) if service.scheme == "http" => {
+            // Read the pending request headers before closing the socket. Closing a
+            // connection with unread client data can turn a useful 502 into a TCP
+            // reset on some platforms.
+            client.set_read_timeout(Some(Duration::from_millis(250)))?;
+            let mut request = [0_u8; 8 * 1024];
+            let mut received = 0;
+            while received < request.len() {
+                match client.read(&mut request[received..]) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        received += read;
+                        if request[..received]
+                            .windows(4)
+                            .any(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(error).context("read HTTP request"),
+                }
+            }
+            let body = format!("Fleet cannot reach the local `{}` service.\n", service.name);
+            write!(
+                client,
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("connect to {}:{}", service.target_host, service.target_port)
+            });
+        }
+    };
     let mut client_read = client.try_clone()?;
     let mut target_write = target.try_clone()?;
     let upstream = thread::spawn(move || io::copy(&mut client_read, &mut target_write));

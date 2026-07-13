@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     config,
-    hosted::HostedService,
+    hosted::{self, HostedServiceStatus},
     service, ssh,
     ui::{DeviceColor, Ui},
 };
@@ -22,7 +22,7 @@ struct Status {
     ssh_key_ready: bool,
     ssh_server_running: bool,
     discovery_service_running: bool,
-    hosted_services: Vec<HostedService>,
+    hosted_services: Vec<HostedServiceStatus>,
 }
 
 pub fn show(json: bool, ui: Ui) -> Result<()> {
@@ -39,10 +39,9 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
         ssh_key_path: key,
         ssh_server_running: ssh_server_running(),
         discovery_service_running: service::is_running(),
-        hosted_services: config
-            .as_ref()
-            .map(|config| config.services.clone())
-            .unwrap_or_default(),
+        hosted_services: config.as_ref().map_or_else(Vec::new, |config| {
+            hosted::statuses(&config.name, &config.services)
+        }),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -62,10 +61,11 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
     if !status.hosted_services.is_empty() {
         println!();
         for service in &status.hosted_services {
-            ui.muted(format!(
-                "↳ {} · {}://127.0.0.1:{}{}",
-                service.name, service.scheme, service.target_port, service.path
-            ));
+            check(
+                ui,
+                service.online,
+                &format!("{} · {}", service.name, service.fleet_url),
+            );
         }
     }
     Ok(())

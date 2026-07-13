@@ -147,15 +147,20 @@ pub fn restart() -> Result<()> {
         checked(
             Command::new("launchctl").args(["kickstart", "-k", &target]),
             "restart Fleet",
-        )
+        )?;
     } else if cfg!(target_os = "linux") {
         checked(
             Command::new("systemctl").args(["--user", "restart", "fleet.service"]),
             "restart Fleet",
-        )
+        )?;
     } else {
         bail!("background service supports macOS and Linux")
     }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    if !is_running() {
+        bail!("Fleet discovery service did not stay running")
+    }
+    Ok(())
 }
 
 fn checked(command: &mut Command, label: &str) -> Result<()> {
