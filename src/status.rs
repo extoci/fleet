@@ -65,8 +65,10 @@ fn check(ui: Ui, ready: bool, label: &str) {
 
 fn ssh_server_running() -> bool {
     if cfg!(target_os = "macos") {
-        Command::new("pgrep")
-            .args(["-q", "-x", "sshd"])
+        Command::new("launchctl")
+            .args(["print", "system/com.openssh.sshd"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false)

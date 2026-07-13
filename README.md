@@ -17,7 +17,7 @@ Or use the small shell installer, which only verifies and installs the native Ru
 curl -fsSL https://raw.githubusercontent.com/extoci/fleet/main/fleet.sh | sh
 ```
 
-The first initialization may ask for `sudo` to enable the system SSH server. Fleet then creates a dedicated `~/.ssh/id_ed25519_fleet` key and starts its user-level discovery service. Existing SSH keys and unrelated `authorized_keys` entries are preserved.
+The first initialization may ask for `sudo` to enable the system SSH server and boot-time discovery. Fleet then creates a dedicated `~/.ssh/id_ed25519_fleet` key and starts its user-level discovery service. Existing SSH keys and unrelated `authorized_keys` entries are preserved.
 
 ## Everyday use
 
@@ -90,4 +90,4 @@ For a local npm packaging test:
 FLEET_BINARY="$PWD/target/release/fleet" npm install --global "$PWD"
 ```
 
-Pushing a matching `v*` tag builds signed-by-checksum archives for Apple Silicon, Intel macOS, ARM64 Linux, and x64 Linux, creates a GitHub release, and publishes `@extoci/fleet`. Configure `NPM_TOKEN` before the first release.
+Pushing a matching `v*` tag builds checksum-verified archives for Apple Silicon, Intel macOS, ARM64 Linux, and x64 Linux, creates a GitHub release, and publishes `@extoci/fleet`. Configure `NPM_TOKEN` before the first release.

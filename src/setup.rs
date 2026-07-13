@@ -87,11 +87,11 @@ fn ensure_ssh_server() -> Result<()> {
         }
     }
     let ssh = elevated("systemctl", &["enable", "--now", "ssh"])
-        .status()
-        .map(|status| status.success())
+        .output()
+        .map(|output| output.status.success())
         .unwrap_or(false);
     if !ssh {
-        checked(
+        checked_quiet(
             elevated("systemctl", &["enable", "--now", "sshd"]),
             "start the SSH server",
         )?;
@@ -129,6 +129,15 @@ fn checked(mut command: Command, label: &str) -> Result<()> {
     let status = command.status().with_context(|| label.to_string())?;
     if !status.success() {
         bail!("{label} failed")
+    }
+    Ok(())
+}
+
+fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
+    let output = command.output().with_context(|| label.to_string())?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        bail!("{label} failed: {}", detail.trim())
     }
     Ok(())
 }

@@ -39,6 +39,7 @@ pub fn install() -> Result<()> {
             "launchctl bootstrap",
         )?;
     } else if cfg!(target_os = "linux") {
+        enable_linger()?;
         let dir = config::home()?.join(".config/systemd/user");
         fs::create_dir_all(&dir)?;
         fs::write(
@@ -64,6 +65,33 @@ pub fn install() -> Result<()> {
         bail!("background service installation supports macOS and Linux")
     }
     println!("Fleet discovery service installed.");
+    Ok(())
+}
+
+fn enable_linger() -> Result<()> {
+    let user = env::var("USER").context("USER is not set")?;
+    let is_root = Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| output.stdout == b"0\n")
+        .unwrap_or(false);
+    let mut command = if is_root {
+        Command::new("loginctl")
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg("loginctl");
+        command
+    };
+    let output = command
+        .args(["enable-linger", &user])
+        .output()
+        .context("enable Fleet at boot")?;
+    if !output.status.success() {
+        bail!(
+            "enable Fleet at boot failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
     Ok(())
 }
 
