@@ -194,6 +194,12 @@ fn parse_color(value: Option<&str>) -> DeviceColor {
 }
 
 fn peer_from_info(info: &ServiceInfo) -> Peer {
+    let mut addresses = info.get_addresses().iter().copied().collect::<Vec<_>>();
+    addresses.sort_by_key(|address| match address {
+        IpAddr::V4(address) => (0, address.to_string()),
+        IpAddr::V6(address) if !address.is_unicast_link_local() => (1, address.to_string()),
+        IpAddr::V6(address) => (2, address.to_string()),
+    });
     Peer {
         name: info
             .get_fullname()
@@ -211,7 +217,7 @@ fn peer_from_info(info: &ServiceInfo) -> Peer {
             .and_then(|value| value.parse().ok())
             .unwrap_or(22),
         pair_port: info.get_port(),
-        addresses: info.get_addresses().iter().copied().collect(),
+        addresses,
         color: parse_color(info.get_property_val_str("color")),
         version: info
             .get_property_val_str("version")

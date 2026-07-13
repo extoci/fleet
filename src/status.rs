@@ -66,7 +66,7 @@ fn check(ui: Ui, ready: bool, label: &str) {
 fn ssh_server_running() -> bool {
     if cfg!(target_os = "macos") {
         Command::new("pgrep")
-            .args(["-x", "sshd"])
+            .args(["-q", "-x", "sshd"])
             .status()
             .map(|status| status.success())
             .unwrap_or(false)

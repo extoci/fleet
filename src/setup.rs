@@ -49,7 +49,7 @@ pub fn init(
         service::install()?;
     }
     println!();
-    ui.success(format!("{} {name} is ready", ui.diamond(color)));
+    ui.ready(color, &name);
     ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
     Ok(())
 }

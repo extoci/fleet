@@ -1,9 +1,10 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::Command,
+    sync::{Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -130,8 +131,11 @@ pub fn start_pair_listener(port: u16) -> Result<()> {
 
 fn accept_pair(mut stream: TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     let mut request = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut request)?;
+    BufReader::new(stream.try_clone()?)
+        .take(16 * 1024 + 1)
+        .read_line(&mut request)?;
     if request.len() > 16 * 1024 {
         bail!("pairing request is too large")
     }
@@ -150,6 +154,11 @@ fn public_key() -> Result<String> {
 }
 
 fn authorize_key(key: &str) -> Result<()> {
+    static AUTHORIZED_KEYS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = AUTHORIZED_KEYS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("authorized_keys lock is poisoned"))?;
     validate_public_key(key)?;
     let ssh_dir = config::home()?.join(".ssh");
     fs::create_dir_all(&ssh_dir)?;
@@ -198,8 +207,12 @@ fn validate_public_key(key: &str) -> Result<()> {
 
 pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Result<()> {
     let key = ensure_key()?;
-    let discovered = if !host.contains('.') && !host.contains('@') {
-        discovery::resolve(host, Duration::from_secs(2))?
+    let (embedded_user, lookup_host) = host
+        .split_once('@')
+        .map_or((None, host), |(user, host)| (Some(user), host));
+    let requested_user = user.or(embedded_user);
+    let discovered = if !lookup_host.contains('.') {
+        discovery::resolve(lookup_host, Duration::from_secs(2))?
     } else {
         None
     };
@@ -219,12 +232,12 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Resu
             .or_else(|| peer.addresses.first())
             .context("peer did not advertise an address")?;
         (
-            format!("{}@{address}", user.unwrap_or(&peer.user)),
+            format!("{}@{address}", requested_user.unwrap_or(&peer.user)),
             peer.port,
         )
     } else {
         (
-            target(host, user),
+            target(lookup_host, requested_user),
             config::load().map(|config| config.ssh_port).unwrap_or(22),
         )
     };
@@ -265,5 +278,24 @@ fn normalize_host(host: &str) -> String {
         host.to_string()
     } else {
         format!("{host}.local")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_ed25519_public_keys() {
+        assert!(validate_public_key("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus fleet").is_ok());
+        assert!(validate_public_key("ssh-rsa AAAA fleet").is_err());
+        assert!(validate_public_key("ssh-ed25519 not_base64! fleet").is_err());
+    }
+
+    #[test]
+    fn normalizes_bare_fleet_names() {
+        assert_eq!(normalize_host("studio"), "studio.local");
+        assert_eq!(normalize_host("studio.local"), "studio.local");
+        assert_eq!(normalize_host("192.0.2.1"), "192.0.2.1");
     }
 }

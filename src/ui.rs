@@ -84,6 +84,14 @@ impl Ui {
         }
     }
 
+    pub fn ready(self, color: DeviceColor, name: &str) {
+        if self.color {
+            println!("{}  \x1b[1m{name}\x1b[0m is ready", self.diamond(color));
+        } else {
+            println!("{}  {name} is ready", self.diamond(color));
+        }
+    }
+
     pub fn muted(self, message: impl AsRef<str>) {
         if self.color {
             println!("\x1b[2m{}\x1b[0m", message.as_ref());

@@ -13,7 +13,12 @@ use clap::{Parser, Subcommand};
 use ui::{DeviceColor, Ui};
 
 #[derive(Parser)]
-#[command(name = "fleet", version, about = "Manage the computers in your fleet")]
+#[command(
+    name = "fleet",
+    version,
+    about = "Your machines, one command away.",
+    after_help = "Examples:\n  fleet init --name studio --color violet\n  fleet ls\n  fleet connect studio\n  fleet connect studio -- uname -a\n  fleet status --json"
+)]
 struct Cli {
     /// Disable ANSI color (also honors NO_COLOR)
     #[arg(long, global = true)]
@@ -24,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up this machine's identity, SSH key, and discovery service
+    /// Set up this machine
     Init {
         /// Fleet name for this machine (defaults to its hostname)
         #[arg(long)]
@@ -36,7 +41,7 @@ enum Command {
         #[arg(long)]
         no_service: bool,
     },
-    /// Find Fleet machines on the local network
+    /// See devices on the local network
     #[command(visible_alias = "ls")]
     Discover {
         /// Seconds to listen for announcements
@@ -49,13 +54,13 @@ enum Command {
         #[arg(long, conflicts_with = "plain")]
         json: bool,
     },
-    /// Check this machine's Fleet setup
+    /// Check this machine's setup
     Status {
         /// Print stable JSON for scripts and agents
         #[arg(long)]
         json: bool,
     },
-    /// Connect to a device by Fleet name
+    /// Open a shell or run a command
     Connect {
         host: String,
         #[arg(short, long)]
@@ -63,20 +68,23 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Exchange dedicated SSH keys with a device
+    /// Trust a device without a password
     Pair {
         host: String,
         #[arg(short, long)]
         user: Option<String>,
     },
-    /// Advertise this machine (normally run by the background service)
+    /// Advertise this machine (used by the background service)
+    #[command(hide = true)]
     Serve,
     /// Install and start the per-user discovery service
+    #[command(hide = true)]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
     },
     /// Manage SSH access between Fleet machines
+    #[command(hide = true)]
     Ssh {
         #[command(subcommand)]
         command: SshCommand,

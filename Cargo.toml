@@ -1,6 +1,6 @@
 [package]
 name = "fleet-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Discover, connect, and set up machines on your network"
 license = "MIT"

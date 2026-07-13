@@ -56,6 +56,10 @@ pub fn install() -> Result<()> {
             Command::new("systemctl").args(["--user", "enable", "--now", "fleet.service"]),
             "systemctl enable",
         )?;
+        checked(
+            Command::new("systemctl").args(["--user", "restart", "fleet.service"]),
+            "systemctl restart",
+        )?;
     } else {
         bail!("background service installation supports macOS and Linux")
     }
@@ -90,6 +94,8 @@ pub fn is_running() -> bool {
         let target = format!("gui/{}/dev.fleet.discovery", unsafe { libc_getuid() });
         Command::new("launchctl")
             .args(["print", &target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
