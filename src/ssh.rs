@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::Command,
     sync::{Mutex, OnceLock},
@@ -89,12 +89,9 @@ pub fn pair(host: &str, user: Option<&str>, ui: Ui) -> Result<()> {
 fn pair_fleet(peer: &discovery::Peer) -> Result<()> {
     let public_key = public_key()?;
     let address = peer
-        .addresses
-        .iter()
-        .find(|address| matches!(address, IpAddr::V4(_)))
-        .or_else(|| peer.addresses.first())
+        .connection_address()
         .context("peer did not advertise an address")?;
-    let socket = SocketAddr::new(*address, peer.pair_port);
+    let socket = SocketAddr::new(address, peer.pair_port);
     let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(3))
         .with_context(|| format!("connect to Fleet pairing service at {socket}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -226,10 +223,7 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Resu
             ));
         }
         let address = peer
-            .addresses
-            .iter()
-            .find(|address| matches!(address, IpAddr::V4(_)))
-            .or_else(|| peer.addresses.first())
+            .connection_address()
             .context("peer did not advertise an address")?;
         (
             format!("{}@{address}", requested_user.unwrap_or(&peer.user)),

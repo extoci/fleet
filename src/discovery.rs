@@ -28,6 +28,23 @@ pub struct Peer {
     pub version: String,
 }
 
+impl Peer {
+    pub fn connection_address(&self) -> Option<IpAddr> {
+        self.addresses
+            .iter()
+            .find(|address| matches!(address, IpAddr::V4(_)))
+            .or_else(|| {
+                self.addresses.iter().find(|address| match address {
+                    IpAddr::V6(address) => {
+                        !address.is_unicast_link_local() && !address.is_loopback()
+                    }
+                    IpAddr::V4(_) => false,
+                })
+            })
+            .copied()
+    }
+}
+
 pub fn serve() -> Result<()> {
     let config = config::load()?;
     let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
@@ -103,8 +120,9 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
                 let peer = peer_from_info(&info);
-                if peer.name.eq_ignore_ascii_case(wanted)
-                    || peer.hostname.eq_ignore_ascii_case(name)
+                if (peer.name.eq_ignore_ascii_case(wanted)
+                    || peer.hostname.eq_ignore_ascii_case(name))
+                    && peer.connection_address().is_some()
                 {
                     found = Some(peer);
                     break;
@@ -174,11 +192,8 @@ fn addresses(peer: &Peer) -> String {
 }
 
 fn preferred_address(peer: &Peer) -> String {
-    peer.addresses
-        .iter()
-        .find(|address| matches!(address, IpAddr::V4(_)))
-        .or_else(|| peer.addresses.iter().find(|address| !address.is_loopback()))
-        .map(ToString::to_string)
+    peer.connection_address()
+        .map(|address| address.to_string())
         .unwrap_or_else(|| peer.hostname.clone())
 }
 
