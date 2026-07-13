@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     net::IpAddr,
     thread,
     time::{Duration, Instant},
@@ -10,7 +10,9 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
 
 use crate::{
-    config, ssh,
+    config, hosted,
+    hosted::DiscoveredService,
+    ssh,
     ui::{DeviceColor, Ui},
 };
 
@@ -26,6 +28,7 @@ pub struct Peer {
     pub addresses: Vec<IpAddr>,
     pub color: DeviceColor,
     pub version: String,
+    pub services: Vec<DiscoveredService>,
 }
 
 impl Peer {
@@ -51,25 +54,29 @@ pub fn serve() -> Result<()> {
     let hostname = format!("{}.local.", config.name);
     let ssh_port = config.ssh_port.to_string();
     let color = config.color.label();
-    let properties = [
-        ("user", config.user.as_str()),
-        ("ssh_port", ssh_port.as_str()),
-        ("color", color),
-        ("version", env!("CARGO_PKG_VERSION")),
-    ];
+    let mut properties = HashMap::from([
+        ("user".to_string(), config.user.clone()),
+        ("ssh_port".to_string(), ssh_port),
+        ("color".to_string(), color.to_string()),
+        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+    ]);
+    for (index, service) in config.services.iter().enumerate() {
+        properties.insert(format!("svc{index}"), hosted::encode(service));
+    }
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &config.name,
         &hostname,
         "",
         config.pair_port,
-        &properties[..],
+        properties,
     )
     .context("create mDNS announcement")?
     .enable_addr_auto();
     daemon
         .register(service)
         .context("register mDNS announcement")?;
+    hosted::start_proxies(&config.services)?;
     ssh::start_pair_listener(config.pair_port)?;
     println!(
         "Advertising {} as ssh {}@{}:{}",
@@ -116,7 +123,15 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
         .context("browse for Fleet peers")?;
     let deadline = Instant::now() + timeout;
     let mut found = None;
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+    let mut candidate = None;
+    let mut candidate_deadline: Option<Instant> = None;
+    while let Some(mut remaining) = deadline.checked_duration_since(Instant::now()) {
+        if let Some(ipv6_deadline) = candidate_deadline {
+            let Some(ipv6_remaining) = ipv6_deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            remaining = remaining.min(ipv6_remaining);
+        }
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
                 let peer = peer_from_info(&info);
@@ -124,8 +139,13 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
                     || peer.hostname.eq_ignore_ascii_case(name))
                     && peer.connection_address().is_some()
                 {
-                    found = Some(peer);
-                    break;
+                    if peer.addresses.iter().any(IpAddr::is_ipv4) {
+                        found = Some(peer);
+                        break;
+                    }
+                    candidate = Some(peer);
+                    candidate_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
                 }
             }
             Ok(_) => {}
@@ -134,7 +154,7 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
     }
     let _ = daemon.stop_browse(SERVICE_TYPE);
     let _ = daemon.shutdown();
-    Ok(found)
+    Ok(found.or(candidate))
 }
 
 pub fn print(peers: &[Peer], plain: bool, json: bool, ui: Ui) -> Result<()> {
@@ -169,6 +189,9 @@ pub fn print(peers: &[Peer], plain: bool, json: bool, ui: Ui) -> Result<()> {
             ssh_target,
             peer.version
         );
+        for service in &peer.services {
+            println!("       ↳  {:<16} {}", service.name, service.url);
+        }
     }
     println!();
     ui.muted(format!(
@@ -215,6 +238,19 @@ fn peer_from_info(info: &ServiceInfo) -> Peer {
         IpAddr::V6(address) if !address.is_unicast_link_local() => (1, address.to_string()),
         IpAddr::V6(address) => (2, address.to_string()),
     });
+    let address = connection_address(&addresses).map(|address| address.to_string());
+    let mut services = Vec::new();
+    if let Some(address) = address {
+        for index in 0..32 {
+            let Some(value) = info.get_property_val_str(&format!("svc{index}")) else {
+                break;
+            };
+            if let Some(service) = hosted::decode(value, &address) {
+                services.push(service);
+            }
+        }
+    }
+    services.sort_by(|a, b| a.name.cmp(&b.name));
     Peer {
         name: info
             .get_fullname()
@@ -238,5 +274,19 @@ fn peer_from_info(info: &ServiceInfo) -> Peer {
             .get_property_val_str("version")
             .unwrap_or("unknown")
             .to_string(),
+        services,
     }
+}
+
+fn connection_address(addresses: &[IpAddr]) -> Option<IpAddr> {
+    addresses
+        .iter()
+        .find(|address| matches!(address, IpAddr::V4(_)))
+        .or_else(|| {
+            addresses.iter().find(|address| match address {
+                IpAddr::V6(address) => !address.is_unicast_link_local() && !address.is_loopback(),
+                IpAddr::V4(_) => false,
+            })
+        })
+        .copied()
 }

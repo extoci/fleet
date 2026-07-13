@@ -1,5 +1,6 @@
 mod config;
 mod discovery;
+mod hosted;
 mod service;
 mod setup;
 mod ssh;
@@ -17,7 +18,7 @@ use ui::{DeviceColor, Ui};
     name = "fleet",
     version,
     about = "Your machines, one command away.",
-    after_help = "Examples:\n  fleet init --name studio --color violet\n  fleet ls\n  fleet connect studio\n  fleet connect studio -- uname -a\n  fleet status --json"
+    after_help = "Examples:\n  fleet init --name studio --color violet\n  fleet ls\n  fleet connect studio\n  fleet connect studio -- uname -a\n  fleet expose t3\n  fleet open studio/t3\n  fleet status --json"
 )]
 struct Cli {
     /// Disable ANSI color (also honors NO_COLOR)
@@ -73,6 +74,23 @@ enum Command {
         host: String,
         #[arg(short, long)]
         user: Option<String>,
+    },
+    /// Share a local web service with the fleet
+    Expose {
+        /// Service name; `t3` defaults to http://127.0.0.1:4001
+        name: String,
+        /// Local service URL
+        url: Option<String>,
+        /// Fleet-facing port (automatically selected by default)
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Stop sharing a local service
+    Unexpose { name: String },
+    /// Open a hosted service in your browser
+    Open {
+        /// Service name, or device/service when names collide
+        service: String,
     },
     /// Advertise this machine (used by the background service)
     #[command(hide = true)]
@@ -151,6 +169,11 @@ fn run() -> Result<()> {
             ssh::connect(&host, user.as_deref(), &args, ui)
         }
         Some(Command::Pair { host, user }) => ssh::pair(&host, user.as_deref(), ui),
+        Some(Command::Expose { name, url, port }) => {
+            hosted::expose(&name, url.as_deref(), port, ui)
+        }
+        Some(Command::Unexpose { name }) => hosted::unexpose(&name, ui),
+        Some(Command::Open { service }) => hosted::open(&service, ui),
         Some(Command::Serve) => discovery::serve(),
         Some(Command::Service {
             command: ServiceCommand::Install,

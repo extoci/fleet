@@ -4,7 +4,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
-    config, service, ssh,
+    config,
+    hosted::HostedService,
+    service, ssh,
     ui::{DeviceColor, Ui},
 };
 
@@ -20,6 +22,7 @@ struct Status {
     ssh_key_ready: bool,
     ssh_server_running: bool,
     discovery_service_running: bool,
+    hosted_services: Vec<HostedService>,
 }
 
 pub fn show(json: bool, ui: Ui) -> Result<()> {
@@ -36,6 +39,10 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
         ssh_key_path: key,
         ssh_server_running: ssh_server_running(),
         discovery_service_running: service::is_running(),
+        hosted_services: config
+            .as_ref()
+            .map(|config| config.services.clone())
+            .unwrap_or_default(),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -52,6 +59,15 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
     check(ui, status.ssh_server_running, "SSH server");
     check(ui, status.ssh_key_ready, "Dedicated SSH key");
     check(ui, status.discovery_service_running, "Discovery service");
+    if !status.hosted_services.is_empty() {
+        println!();
+        for service in &status.hosted_services {
+            ui.muted(format!(
+                "↳ {} · {}://127.0.0.1:{}{}",
+                service.name, service.scheme, service.target_port, service.path
+            ));
+        }
+    }
     Ok(())
 }
 

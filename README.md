@@ -31,6 +31,12 @@ fleet connect studio
 # A remote command with clean stdout
 fleet connect studio -- uname -a
 
+# Share T3 Code, even when it only listens on localhost
+fleet expose t3
+
+# Open a discovered service
+fleet open studio/t3
+
 # Inspect or repair local setup
 fleet status
 fleet init
@@ -64,10 +70,27 @@ fleet init [--name NAME] [--color COLOR] [--no-service]
 fleet discover|ls [--timeout SECONDS] [--json|--plain]
 fleet connect NAME [-- COMMAND...]
 fleet pair NAME
+fleet expose NAME [LOCAL_URL] [--port PUBLIC_PORT]
+fleet unexpose NAME
+fleet open [DEVICE/]SERVICE
 fleet status [--json]
 ```
 
 The older `fleet ssh ...` form remains available for compatibility but is hidden from the main help.
+
+## Hosted services
+
+`fleet ls` shows hosted web services directly beneath each device. Fleet proxies loopback-only services onto a Fleet-owned port, so applications do not need to bind to every network interface.
+
+T3 Code has a built-in preset using its documented local development server:
+
+```sh
+fleet expose t3                       # http://127.0.0.1:4001
+fleet expose docs http://localhost:8080
+fleet unexpose docs
+```
+
+The proxy supports HTTP, HTTPS, streaming responses, and WebSocket connections because it forwards TCP without modifying application traffic. Exposed services are reachable by other devices on the local network; only expose applications you are comfortable sharing with that network.
 
 ## How pairing works
 

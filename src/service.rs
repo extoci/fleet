@@ -138,6 +138,26 @@ pub fn is_running() -> bool {
     }
 }
 
+pub fn restart() -> Result<()> {
+    if !is_running() {
+        return install();
+    }
+    if cfg!(target_os = "macos") {
+        let target = format!("gui/{}/dev.fleet.discovery", unsafe { libc_getuid() });
+        checked(
+            Command::new("launchctl").args(["kickstart", "-k", &target]),
+            "restart Fleet",
+        )
+    } else if cfg!(target_os = "linux") {
+        checked(
+            Command::new("systemctl").args(["--user", "restart", "fleet.service"]),
+            "restart Fleet",
+        )
+    } else {
+        bail!("background service supports macOS and Linux")
+    }
+}
+
 fn checked(command: &mut Command, label: &str) -> Result<()> {
     let status = command.status().with_context(|| label.to_string())?;
     if !status.success() {

@@ -41,6 +41,7 @@ pub fn init(
             .map(|config| config.pair_port)
             .unwrap_or_else(config::default_pair_port),
         color,
+        services: previous.map(|config| config.services).unwrap_or_default(),
     };
     config::save(&config)?;
     ensure_ssh_server()?;
