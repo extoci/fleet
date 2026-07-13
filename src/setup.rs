@@ -1,5 +1,6 @@
 use std::{
     io::{self, IsTerminal, Write},
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -155,6 +156,7 @@ fn onboarding_wizard(
     } else {
         println!("  • Local discovery without a background service");
     }
+    println!("  • Optional Codex installation and sign-in");
 
     println!();
     Ok(confirm("Set up this device? [Y/n] ")?.then_some((name, color)))
@@ -217,8 +219,18 @@ fn offer_codex_login(ui: Ui) -> Result<()> {
     }
 
     println!();
-    if confirm("Sign in to Codex to use this device? [Y/n] ")? {
-        run_codex_login()
+    let codex = find_program("codex");
+    let prompt = if codex.is_some() {
+        "Sign in to Codex to use this device? [Y/n] "
+    } else {
+        "Install and sign in to Codex on this device? [Y/n] "
+    };
+    if confirm(prompt)? {
+        let codex = match codex {
+            Some(codex) => codex,
+            None => install_codex(ui)?,
+        };
+        run_codex_login(&codex)
     } else {
         ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
         Ok(())
@@ -233,14 +245,76 @@ fn confirmation(answer: &str) -> Option<bool> {
     }
 }
 
-fn run_codex_login() -> Result<()> {
-    match Command::new("codex").arg("login").status() {
+fn install_codex(ui: Ui) -> Result<PathBuf> {
+    ensure_curl()?;
+    ui.muted("Installing Codex CLI…");
+    let mut installer = Command::new("sh");
+    installer
+        .arg("-c")
+        .arg("curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh");
+    checked(installer, "install Codex CLI")?;
+
+    let executable = find_program("codex")
+        .or_else(|| {
+            config::home()
+                .ok()
+                .map(|home| home.join(".local/bin/codex"))
+        })
+        .or_else(|| {
+            config::home()
+                .ok()
+                .map(|home| home.join(".codex/packages/standalone/current/codex"))
+        })
+        .filter(|path| path.is_file())
+        .context("Codex was installed but its executable could not be found")?;
+    ui.success("Codex CLI installed");
+    Ok(executable)
+}
+
+fn ensure_curl() -> Result<()> {
+    if available("curl") {
+        return Ok(());
+    }
+
+    println!("curl is required for the Codex installer. Installing it…");
+    if cfg!(target_os = "linux") && available("apt-get") {
+        checked(elevated("apt-get", &["update"]), "update apt packages")?;
+        checked(
+            elevated("apt-get", &["install", "-y", "curl"]),
+            "install curl",
+        )?;
+    } else if cfg!(target_os = "linux") && available("dnf") {
+        checked(elevated("dnf", &["install", "-y", "curl"]), "install curl")?;
+    } else if cfg!(target_os = "linux") && available("pacman") {
+        checked(
+            elevated("pacman", &["-S", "--needed", "--noconfirm", "curl"]),
+            "install curl",
+        )?;
+    } else {
+        bail!("automatic Codex installation requires curl")
+    }
+
+    if !available("curl") {
+        bail!("curl is still unavailable after installation")
+    }
+    Ok(())
+}
+
+fn find_program(program: &str) -> Option<PathBuf> {
+    let output = Command::new("sh")
+        .args(["-c", "command -v \"$1\"", "fleet", program])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+}
+
+fn run_codex_login(executable: &Path) -> Result<()> {
+    match Command::new(executable).arg("login").status() {
         Ok(status) if status.success() => Ok(()),
         Ok(_) => bail!("`codex login` did not complete"),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!("Codex CLI is not installed. Install it, then run `codex login`.");
-            Ok(())
-        }
         Err(error) => Err(error).context("start `codex login`"),
     }
 }

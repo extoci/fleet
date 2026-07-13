@@ -17,7 +17,7 @@ Or use the small shell installer, which only verifies and installs the native Ru
 curl -fsSL https://raw.githubusercontent.com/extoci/fleet/main/fleet.sh | sh
 ```
 
-On first run, Fleet's interactive setup asks for the device name and color, previews the SSH and discovery changes, and waits for confirmation before changing the machine. It may then ask for `sudo` to enable the system SSH server and boot-time discovery. Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After setup, it offers to run `codex login`; press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup uses deterministic defaults without prompting.
+On first run, Fleet's interactive setup asks for the device name and color, previews the SSH and discovery changes, and waits for confirmation before changing the machine. It may then ask for `sudo` to enable the system SSH server and boot-time discovery. Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After setup, it offers to install the standalone Codex CLI using OpenAI's official installer and runs `codex login`; Node.js and npm are not required. Press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup uses deterministic defaults without prompting.
 
 ## Everyday use
 
