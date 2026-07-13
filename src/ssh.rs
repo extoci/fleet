@@ -61,15 +61,18 @@ pub fn print_public_key() -> Result<()> {
     Ok(())
 }
 
-pub fn pair(host: &str, user: Option<&str>, ui: Ui) -> Result<()> {
-    if user.is_none()
-        && let Some(peer) = discovery::resolve(host, Duration::from_secs(2))?
-    {
-        pair_fleet(&peer)?;
-        ui.success(format!("Paired with {}", peer.name));
-        ui.muted(format!("  Connect with: fleet connect {}", peer.name));
-        return Ok(());
-    }
+pub fn pair(host: &str, ui: Ui) -> Result<()> {
+    let peer = discovery::resolve(host, Duration::from_secs(2))?
+        .with_context(|| format!("Fleet device `{host}` was not found; run `fleet ls`"))?;
+    allow_peer(&peer)?;
+    ui.success(format!(
+        "{} can now connect to this device without a password",
+        peer.name
+    ));
+    Ok(())
+}
+
+pub fn copy_key(host: &str, user: Option<&str>, ui: Ui) -> Result<()> {
     let key = ensure_key()?.with_extension("pub");
     let target = target(host, user);
     let status = Command::new("ssh-copy-id")
@@ -86,47 +89,74 @@ pub fn pair(host: &str, user: Option<&str>, ui: Ui) -> Result<()> {
     Ok(())
 }
 
-fn pair_fleet(peer: &discovery::Peer) -> Result<()> {
-    let public_key = public_key()?;
+pub fn allow_peer(peer: &discovery::Peer) -> Result<()> {
+    let remote_key = fetch_public_key(peer)?;
+    authorize_key(&remote_key, &peer.name)
+}
+
+fn fetch_public_key(peer: &discovery::Peer) -> Result<String> {
     let address = peer
         .connection_address()
         .context("peer did not advertise an address")?;
     let socket = SocketAddr::new(address, peer.pair_port);
     let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(3))
-        .with_context(|| format!("connect to Fleet pairing service at {socket}"))?;
+        .with_context(|| format!("read {}'s Fleet identity at {socket}", peer.name))?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    writeln!(stream, "PAIR {public_key}")?;
+    writeln!(stream, "KEY")?;
     let mut response = String::new();
-    BufReader::new(stream).read_line(&mut response)?;
-    let remote_key = response
-        .strip_prefix("OK ")
-        .context("peer rejected the pairing request")?
-        .trim();
-    authorize_key(remote_key)?;
+    BufReader::new(stream)
+        .take(16 * 1024 + 1)
+        .read_line(&mut response)?;
+    if response.len() > 16 * 1024 {
+        bail!("Fleet public key response is too large")
+    }
+    parse_key_response(&response)
+}
+
+pub fn start_key_listener(port: u16) -> Result<()> {
+    let mut listeners = Vec::new();
+    let mut last_error = None;
+    for address in ["::", "0.0.0.0"] {
+        match TcpListener::bind((address, port)) {
+            Ok(listener) => listeners.push(listener),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse && !listeners.is_empty() => {}
+            Err(error) if !listeners.is_empty() => {
+                eprintln!("Fleet identity listener unavailable on {address}: {error}");
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if listeners.is_empty() {
+        let detail = last_error
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        bail!("could not serve the Fleet public key on port {port}{detail}")
+    }
+    for listener in listeners {
+        start_key_listener_thread(listener);
+    }
     Ok(())
 }
 
-pub fn start_pair_listener(port: u16) -> Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .with_context(|| format!("listen for Fleet pairing on port {port}"))?;
+fn start_key_listener_thread(listener: TcpListener) {
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     thread::spawn(|| {
-                        if let Err(error) = accept_pair(stream) {
-                            eprintln!("pairing request rejected: {error:#}");
+                        if let Err(error) = serve_public_key(stream) {
+                            eprintln!("Fleet identity request rejected: {error:#}");
                         }
                     });
                 }
-                Err(error) => eprintln!("pairing listener error: {error}"),
+                Err(error) => eprintln!("Fleet identity listener error: {error}"),
             }
         }
     });
-    Ok(())
 }
 
-fn accept_pair(mut stream: TcpStream) -> Result<()> {
+fn serve_public_key(mut stream: TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     let mut request = String::new();
@@ -134,15 +164,27 @@ fn accept_pair(mut stream: TcpStream) -> Result<()> {
         .take(16 * 1024 + 1)
         .read_line(&mut request)?;
     if request.len() > 16 * 1024 {
-        bail!("pairing request is too large")
+        bail!("Fleet identity request is too large")
     }
-    let key = request
-        .strip_prefix("PAIR ")
-        .context("unsupported pairing request")?
-        .trim();
-    authorize_key(key)?;
+    validate_identity_request(&request)?;
     writeln!(stream, "OK {}", public_key()?)?;
     Ok(())
+}
+
+fn validate_identity_request(request: &str) -> Result<()> {
+    if request.trim() != "KEY" {
+        bail!("unsupported Fleet identity request")
+    }
+    Ok(())
+}
+
+fn parse_key_response(response: &str) -> Result<String> {
+    let key = response
+        .strip_prefix("OK ")
+        .context("peer did not provide a Fleet public key")?
+        .trim();
+    validate_public_key(key)?;
+    Ok(key.to_string())
 }
 
 fn public_key() -> Result<String> {
@@ -150,7 +192,7 @@ fn public_key() -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_string())
 }
 
-fn authorize_key(key: &str) -> Result<()> {
+fn authorize_key(key: &str, device: &str) -> Result<()> {
     static AUTHORIZED_KEYS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = AUTHORIZED_KEYS_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -160,30 +202,43 @@ fn authorize_key(key: &str) -> Result<()> {
     let ssh_dir = config::home()?.join(".ssh");
     fs::create_dir_all(&ssh_dir)?;
     let path = ssh_dir.join("authorized_keys");
-    let old = fs::read_to_string(&path).unwrap_or_default();
-    let material = key.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
-    let already_present = old.lines().any(|line| {
-        line.split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ")
-            == material
-    });
-    if !already_present {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        if !old.is_empty() && !old.ends_with('\n') {
-            writeln!(file)?;
-        }
-        writeln!(file, "{material} fleet")?;
-    }
+    write_authorized_key(&path, key, device)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn write_authorized_key(path: &std::path::Path, key: &str, device: &str) -> Result<()> {
+    validate_public_key(key)?;
+    let old = fs::read_to_string(path).unwrap_or_default();
+    let material = key.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    let material_fields = material.split_whitespace().collect::<Vec<_>>();
+    let already_present = old.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|fields| fields == material_fields)
+    });
+    if !already_present {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        if !old.is_empty() && !old.ends_with('\n') {
+            writeln!(file)?;
+        }
+        let device = device
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            .take(63)
+            .collect::<String>();
+        writeln!(file, "{material} fleet:{device}")?;
     }
     Ok(())
 }
@@ -214,7 +269,6 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Resu
         None
     };
     let (destination, port) = if let Some(peer) = discovered {
-        pair_fleet(&peer).with_context(|| format!("automatically pair with {}", peer.name))?;
         if extra.is_empty() {
             ui.muted(format!(
                 "{}  Connecting to {}…",
@@ -250,7 +304,12 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Resu
     command.arg(destination).args(extra);
     let status = command.status().context("run ssh")?;
     if !status.success() {
-        bail!("SSH connection failed ({status}); run `fleet pair {host}` to repair access")
+        let local_name = config::load_optional()?
+            .map(|config| config.name)
+            .unwrap_or_else(|| "<this-device>".into());
+        bail!(
+            "SSH connection failed ({status}); check the password, or run `fleet pair {local_name}` on {lookup_host} to allow passwordless access"
+        )
     }
     Ok(())
 }
@@ -284,6 +343,46 @@ mod tests {
         assert!(validate_public_key("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus fleet").is_ok());
         assert!(validate_public_key("ssh-rsa AAAA fleet").is_err());
         assert!(validate_public_key("ssh-ed25519 not_base64! fleet").is_err());
+    }
+
+    #[test]
+    fn reads_public_key_responses_without_authorizing_requests() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus fleet";
+        assert_eq!(parse_key_response(&format!("OK {key}\n")).unwrap(), key);
+        assert!(parse_key_response("PAIR ssh-ed25519 AAAA\n").is_err());
+    }
+
+    #[test]
+    fn identity_endpoint_rejects_authorization_requests() {
+        assert!(validate_identity_request("KEY\n").is_ok());
+        assert!(validate_identity_request("PAIR ssh-ed25519 AAAA\n").is_err());
+        assert!(validate_identity_request("KEY extra\n").is_err());
+    }
+
+    #[test]
+    fn authorized_keys_preserves_existing_entries_and_deduplicates() {
+        let path = std::env::temp_dir().join(format!(
+            "fleet-authorized-keys-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_file(&path);
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus fleet";
+        fs::write(
+            &path,
+            "ssh-ed25519 AAAAexisting personal\nfrom=\"10.0.0.1\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus restricted\n",
+        )
+        .unwrap();
+        write_authorized_key(&path, key, "studio\nssh-ed25519 AAAAinjected").unwrap();
+        write_authorized_key(&path, key, "studio").unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("ssh-ed25519 AAAAexisting personal\n"));
+        assert_eq!(
+            contents.matches("AAAAC3NzaC1lZDI1NTE5AAAAIBogus").count(),
+            1
+        );
+        assert!(!contents.contains("AAAAinjected"));
+        let _ = fs::remove_file(path);
     }
 
     #[test]

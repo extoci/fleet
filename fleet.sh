@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-# Fleet's only shell component: download the native CLI and start setup.
+# Fleet's only shell component: download and verify the native CLI.
 REPOSITORY="${FLEET_GITHUB_REPOSITORY:-extoci/fleet}"
 VERSION="${FLEET_VERSION:-latest}"
 INSTALL_DIR="${FLEET_INSTALL_DIR:-$HOME/.local/bin}"
@@ -49,10 +49,11 @@ install -m 755 "$tmp/fleet" "$INSTALL_DIR/fleet"
 printf 'Installed %s\n' "$INSTALL_DIR/fleet"
 
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *) printf 'Add %s to PATH to use Fleet in future shells.\n' "$INSTALL_DIR" ;;
+  *":$INSTALL_DIR:"*)
+    printf 'Next, run: fleet init\n'
+    ;;
+  *)
+    printf 'Add %s to PATH to use Fleet in future shells.\n' "$INSTALL_DIR"
+    printf 'Then run: fleet init\n'
+    ;;
 esac
-
-if [ "${FLEET_NO_INIT:-0}" != 1 ]; then
-  "$INSTALL_DIR/fleet" init "$@"
-fi

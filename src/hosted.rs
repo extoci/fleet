@@ -12,6 +12,7 @@ use crate::{config, discovery, service, ui::Ui};
 
 const FIRST_PUBLIC_PORT: u16 = 41_000;
 const LAST_PUBLIC_PORT: u16 = 41_999;
+const T3_LOCAL_URL: &str = "http://127.0.0.1:3773";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostedService {
@@ -48,7 +49,7 @@ pub fn expose(name: &str, url: Option<&str>, public_port: Option<u16>, ui: Ui) -
             "t3" | "t3-code" | "t3code"
         ) =>
         {
-            "http://127.0.0.1:4001".into()
+            T3_LOCAL_URL.into()
         }
         None => bail!("a local URL is required; try `fleet expose {name} http://127.0.0.1:3000`"),
     };
@@ -367,6 +368,11 @@ mod tests {
         );
         assert_eq!(parse_url("https://localhost").unwrap().2, 443);
         assert!(parse_url("ftp://localhost:21").is_err());
+    }
+
+    #[test]
+    fn t3_preset_tracks_the_upstream_default_port() {
+        assert_eq!(T3_LOCAL_URL, "http://127.0.0.1:3773");
     }
 
     #[test]

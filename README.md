@@ -2,7 +2,7 @@
 
 Your machines, one command away.
 
-Fleet turns Macs and Linux boxes on the same network into an SSH-ready group. Devices announce themselves over mDNS, carry a recognizable color, and exchange dedicated SSH keys automatically when you connect. There is no registry and no password bootstrap between Fleet devices.
+Fleet turns Macs and Linux boxes on the same network into an SSH-ready group. Devices announce themselves over mDNS, carry a recognizable color, and let their owners choose which Fleet keys receive passwordless access. There is no registry, and devices that have not been allowed can use normal SSH password authentication.
 
 ## Install
 
@@ -15,9 +15,14 @@ Or use the small shell installer, which only verifies and installs the native Ru
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/extoci/fleet/main/fleet.sh | sh
+fleet init
 ```
 
-On first run, Fleet's interactive setup asks for the device name and color, previews the SSH and discovery changes, and waits for confirmation before changing the machine. It may then ask for `sudo` to enable the system SSH server and boot-time discovery. Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After setup, it offers to install the standalone Codex CLI using OpenAI's official installer and runs `codex login`; Node.js and npm are not required. Press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup uses deterministic defaults without prompting.
+The installer stops after placing the binary on your machine. Run `fleet init` when you're ready to configure it.
+
+During initialization, Fleet asks for the device name and color, then shows nearby Fleet devices and lets you choose which ones may SSH into this machine without a password. Devices you do not choose use the account's normal SSH authentication, typically a password when password login is enabled. Fleet previews the SSH and discovery changes and waits for confirmation before changing the machine. It may then ask for `sudo` to enable the system SSH server and boot-time discovery.
+
+Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After core setup is complete, it offers to install and sign in to the standalone Codex CLI, then offers to start T3 Code with `bunx t3@latest`. Each prompt says exactly what it will run; press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup chooses no passwordless peers and skips optional tools.
 
 ## Everyday use
 
@@ -25,7 +30,7 @@ On first run, Fleet's interactive setup asks for the device name and color, prev
 # Nearby devices
 fleet ls
 
-# A shell — pairing happens automatically
+# A shell — uses the Fleet key when allowed, otherwise asks for a password
 fleet connect studio
 
 # A remote command with clean stdout
@@ -69,7 +74,7 @@ Useful commands:
 fleet init [--name NAME] [--color COLOR] [--no-service]
 fleet discover|ls [--timeout SECONDS] [--json|--plain]
 fleet connect NAME [-- COMMAND...]
-fleet pair NAME
+fleet pair NAME                    # allow NAME to connect here passwordlessly
 fleet expose NAME [LOCAL_URL] [--port PUBLIC_PORT]
 fleet unexpose NAME
 fleet open [DEVICE/]SERVICE
@@ -85,18 +90,18 @@ The older `fleet ssh ...` form remains available for compatibility but is hidden
 T3 Code has a built-in preset using its documented local development server:
 
 ```sh
-fleet expose t3                       # http://127.0.0.1:4001
+fleet expose t3                       # http://127.0.0.1:3773
 fleet expose docs http://localhost:8080
 fleet unexpose docs
 ```
 
 The proxy supports HTTP, HTTPS, streaming responses, and WebSocket connections because it forwards TCP without modifying application traffic. Exposed services are reachable by other devices on the local network; only expose applications you are comfortable sharing with that network.
 
-## How pairing works
+## How access works
 
-Fleet advertises `_fleet._tcp.local` and its SSH username, port, version, and color. On `fleet connect NAME`, the client resolves the first routable address, exchanges dedicated Ed25519 public keys with the peer, and opens SSH with `IdentitiesOnly=yes`. This works with passwordless accounts such as a fresh Multipass `ubuntu` user because it does not depend on `ssh-copy-id` or a pre-existing password.
+Fleet advertises `_fleet._tcp.local` and its SSH username, port, version, and color. Each device also serves its dedicated Ed25519 public key through a read-only Fleet identity endpoint. During `fleet init`, you choose which discovered devices' keys are added to this machine's `authorized_keys`. You can allow another device later by running `fleet pair NAME` on the machine receiving the connection.
 
-Pairing grants the requesting local-network peer SSH access. Run Fleet only on a network you trust. A non-Fleet hostname falls back to the system’s `ssh-copy-id` flow when `fleet pair` is used explicitly.
+`fleet connect NAME` never changes access on either machine. It uses the dedicated Fleet key first and falls back to the account's normal SSH authentication when that key has not been allowed. Fleet names and public keys are discovered on the local network, so confirm the device name and address before granting passwordless access.
 
 ## Development
 

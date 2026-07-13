@@ -69,6 +69,15 @@ pub fn save(config: &Config) -> Result<()> {
     fs::rename(temporary, destination).context("commit Fleet configuration")
 }
 
+pub fn remove() -> Result<()> {
+    let path = path()?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("remove Fleet configuration at {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub fn default_user() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))

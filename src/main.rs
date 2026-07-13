@@ -69,15 +69,14 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Trust a device without a password
+    /// Allow a Fleet device to connect here without a password
     Pair {
+        /// Fleet device that will be allowed to connect to this machine
         host: String,
-        #[arg(short, long)]
-        user: Option<String>,
     },
     /// Share a local web service with the fleet
     Expose {
-        /// Service name; `t3` defaults to http://127.0.0.1:4001
+        /// Service name; `t3` defaults to http://127.0.0.1:3773
         name: String,
         /// Local service URL
         url: Option<String>,
@@ -168,7 +167,7 @@ fn run() -> Result<()> {
         Some(Command::Connect { host, user, args }) => {
             ssh::connect(&host, user.as_deref(), &args, ui)
         }
-        Some(Command::Pair { host, user }) => ssh::pair(&host, user.as_deref(), ui),
+        Some(Command::Pair { host }) => ssh::pair(&host, ui),
         Some(Command::Expose { name, url, port }) => {
             hosted::expose(&name, url.as_deref(), port, ui)
         }
@@ -189,7 +188,7 @@ fn run() -> Result<()> {
         }) => ssh::print_public_key(),
         Some(Command::Ssh {
             command: SshCommand::Pair { host, user },
-        }) => ssh::pair(&host, user.as_deref(), ui),
+        }) => ssh::copy_key(&host, user.as_deref(), ui),
         Some(Command::Ssh {
             command: SshCommand::Connect { host, user, args },
         }) => ssh::connect(&host, user.as_deref(), &args, ui),

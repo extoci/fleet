@@ -77,7 +77,7 @@ pub fn serve() -> Result<()> {
         .register(service)
         .context("register mDNS announcement")?;
     hosted::start_proxies(&config.services)?;
-    ssh::start_pair_listener(config.pair_port)?;
+    ssh::start_key_listener(config.pair_port)?;
     println!(
         "Advertising {} as ssh {}@{}:{}",
         config.name,

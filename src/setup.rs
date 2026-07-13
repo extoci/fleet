@@ -2,15 +2,23 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 
 use crate::{
     config::{self, Config},
+    discovery::{self, Peer},
     service, ssh,
     ui::{DeviceColor, Ui},
 };
+
+struct OnboardingChoices {
+    name: String,
+    color: DeviceColor,
+    allowed_peers: Vec<Peer>,
+}
 
 pub fn init(
     name: Option<String>,
@@ -28,13 +36,22 @@ pub fn init(
         .into_owned();
     let suggested_name = name
         .or_else(|| previous.as_ref().map(|config| config.name.clone()))
-        .unwrap_or_else(|| hostname.trim_end_matches(".local").to_lowercase());
-    config::validate_name(&suggested_name)?;
+        .unwrap_or_else(|| {
+            hostname
+                .trim_end_matches(".local")
+                .split('.')
+                .next()
+                .unwrap_or("fleet-device")
+                .to_lowercase()
+        });
+    if !prompt_for_name || !first_run || !io::stdin().is_terminal() {
+        config::validate_name(&suggested_name)?;
+    }
     let suggested_color = color
         .or_else(|| previous.as_ref().map(|config| config.color))
         .unwrap_or_else(|| DeviceColor::from_name(&suggested_name));
 
-    let (name, color) = if first_run && io::stdin().is_terminal() {
+    let choices = if first_run && io::stdin().is_terminal() {
         let Some(choices) = onboarding_wizard(
             suggested_name,
             suggested_color,
@@ -49,9 +66,19 @@ pub fn init(
         };
         choices
     } else {
-        (suggested_name, suggested_color)
+        OnboardingChoices {
+            name: suggested_name,
+            color: suggested_color,
+            allowed_peers: Vec::new(),
+        }
     };
+    let OnboardingChoices {
+        name,
+        color,
+        allowed_peers,
+    } = choices;
 
+    let previous_config = previous.clone();
     let config = Config {
         name: name.clone(),
         user: previous
@@ -67,18 +94,58 @@ pub fn init(
             .map(|config| config.pair_port)
             .unwrap_or_else(config::default_pair_port),
         color,
-        services: previous.map(|config| config.services).unwrap_or_default(),
+        services: previous
+            .as_ref()
+            .map(|config| config.services.clone())
+            .unwrap_or_default(),
     };
+    let discovery_service_was_running = service::is_running();
     config::save(&config)?;
-    ensure_ssh_server()?;
-    ssh::ensure_key()?;
-    if install_service {
-        service::install()?;
+    let mut service_install_attempted = false;
+    let core_setup = (|| -> Result<()> {
+        ensure_ssh_server()?;
+        ssh::ensure_key()?;
+        if install_service {
+            service_install_attempted = true;
+            service::install()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = core_setup {
+        match previous_config {
+            Some(previous) => config::save(&previous).context("restore previous Fleet settings")?,
+            None => config::remove().context("remove incomplete Fleet settings")?,
+        }
+        if service_install_attempted {
+            if discovery_service_was_running {
+                let _ = service::restart();
+            } else {
+                let _ = service::uninstall();
+            }
+        }
+        return Err(error);
+    }
+    for peer in allowed_peers {
+        match ssh::allow_peer(&peer) {
+            Ok(()) => ui.success(format!(
+                "{} may connect without a password",
+                peer.name
+            )),
+            Err(error) => ui.muted(format!(
+                "Could not allow {} without a password: {error:#}\n  It can still try the {} account's normal SSH authentication.",
+                peer.name, config.user
+            )),
+        }
     }
     println!();
     ui.ready(color, &name);
     ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
-    offer_codex_login(ui)?;
+    if let Err(error) = offer_codex_login(ui) {
+        ui.muted(format!("Codex setup did not finish: {error:#}"));
+    }
+    if let Err(error) = offer_t3_code(ui) {
+        ui.muted(format!("T3 Code did not start: {error:#}"));
+    }
     Ok(())
 }
 
@@ -89,7 +156,7 @@ fn onboarding_wizard(
     prompt_for_color: bool,
     install_service: bool,
     ui: Ui,
-) -> Result<Option<(String, DeviceColor)>> {
+) -> Result<Option<OnboardingChoices>> {
     println!();
     println!("{}  Fleet setup", ui.diamond(suggested_color));
     ui.muted("   One identity for SSH, services, and agents.");
@@ -147,19 +214,126 @@ fn onboarding_wizard(
         default_color
     };
 
+    let peers = discover_for_onboarding(ui);
+    let Some(allowed_peers) = choose_allowed_peers(&peers, ui)? else {
+        return Ok(None);
+    };
+
     println!();
     println!("Fleet will configure");
     println!("  • SSH access with a dedicated Fleet key");
+    if allowed_peers.is_empty() {
+        println!("  • Other Fleet devices use normal SSH authentication");
+    } else {
+        println!(
+            "  • Passwordless access from {}",
+            allowed_peers
+                .iter()
+                .map(|peer| peer.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if install_service {
         println!("  • Local discovery as {name}.local");
         println!("  • A background service that starts automatically");
     } else {
-        println!("  • Local discovery without a background service");
+        println!("  • No background discovery; this device will not appear automatically");
     }
     println!("  • Optional Codex installation and sign-in");
+    println!("  • Optional T3 Code launch with `bunx t3@latest`");
 
     println!();
-    Ok(confirm("Set up this device? [Y/n] ")?.then_some((name, color)))
+    Ok(
+        confirm("Set up this device? [Y/n] ")?.then_some(OnboardingChoices {
+            name,
+            color,
+            allowed_peers,
+        }),
+    )
+}
+
+fn discover_for_onboarding(ui: Ui) -> Vec<Peer> {
+    println!();
+    println!("Passwordless SSH access");
+    ui.muted("  Looking for Fleet devices already on this network…");
+    match discovery::discover(Duration::from_secs(2)) {
+        Ok(peers) => peers,
+        Err(error) => {
+            ui.muted(format!(
+                "  Discovery was unavailable: {error:#}\n  Other devices can still use this account's normal SSH authentication."
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn choose_allowed_peers(peers: &[Peer], ui: Ui) -> Result<Option<Vec<Peer>>> {
+    if peers.is_empty() {
+        ui.muted(
+            "  No other Fleet devices found. They can connect later using normal SSH authentication.",
+        );
+        return Ok(Some(Vec::new()));
+    }
+
+    println!("  Choose which devices may connect to this machine without a password.");
+    for (index, peer) in peers.iter().enumerate() {
+        let target = peer
+            .connection_address()
+            .map(|address| format!("{}@{address}", peer.user))
+            .unwrap_or_else(|| format!("{}@{}", peer.user, peer.hostname));
+        println!(
+            "  {}  {}  {:<18} {}",
+            index + 1,
+            ui.diamond(peer.color),
+            peer.name,
+            target
+        );
+    }
+    ui.muted("  Enter numbers separated by commas, `all`, or `none`.");
+    loop {
+        let Some(answer) = prompt_with_default("  Devices", "none")? else {
+            return Ok(None);
+        };
+        match parse_peer_selection(&answer, peers.len()) {
+            Ok(indexes) => {
+                return Ok(Some(
+                    indexes
+                        .into_iter()
+                        .map(|index| peers[index].clone())
+                        .collect(),
+                ));
+            }
+            Err(error) => println!("  {error}"),
+        }
+    }
+}
+
+fn parse_peer_selection(value: &str, count: usize) -> Result<Vec<usize>> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "none" || value.is_empty() {
+        return Ok(Vec::new());
+    }
+    if value == "all" {
+        return Ok((0..count).collect());
+    }
+    let mut indexes = Vec::new();
+    for field in value.split([',', ' ']).filter(|field| !field.is_empty()) {
+        let number = field
+            .parse::<usize>()
+            .with_context(|| format!("`{field}` is not a device number"))?;
+        let index = number
+            .checked_sub(1)
+            .filter(|index| *index < count)
+            .with_context(|| format!("choose device numbers from 1–{count}"))?;
+        if !indexes.contains(&index) {
+            indexes.push(index);
+        }
+    }
+    if indexes.is_empty() {
+        bail!("choose device numbers, `all`, or `none`");
+    }
+    Ok(indexes)
 }
 
 fn prompt_with_default(label: &str, default: &str) -> Result<Option<String>> {
@@ -235,6 +409,34 @@ fn offer_codex_login(ui: Ui) -> Result<()> {
         ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
         Ok(())
     }
+}
+
+fn offer_t3_code(ui: Ui) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    println!();
+    ui.muted("T3 Code is a local web interface for Codex and other coding agents.");
+    ui.muted(
+        "It downloads the latest package, opens a browser, uses the current directory as a project, and keeps running in this terminal.",
+    );
+    if !confirm("Start T3 Code now with `bunx t3@latest`? [Y/n] ")? {
+        ui.muted("Skipped T3 Code. Start it whenever you're ready with `bunx t3@latest`.");
+        return Ok(());
+    }
+    let bunx = find_program("bunx").context(
+        "`bunx` is required; install Bun from https://bun.sh, or use T3 Code's official `npx t3@latest` command",
+    )?;
+    ui.muted("Starting T3 Code. It will keep running here; press Ctrl-C to stop it.");
+    let status = Command::new(bunx)
+        .args(["t3@latest"])
+        .status()
+        .context("run `bunx t3@latest`")?;
+    if !status.success() {
+        bail!("`bunx t3@latest` exited with {status}")
+    }
+    Ok(())
 }
 
 fn confirmation(answer: &str) -> Option<bool> {
@@ -409,7 +611,7 @@ fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmation, parse_color};
+    use super::{confirmation, parse_color, parse_peer_selection};
     use crate::ui::DeviceColor;
 
     #[test]
@@ -429,5 +631,17 @@ mod tests {
         assert_eq!(parse_color("  VIOLET "), Some(DeviceColor::Violet));
         assert_eq!(parse_color("7"), None);
         assert_eq!(parse_color("orange"), None);
+    }
+
+    #[test]
+    fn peer_choices_accept_none_all_and_unique_numbers() {
+        assert_eq!(
+            parse_peer_selection("none", 3).unwrap(),
+            Vec::<usize>::new()
+        );
+        assert_eq!(parse_peer_selection("all", 3).unwrap(), vec![0, 1, 2]);
+        assert_eq!(parse_peer_selection("3, 1, 3", 3).unwrap(), vec![2, 0]);
+        assert!(parse_peer_selection("4", 3).is_err());
+        assert!(parse_peer_selection("studio", 3).is_err());
     }
 }
