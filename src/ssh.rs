@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::{config, discovery};
+use crate::{config, discovery, ui::Ui};
 
 pub fn private_key() -> Result<PathBuf> {
     Ok(config::home()?.join(".ssh/id_ed25519_fleet"))
@@ -19,7 +19,6 @@ pub fn private_key() -> Result<PathBuf> {
 pub fn ensure_key() -> Result<PathBuf> {
     let key = private_key()?;
     if key.exists() {
-        println!("Fleet SSH key already exists: {}", key.display());
         return Ok(key);
     }
     let parent = key.parent().context("invalid SSH key path")?;
@@ -32,14 +31,24 @@ pub fn ensure_key() -> Result<PathBuf> {
     let status = Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-f"])
         .arg(&key)
-        .args(["-N", "", "-C", "fleet"])
+        .args(["-N", "", "-C", "fleet", "-q"])
         .status()
         .context("run ssh-keygen")?;
     if !status.success() {
         bail!("ssh-keygen failed")
     }
-    println!("Created Fleet SSH key: {}", key.display());
     Ok(key)
+}
+
+pub fn keygen(ui: Ui) -> Result<()> {
+    let existed = private_key()?.exists();
+    let key = ensure_key()?;
+    if existed {
+        ui.muted(format!("Fleet key already exists · {}", key.display()));
+    } else {
+        ui.success(format!("Created Fleet key · {}", key.display()));
+    }
+    Ok(())
 }
 
 pub fn print_public_key() -> Result<()> {
@@ -51,11 +60,14 @@ pub fn print_public_key() -> Result<()> {
     Ok(())
 }
 
-pub fn pair(host: &str, user: Option<&str>) -> Result<()> {
-    if user.is_none() {
-        if let Some(peer) = discovery::resolve(host, Duration::from_secs(3))? {
-            return pair_fleet(&peer);
-        }
+pub fn pair(host: &str, user: Option<&str>, ui: Ui) -> Result<()> {
+    if user.is_none()
+        && let Some(peer) = discovery::resolve(host, Duration::from_secs(2))?
+    {
+        pair_fleet(&peer)?;
+        ui.success(format!("Paired with {}", peer.name));
+        ui.muted(format!("  Connect with: fleet connect {}", peer.name));
+        return Ok(());
     }
     let key = ensure_key()?.with_extension("pub");
     let target = target(host, user);
@@ -68,7 +80,8 @@ pub fn pair(host: &str, user: Option<&str>) -> Result<()> {
     if !status.success() {
         bail!("could not authorize Fleet's key on {target}")
     }
-    println!("Paired with {target}. Connect with `fleet ssh connect {host}`.");
+    ui.success(format!("Paired with {target}"));
+    ui.muted(format!("  Connect with: fleet connect {host}"));
     Ok(())
 }
 
@@ -78,7 +91,7 @@ fn pair_fleet(peer: &discovery::Peer) -> Result<()> {
         .addresses
         .iter()
         .find(|address| matches!(address, IpAddr::V4(_)))
-        .or_else(|| peer.addresses.iter().next())
+        .or_else(|| peer.addresses.first())
         .context("peer did not advertise an address")?;
     let socket = SocketAddr::new(*address, peer.pair_port);
     let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(3))
@@ -92,10 +105,6 @@ fn pair_fleet(peer: &discovery::Peer) -> Result<()> {
         .context("peer rejected the pairing request")?
         .trim();
     authorize_key(remote_key)?;
-    println!(
-        "Paired with {}. Connect with `fleet ssh connect {}`.",
-        peer.name, peer.name
-    );
     Ok(())
 }
 
@@ -187,7 +196,7 @@ fn validate_public_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn connect(host: &str, user: Option<&str>, extra: &[String]) -> Result<()> {
+pub fn connect(host: &str, user: Option<&str>, extra: &[String], ui: Ui) -> Result<()> {
     let key = ensure_key()?;
     let discovered = if !host.contains('.') && !host.contains('@') {
         discovery::resolve(host, Duration::from_secs(2))?
@@ -195,11 +204,19 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String]) -> Result<()> {
         None
     };
     let (destination, port) = if let Some(peer) = discovered {
+        pair_fleet(&peer).with_context(|| format!("automatically pair with {}", peer.name))?;
+        if extra.is_empty() {
+            ui.muted(format!(
+                "{}  Connecting to {}…",
+                ui.diamond(peer.color),
+                peer.name
+            ));
+        }
         let address = peer
             .addresses
             .iter()
             .find(|address| matches!(address, IpAddr::V4(_)))
-            .or_else(|| peer.addresses.iter().next())
+            .or_else(|| peer.addresses.first())
             .context("peer did not advertise an address")?;
         (
             format!("{}@{address}", user.unwrap_or(&peer.user)),
@@ -226,7 +243,7 @@ pub fn connect(host: &str, user: Option<&str>, extra: &[String]) -> Result<()> {
     command.arg(destination).args(extra);
     let status = command.status().context("run ssh")?;
     if !status.success() {
-        bail!("ssh exited with {status}")
+        bail!("SSH connection failed ({status}); run `fleet pair {host}` to repair access")
     }
     Ok(())
 }

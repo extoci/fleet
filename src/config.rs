@@ -3,6 +3,8 @@ use std::{env, fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::ui::DeviceColor;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub name: String,
@@ -10,6 +12,8 @@ pub struct Config {
     pub ssh_port: u16,
     #[serde(default = "default_pair_port")]
     pub pair_port: u16,
+    #[serde(default)]
+    pub color: DeviceColor,
 }
 
 pub fn default_pair_port() -> u16 {

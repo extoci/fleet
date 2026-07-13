@@ -7,12 +7,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use serde::Serialize;
 
-use crate::{config, ssh};
+use crate::{
+    config, ssh,
+    ui::{DeviceColor, Ui},
+};
 
 const SERVICE_TYPE: &str = "_fleet._tcp.local.";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Peer {
     pub name: String,
     pub hostname: String,
@@ -20,6 +24,8 @@ pub struct Peer {
     pub port: u16,
     pub pair_port: u16,
     pub addresses: Vec<IpAddr>,
+    pub color: DeviceColor,
+    pub version: String,
 }
 
 pub fn serve() -> Result<()> {
@@ -27,9 +33,11 @@ pub fn serve() -> Result<()> {
     let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
     let hostname = format!("{}.local.", config.name);
     let ssh_port = config.ssh_port.to_string();
+    let color = config.color.label();
     let properties = [
         ("user", config.user.as_str()),
         ("ssh_port", ssh_port.as_str()),
+        ("color", color),
         ("version", env!("CARGO_PKG_VERSION")),
     ];
     let service = ServiceInfo::new(
@@ -68,29 +76,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<Peer>> {
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let user = info
-                    .get_property_val_str("user")
-                    .unwrap_or("user")
-                    .to_string();
-                peers.insert(
-                    info.get_fullname().to_string(),
-                    Peer {
-                        name: info
-                            .get_fullname()
-                            .split('.')
-                            .next()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        hostname: info.get_hostname().trim_end_matches('.').to_string(),
-                        user,
-                        port: info
-                            .get_property_val_str("ssh_port")
-                            .and_then(|value| value.parse().ok())
-                            .unwrap_or(22),
-                        pair_port: info.get_port(),
-                        addresses: info.get_addresses().iter().copied().collect(),
-                    },
-                );
+                peers.insert(info.get_fullname().to_string(), peer_from_info(&info));
             }
             Ok(_) => {}
             Err(_) => break,
@@ -107,15 +93,40 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
         .split('.')
         .next()
         .unwrap_or(name);
-    Ok(discover(timeout)?.into_iter().find(|peer| {
-        peer.name.eq_ignore_ascii_case(wanted) || peer.hostname.eq_ignore_ascii_case(name)
-    }))
+    let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
+        .context("browse for Fleet peers")?;
+    let deadline = Instant::now() + timeout;
+    let mut found = None;
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        match receiver.recv_timeout(remaining) {
+            Ok(ServiceEvent::ServiceResolved(info)) => {
+                let peer = peer_from_info(&info);
+                if peer.name.eq_ignore_ascii_case(wanted)
+                    || peer.hostname.eq_ignore_ascii_case(name)
+                {
+                    found = Some(peer);
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = daemon.stop_browse(SERVICE_TYPE);
+    let _ = daemon.shutdown();
+    Ok(found)
 }
 
-pub fn print(peers: &[Peer], plain: bool) {
+pub fn print(peers: &[Peer], plain: bool, json: bool, ui: Ui) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(peers)?);
+        return Ok(());
+    }
     if peers.is_empty() {
-        println!("No Fleet machines found.");
-        return;
+        ui.muted("No Fleet devices found on this network.");
+        return Ok(());
     }
     if plain {
         for peer in peers {
@@ -128,18 +139,30 @@ pub fn print(peers: &[Peer], plain: bool) {
                 addresses(peer)
             );
         }
-        return;
+        return Ok(());
     }
-    println!("{:<20} {:<28} {:<16} ADDRESS", "NAME", "HOST", "SSH USER");
+    println!("{}  Fleet\n", ui.diamond(DeviceColor::Emerald));
     for peer in peers {
+        let ssh_target = format!("{}@{}", peer.user, preferred_address(peer));
         println!(
-            "{:<20} {:<28} {:<16} {}",
+            "  {}  {:<18} {:<30} v{}",
+            ui.diamond(peer.color),
             peer.name,
-            peer.hostname,
-            peer.user,
-            addresses(peer)
+            ssh_target,
+            peer.version
         );
     }
+    println!();
+    ui.muted(format!(
+        "  {} {} found · fleet connect <name>",
+        peers.len(),
+        if peers.len() == 1 {
+            "device"
+        } else {
+            "devices"
+        }
+    ));
+    Ok(())
 }
 
 fn addresses(peer: &Peer) -> String {
@@ -148,4 +171,51 @@ fn addresses(peer: &Peer) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn preferred_address(peer: &Peer) -> String {
+    peer.addresses
+        .iter()
+        .find(|address| matches!(address, IpAddr::V4(_)))
+        .or_else(|| peer.addresses.iter().find(|address| !address.is_loopback()))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| peer.hostname.clone())
+}
+
+fn parse_color(value: Option<&str>) -> DeviceColor {
+    match value {
+        Some("cyan") => DeviceColor::Cyan,
+        Some("blue") => DeviceColor::Blue,
+        Some("violet") => DeviceColor::Violet,
+        Some("amber") => DeviceColor::Amber,
+        Some("rose") => DeviceColor::Rose,
+        _ => DeviceColor::Emerald,
+    }
+}
+
+fn peer_from_info(info: &ServiceInfo) -> Peer {
+    Peer {
+        name: info
+            .get_fullname()
+            .split('.')
+            .next()
+            .unwrap_or("unknown")
+            .to_string(),
+        hostname: info.get_hostname().trim_end_matches('.').to_string(),
+        user: info
+            .get_property_val_str("user")
+            .unwrap_or("user")
+            .to_string(),
+        port: info
+            .get_property_val_str("ssh_port")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(22),
+        pair_port: info.get_port(),
+        addresses: info.get_addresses().iter().copied().collect(),
+        color: parse_color(info.get_property_val_str("color")),
+        version: info
+            .get_property_val_str("version")
+            .unwrap_or("unknown")
+            .to_string(),
+    }
 }

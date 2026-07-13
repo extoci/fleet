@@ -3,15 +3,20 @@ mod discovery;
 mod service;
 mod setup;
 mod ssh;
+mod ui;
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use ui::{DeviceColor, Ui};
 
 #[derive(Parser)]
 #[command(name = "fleet", version, about = "Manage the computers in your fleet")]
 struct Cli {
+    /// Disable ANSI color (also honors NO_COLOR)
+    #[arg(long, global = true)]
+    no_color: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -23,6 +28,9 @@ enum Command {
         /// Fleet name for this machine (defaults to its hostname)
         #[arg(long)]
         name: Option<String>,
+        /// Device accent advertised to the fleet
+        #[arg(long, value_enum)]
+        color: Option<DeviceColor>,
         /// Do not install the background discovery service
         #[arg(long)]
         no_service: bool,
@@ -35,6 +43,23 @@ enum Command {
         /// Print machine-readable tab-separated output
         #[arg(long)]
         plain: bool,
+        /// Print stable JSON for scripts and agents
+        #[arg(long, conflicts_with = "plain")]
+        json: bool,
+    },
+    /// Connect to a device by Fleet name
+    Connect {
+        host: String,
+        #[arg(short, long)]
+        user: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Exchange dedicated SSH keys with a device
+    Pair {
+        host: String,
+        #[arg(short, long)]
+        user: Option<String>,
     },
     /// Advertise this machine (normally run by the background service)
     Serve,
@@ -89,13 +114,26 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let ui = Ui::new(cli.no_color);
     match cli.command {
-        Some(Command::Init { name, no_service }) => setup::init(name, !no_service),
-        Some(Command::Discover { timeout, plain }) => {
+        Some(Command::Init {
+            name,
+            color,
+            no_service,
+        }) => setup::init(name, color, !no_service, ui),
+        Some(Command::Discover {
+            timeout,
+            plain,
+            json,
+        }) => {
             let peers = discovery::discover(Duration::from_secs(timeout))?;
-            discovery::print(&peers, plain);
+            discovery::print(&peers, plain, json, ui)?;
             Ok(())
         }
+        Some(Command::Connect { host, user, args }) => {
+            ssh::connect(&host, user.as_deref(), &args, ui)
+        }
+        Some(Command::Pair { host, user }) => ssh::pair(&host, user.as_deref(), ui),
         Some(Command::Serve) => discovery::serve(),
         Some(Command::Service {
             command: ServiceCommand::Install,
@@ -105,22 +143,21 @@ fn run() -> Result<()> {
         }) => service::uninstall(),
         Some(Command::Ssh {
             command: SshCommand::Keygen,
-        }) => {
-            ssh::ensure_key()?;
-            Ok(())
-        }
+        }) => ssh::keygen(ui),
         Some(Command::Ssh {
             command: SshCommand::PublicKey,
         }) => ssh::print_public_key(),
         Some(Command::Ssh {
             command: SshCommand::Pair { host, user },
-        }) => ssh::pair(&host, user.as_deref()),
+        }) => ssh::pair(&host, user.as_deref(), ui),
         Some(Command::Ssh {
             command: SshCommand::Connect { host, user, args },
-        }) => ssh::connect(&host, user.as_deref(), &args),
+        }) => ssh::connect(&host, user.as_deref(), &args, ui),
         None => {
-            Cli::parse_from(["fleet", "--help"]);
-            bail!("choose a command; try `fleet --help`");
+            use clap::CommandFactory;
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
         }
     }
 }

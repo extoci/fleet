@@ -5,20 +5,28 @@ use anyhow::{Context, Result, bail};
 use crate::{
     config::{self, Config},
     service, ssh,
+    ui::{DeviceColor, Ui},
 };
 
-pub fn init(name: Option<String>, install_service: bool) -> Result<()> {
+pub fn init(
+    name: Option<String>,
+    color: Option<DeviceColor>,
+    install_service: bool,
+    ui: Ui,
+) -> Result<()> {
     let hostname = hostname::get()
         .context("read hostname")?
         .to_string_lossy()
         .into_owned();
     let name = name.unwrap_or_else(|| hostname.trim_end_matches(".local").to_lowercase());
     config::validate_name(&name)?;
+    let color = color.unwrap_or_else(|| DeviceColor::from_name(&name));
     let config = Config {
         name: name.clone(),
         user: config::default_user(),
         ssh_port: 22,
         pair_port: config::default_pair_port(),
+        color,
     };
     config::save(&config)?;
     ensure_ssh_server()?;
@@ -26,9 +34,9 @@ pub fn init(name: Option<String>, install_service: bool) -> Result<()> {
     if install_service {
         service::install()?;
     }
-    println!("\n◆ {name} is ready.");
-    println!("  Find it from another machine: fleet discover");
-    println!("  Exchange access:              fleet ssh pair {name}");
+    println!();
+    ui.success(format!("{} {name} is ready", ui.diamond(color)));
+    ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
     Ok(())
 }
 
