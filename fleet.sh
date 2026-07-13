@@ -2,7 +2,7 @@
 set -eu
 
 # Fleet's only shell component: download the native CLI and start setup.
-REPOSITORY="${FLEET_GITHUB_REPOSITORY:-exotic/fleet}"
+REPOSITORY="${FLEET_GITHUB_REPOSITORY:-extoci/fleet}"
 VERSION="${FLEET_VERSION:-latest}"
 INSTALL_DIR="${FLEET_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -25,16 +25,25 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 if [ -n "${FLEET_RELEASE_BASE:-}" ]; then
-  url="$FLEET_RELEASE_BASE/fleet-$target.tar.gz"
+  base="$FLEET_RELEASE_BASE"
 elif [ "$VERSION" = latest ]; then
-  url="https://github.com/$REPOSITORY/releases/latest/download/fleet-$target.tar.gz"
+  base="https://github.com/$REPOSITORY/releases/latest/download"
 else
-  url="https://github.com/$REPOSITORY/releases/download/$VERSION/fleet-$target.tar.gz"
+  base="https://github.com/$REPOSITORY/releases/download/$VERSION"
 fi
 
 printf 'Installing Fleet for %s…\n' "$target"
-curl -fL --retry 3 "$url" -o "$tmp/fleet.tar.gz"
-tar -xzf "$tmp/fleet.tar.gz" -C "$tmp"
+archive="fleet-$target.tar.gz"
+curl -fsSL --retry 3 "$base/$archive" -o "$tmp/$archive"
+curl -fsSL --retry 3 "$base/$archive.sha256" -o "$tmp/$archive.sha256"
+if has sha256sum; then
+  (cd "$tmp" && sha256sum -c "$archive.sha256") >/dev/null
+elif has shasum; then
+  (cd "$tmp" && shasum -a 256 -c "$archive.sha256") >/dev/null
+else
+  fail "sha256sum or shasum is required to verify the download"
+fi
+tar -xzf "$tmp/$archive" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
 install -m 755 "$tmp/fleet" "$INSTALL_DIR/fleet"
 printf 'Installed %s\n' "$INSTALL_DIR/fleet"

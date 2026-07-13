@@ -1,5 +1,7 @@
 import { chmod, copyFile, mkdir, rename, rm } from "node:fs/promises";
-import { createWriteStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { get } from "node:https";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +32,7 @@ if (process.env.FLEET_BINARY) {
 }
 if (!target) throw new Error(`Fleet does not publish a binary for ${process.platform}-${process.arch}`);
 
-const repository = process.env.FLEET_GITHUB_REPOSITORY || "exotic/fleet";
+const repository = process.env.FLEET_GITHUB_REPOSITORY || "extoci/fleet";
 const version = process.env.npm_package_version;
 const base = process.env.FLEET_RELEASE_BASE || `https://github.com/${repository}/releases/download/v${version}`;
 const archive = join(root, "npm", `fleet-${target}.tar.gz`);
@@ -38,6 +40,15 @@ const temporary = `${archive}.download`;
 
 await download(`${base}/fleet-${target}.tar.gz`, temporary);
 await rename(temporary, archive);
+const checksum = `${archive}.sha256`;
+await download(`${base}/fleet-${target}.tar.gz.sha256`, checksum);
+const expected = (await readFile(checksum, "utf8")).trim().split(/\s+/)[0];
+const actual = await digest(archive);
+await rm(checksum, { force: true });
+if (actual !== expected) {
+  await rm(archive, { force: true });
+  throw new Error("Fleet binary checksum mismatch");
+}
 const unpack = spawnSync("tar", ["-xzf", archive, "-C", dirname(output)], { stdio: "inherit" });
 await rm(archive, { force: true });
 if (unpack.status !== 0 || !existsSync(output)) throw new Error("could not unpack the Fleet binary");
@@ -57,4 +68,10 @@ function download(url, destination, redirects = 0) {
       }
     }).on("error", reject);
   });
+}
+
+async function digest(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }

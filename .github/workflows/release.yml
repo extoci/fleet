@@ -7,7 +7,21 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: node npm/install.mjs --check
+      - run: sh -n fleet.sh
+
   binary:
+    needs: verify
     strategy:
       matrix:
         include:
@@ -27,9 +41,12 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - run: tar -C target/${{ matrix.target }}/release -czf fleet-${{ matrix.target }}.tar.gz fleet
+      - run: shasum -a 256 fleet-${{ matrix.target }}.tar.gz > fleet-${{ matrix.target }}.tar.gz.sha256
       - uses: softprops/action-gh-release@v2
         with:
-          files: fleet-${{ matrix.target }}.tar.gz
+          files: |
+            fleet-${{ matrix.target }}.tar.gz
+            fleet-${{ matrix.target }}.tar.gz.sha256
 
   npm:
     needs: binary
@@ -40,6 +57,6 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm publish
+      - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
