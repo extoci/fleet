@@ -419,7 +419,7 @@ fn offer_t3_code(ui: Ui) -> Result<()> {
     println!();
     ui.muted("T3 Code is a local web interface for Codex and other coding agents.");
     ui.muted(
-        "It downloads the latest package, opens a browser, uses the current directory as a project, and keeps running in this terminal.",
+        "It downloads the latest package, may install native build tools, opens a browser, uses the current directory as a project, and keeps running in this terminal.",
     );
     if !confirm("Start T3 Code now with `bunx t3@latest`? [Y/n] ")? {
         ui.muted("Skipped T3 Code. Start it whenever you're ready with `bunx t3@latest`.");
@@ -428,13 +428,66 @@ fn offer_t3_code(ui: Ui) -> Result<()> {
     let bunx = find_program("bunx").context(
         "`bunx` is required; install Bun from https://bun.sh, or use T3 Code's official `npx t3@latest` command",
     )?;
+    ensure_t3_build_tools(ui, &bunx)?;
+    let temporary = config::dir()?.join("tmp");
+    let _ = std::fs::remove_dir_all(&temporary);
+    std::fs::create_dir_all(&temporary).context("create T3 Code temporary directory")?;
     ui.muted("Starting T3 Code. It will keep running here; press Ctrl-C to stop it.");
-    let status = Command::new(bunx)
+    let result = Command::new(bunx)
         .args(["t3@latest"])
-        .status()
-        .context("run `bunx t3@latest`")?;
+        .env("TMPDIR", &temporary)
+        .status();
+    let _ = std::fs::remove_dir_all(temporary);
+    let status = result.context("run `bunx t3@latest`")?;
     if !status.success() {
         bail!("`bunx t3@latest` exited with {status}")
+    }
+    Ok(())
+}
+
+fn ensure_t3_build_tools(ui: Ui, bunx: &Path) -> Result<()> {
+    let build_tools_ready =
+        available("make") && (available("c++") || available("g++")) && available("python3");
+    if !build_tools_ready {
+        ui.muted("T3 Code needs native build tools on this machine. Installing them now…");
+        if cfg!(target_os = "linux") && available("apt-get") {
+            checked(elevated("apt-get", &["update"]), "update apt packages")?;
+            checked(
+                elevated("apt-get", &["install", "-y", "build-essential", "python3"]),
+                "install T3 Code build tools",
+            )?;
+        } else if cfg!(target_os = "linux") && available("dnf") {
+            checked(
+                elevated("dnf", &["install", "-y", "gcc-c++", "make", "python3"]),
+                "install T3 Code build tools",
+            )?;
+        } else if cfg!(target_os = "linux") && available("pacman") {
+            checked(
+                elevated(
+                    "pacman",
+                    &["-S", "--needed", "--noconfirm", "base-devel", "python"],
+                ),
+                "install T3 Code build tools",
+            )?;
+        } else {
+            bail!("install a C++ compiler, make, and Python 3, then run `bunx t3@latest`")
+        }
+    }
+
+    if !available("python3") {
+        bail!("Python 3 is required to build T3 Code's terminal dependency")
+    }
+    if !available("node-gyp") {
+        let bun = find_program("bun")
+            .or_else(|| {
+                let sibling = bunx.with_file_name("bun");
+                sibling.is_file().then_some(sibling)
+            })
+            .context("`bun` is required to install T3 Code's native build helper")?;
+        ui.muted("Installing T3 Code's native build helper with `bun add --global node-gyp`…");
+        let mut command = Command::new(bun);
+        command.args(["add", "--global", "node-gyp"]);
+        checked(command, "install node-gyp for T3 Code")?;
     }
     Ok(())
 }

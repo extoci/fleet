@@ -22,7 +22,7 @@ The installer stops after placing the binary on your machine. Run `fleet init` w
 
 During initialization, Fleet asks for the device name and color, then shows nearby Fleet devices and lets you choose which ones may SSH into this machine without a password. Devices you do not choose use the account's normal SSH authentication, typically a password when password login is enabled. Fleet previews the SSH and discovery changes and waits for confirmation before changing the machine. It may then ask for `sudo` to enable the system SSH server and boot-time discovery.
 
-Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After core setup is complete, it offers to install and sign in to the standalone Codex CLI, then offers to start T3 Code with `bunx t3@latest`. Each prompt says exactly what it will run; press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup chooses no passwordless peers and skips optional tools.
+Fleet creates a dedicated `~/.ssh/id_ed25519_fleet` key and preserves existing SSH keys and unrelated `authorized_keys` entries. After core setup is complete, it offers to install and sign in to the standalone Codex CLI, then offers to start T3 Code with `bunx t3@latest`. T3 Code may compile its terminal dependency, so Fleet installs missing native build tools after telling you. Its temporary files live under `~/.config/fleet/tmp` instead of memory-backed `/tmp`, allowing it to start on small Fleet machines. Press Enter to accept or `n` to skip. Flags remain available for preconfigured installs, and non-interactive setup chooses no passwordless peers and skips optional tools.
 
 ## Everyday use
 
