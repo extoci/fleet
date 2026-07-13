@@ -85,6 +85,25 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+pub fn is_running() -> bool {
+    if cfg!(target_os = "macos") {
+        let target = format!("gui/{}/dev.fleet.discovery", unsafe { libc_getuid() });
+        Command::new("launchctl")
+            .args(["print", &target])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    } else if cfg!(target_os = "linux") {
+        Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "fleet.service"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
 fn checked(command: &mut Command, label: &str) -> Result<()> {
     let status = command.status().with_context(|| label.to_string())?;
     if !status.success() {

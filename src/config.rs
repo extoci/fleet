@@ -44,11 +44,26 @@ pub fn load() -> Result<Config> {
     toml::from_str(&source).context("invalid Fleet configuration")
 }
 
+pub fn load_optional() -> Result<Option<Config>> {
+    let path = path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("read Fleet configuration at {}", path.display()))?;
+    toml::from_str(&source)
+        .context("invalid Fleet configuration")
+        .map(Some)
+}
+
 pub fn save(config: &Config) -> Result<()> {
     validate_name(&config.name)?;
     let dir = dir()?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    fs::write(path()?, toml::to_string_pretty(config)?).context("write Fleet configuration")
+    let destination = path()?;
+    let temporary = dir.join("config.toml.tmp");
+    fs::write(&temporary, toml::to_string_pretty(config)?).context("write Fleet configuration")?;
+    fs::rename(temporary, destination).context("commit Fleet configuration")
 }
 
 pub fn default_user() -> String {
@@ -79,5 +94,12 @@ mod tests {
         assert!(validate_name("studio-mac").is_ok());
         assert!(validate_name("-bad").is_err());
         assert!(validate_name("spaces are bad").is_err());
+    }
+
+    #[test]
+    fn generated_names_fit_dns() {
+        assert!(validate_name(&"a".repeat(63)).is_ok());
+        assert!(validate_name(&"a".repeat(64)).is_err());
+        assert!(validate_name("").is_err());
     }
 }

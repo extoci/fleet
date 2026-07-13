@@ -3,6 +3,7 @@ mod discovery;
 mod service;
 mod setup;
 mod ssh;
+mod status;
 mod ui;
 
 use std::time::Duration;
@@ -36,15 +37,22 @@ enum Command {
         no_service: bool,
     },
     /// Find Fleet machines on the local network
+    #[command(visible_alias = "ls")]
     Discover {
         /// Seconds to listen for announcements
-        #[arg(short, long, default_value_t = 3)]
+        #[arg(short, long, default_value_t = 2)]
         timeout: u64,
         /// Print machine-readable tab-separated output
         #[arg(long)]
         plain: bool,
         /// Print stable JSON for scripts and agents
         #[arg(long, conflicts_with = "plain")]
+        json: bool,
+    },
+    /// Check this machine's Fleet setup
+    Status {
+        /// Print stable JSON for scripts and agents
+        #[arg(long)]
         json: bool,
     },
     /// Connect to a device by Fleet name
@@ -130,6 +138,7 @@ fn run() -> Result<()> {
             discovery::print(&peers, plain, json, ui)?;
             Ok(())
         }
+        Some(Command::Status { json }) => status::show(json, ui),
         Some(Command::Connect { host, user, args }) => {
             ssh::connect(&host, user.as_deref(), &args, ui)
         }

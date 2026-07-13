@@ -14,18 +14,32 @@ pub fn init(
     install_service: bool,
     ui: Ui,
 ) -> Result<()> {
+    let previous = config::load_optional()?;
     let hostname = hostname::get()
         .context("read hostname")?
         .to_string_lossy()
         .into_owned();
-    let name = name.unwrap_or_else(|| hostname.trim_end_matches(".local").to_lowercase());
+    let name = name
+        .or_else(|| previous.as_ref().map(|config| config.name.clone()))
+        .unwrap_or_else(|| hostname.trim_end_matches(".local").to_lowercase());
     config::validate_name(&name)?;
-    let color = color.unwrap_or_else(|| DeviceColor::from_name(&name));
+    let color = color
+        .or_else(|| previous.as_ref().map(|config| config.color))
+        .unwrap_or_else(|| DeviceColor::from_name(&name));
     let config = Config {
         name: name.clone(),
-        user: config::default_user(),
-        ssh_port: 22,
-        pair_port: config::default_pair_port(),
+        user: previous
+            .as_ref()
+            .map(|config| config.user.clone())
+            .unwrap_or_else(config::default_user),
+        ssh_port: previous
+            .as_ref()
+            .map(|config| config.ssh_port)
+            .unwrap_or(22),
+        pair_port: previous
+            .as_ref()
+            .map(|config| config.pair_port)
+            .unwrap_or_else(config::default_pair_port),
         color,
     };
     config::save(&config)?;
