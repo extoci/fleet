@@ -1,0 +1,9 @@
+pub mod cli;
+pub mod commands;
+pub mod discovery;
+pub mod identity;
+pub mod platform;
+pub mod service;
+pub mod skill;
+pub mod ssh_client;
+pub mod state;

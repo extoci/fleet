@@ -1,347 +1,259 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    net::IpAddr,
-    thread,
-    time::{Duration, Instant},
-};
-
+use crate::state::CaptainRef;
 use anyhow::{Context, Result, bail};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
-use crate::{
-    config, hosted,
-    hosted::DiscoveredService,
-    ssh,
-    ui::{DeviceColor, Ui},
-};
+pub const SERVICE_TYPE: &str = "_fleet._tcp";
+pub const DEFAULT_PORT: u16 = 42170;
 
-const SERVICE_TYPE: &str = "_fleet._tcp.local.";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Peer {
-    pub device_id: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptainAdvertisement {
+    pub protocol: u32,
+    pub id: Uuid,
     pub name: String,
-    pub hostname: String,
-    pub user: String,
+    pub host: String,
     pub port: u16,
-    pub pair_port: u16,
-    pub addresses: Vec<IpAddr>,
-    pub color: DeviceColor,
-    pub version: String,
-    pub fingerprint: Option<String>,
-    pub services: Vec<DiscoveredService>,
+    pub fingerprint: String,
+    pub ssh_public_key: String,
 }
 
-impl Peer {
-    pub fn connection_address(&self) -> Option<IpAddr> {
-        self.addresses
-            .iter()
-            .find(|address| matches!(address, IpAddr::V4(_)))
-            .or_else(|| {
-                self.addresses.iter().find(|address| match address {
-                    IpAddr::V6(address) => {
-                        !address.is_unicast_link_local() && !address.is_loopback()
-                    }
-                    IpAddr::V4(_) => false,
-                })
-            })
-            .copied()
+impl CaptainAdvertisement {
+    pub fn captain_ref(&self) -> CaptainRef {
+        CaptainRef {
+            id: self.id,
+            name: self.name.clone(),
+            host: self.host.clone(),
+            fingerprint: self.fingerprint.clone(),
+            ssh_public_key: self.ssh_public_key.clone(),
+        }
     }
 }
 
-pub fn serve() -> Result<()> {
-    let config = config::load()?;
-    let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
-    let hostname = format!("{}.local.", config.name);
-    let ssh_port = config.ssh_port.to_string();
-    let color = config.color.label();
-    let mut properties = HashMap::from([
-        ("user".to_string(), config.user.clone()),
-        ("ssh_port".to_string(), ssh_port),
-        ("color".to_string(), color.to_string()),
-        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-        ("fingerprint".to_string(), ssh::public_fingerprint()?),
-        ("device_id".to_string(), config.device_id.clone()),
-    ]);
-    for (index, service) in config
-        .services
-        .iter()
-        .filter(|service| service.public)
-        .enumerate()
-    {
-        properties.insert(format!("svc{index}"), hosted::encode(service));
+pub fn discover(explicit: Option<&str>) -> Result<Vec<CaptainAdvertisement>> {
+    if let Some(endpoint) = explicit {
+        return Ok(vec![fetch_identity(endpoint)?]);
     }
-    let service = ServiceInfo::new(
-        SERVICE_TYPE,
-        &config.name,
-        &hostname,
-        "",
-        config.pair_port,
-        properties,
-    )
-    .context("create mDNS announcement")?
-    .enable_addr_auto();
-    daemon
-        .register(service)
-        .context("register mDNS announcement")?;
-    hosted::start_proxies(&config.services)?;
-    ssh::start_key_listener(config.pair_port)?;
-    println!(
-        "Advertising {} as ssh {}@{}:{}",
-        config.name,
-        config.user,
-        hostname.trim_end_matches('.'),
-        config.ssh_port
-    );
-    loop {
-        thread::park_timeout(Duration::from_secs(3600));
-    }
-}
-
-pub fn discover(timeout: Duration) -> Result<Vec<Peer>> {
-    let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
-    let receiver = daemon
-        .browse(SERVICE_TYPE)
-        .context("browse for Fleet peers")?;
-    let deadline = Instant::now() + timeout;
-    let mut peers = BTreeMap::new();
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        match receiver.recv_timeout(remaining) {
-            Ok(ServiceEvent::ServiceResolved(info)) => {
-                peers.insert(info.get_fullname().to_string(), peer_from_info(&info));
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    let _ = daemon.stop_browse(SERVICE_TYPE);
-    let _ = daemon.shutdown();
-    Ok(peers.into_values().collect())
-}
-
-pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
-    let local_id = config::load_optional()?.map(|config| config.device_id);
-    let wanted = name
-        .trim_end_matches(".local")
-        .split('.')
-        .next()
-        .unwrap_or(name);
-    let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
-    let receiver = daemon
-        .browse(SERVICE_TYPE)
-        .context("browse for Fleet peers")?;
-    let deadline = Instant::now() + timeout;
-    let mut found = None;
-    let mut candidate = None;
-    let mut candidate_deadline: Option<Instant> = None;
-    while let Some(mut remaining) = deadline.checked_duration_since(Instant::now()) {
-        if let Some(ipv6_deadline) = candidate_deadline {
-            let Some(ipv6_remaining) = ipv6_deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
-            remaining = remaining.min(ipv6_remaining);
-        }
-        match receiver.recv_timeout(remaining) {
-            Ok(ServiceEvent::ServiceResolved(info)) => {
-                let peer = peer_from_info(&info);
-                if local_id
-                    .as_deref()
-                    .is_some_and(|id| !id.is_empty() && peer.device_id == id)
-                {
-                    continue;
-                }
-                if (peer.name.eq_ignore_ascii_case(wanted)
-                    || peer.hostname.eq_ignore_ascii_case(name)
-                    || peer.device_id.eq_ignore_ascii_case(name))
-                    && peer.connection_address().is_some()
-                {
-                    if found
-                        .as_ref()
-                        .or(candidate.as_ref())
-                        .is_some_and(|existing: &Peer| {
-                            !existing.device_id.is_empty()
-                                && !peer.device_id.is_empty()
-                                && existing.device_id != peer.device_id
-                        })
-                    {
-                        bail!(
-                            "more than one Fleet device is named `{wanted}`; use its device ID from `fleet ls --json`"
-                        )
-                    }
-                    if peer.addresses.iter().any(IpAddr::is_ipv4) {
-                        found = Some(peer);
-                        candidate_deadline
-                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
-                        continue;
-                    }
-                    candidate = Some(peer);
-                    candidate_deadline
-                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
-                }
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    let _ = daemon.stop_browse(SERVICE_TYPE);
-    let _ = daemon.shutdown();
-    Ok(found.or(candidate))
-}
-
-pub fn print(peers: &[Peer], plain: bool, json: bool, ui: Ui) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(peers)?);
-        return Ok(());
-    }
-    if peers.is_empty() {
-        ui.muted("No Fleet devices found on this network.");
-        return Ok(());
-    }
-    if plain {
-        for peer in peers {
-            println!(
-                "{}\t{}\t{}\t{}\t{}",
-                peer.name,
-                peer.hostname,
-                peer.user,
-                peer.port,
-                addresses(peer)
-            );
-        }
-        return Ok(());
-    }
-    println!(" {}  Fleet\n", ui.diamond(DeviceColor::Emerald));
-    for peer in peers {
-        let ssh_target = format!("{}@{}", peer.user, preferred_address(peer));
-        println!(
-            "  {}  {:<18} {:<30} v{}",
-            ui.diamond(peer.color),
-            peer.name,
-            ssh_target,
-            peer.version
-        );
-        for service in &peer.services {
-            println!("       ↳  {:<16} {}", service.name, service.url);
-        }
-    }
-    println!();
-    ui.muted(format!(
-        "  {} {} found · fleet connect <name>",
-        peers.len(),
-        if peers.len() == 1 {
-            "device"
+    let mut endpoints = Vec::new();
+    for _ in 0..6 {
+        endpoints = if cfg!(target_os = "macos") {
+            browse_macos()?
+        } else if cfg!(target_os = "linux") {
+            browse_linux()?
         } else {
-            "devices"
+            bail!("Fleet discovery supports macOS and Linux only");
+        };
+        if !endpoints.is_empty() {
+            break;
         }
-    ));
+        thread::sleep(Duration::from_millis(500));
+    }
+    let mut captains = Vec::new();
+    for endpoint in endpoints {
+        match fetch_identity(&endpoint) {
+            Ok(captain) => captains.push(captain),
+            Err(error) => {
+                eprintln!("warning: ignored invalid Fleet service at {endpoint}: {error:#}")
+            }
+        }
+    }
+    Ok(captains)
+}
+
+pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {
+    let endpoint = endpoint.trim_end_matches('/');
+    let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        format!("{endpoint}/v1/identity")
+    } else {
+        format!("http://{endpoint}/v1/identity")
+    };
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()?
+        .get(&url)
+        .send()
+        .with_context(|| format!("contact captain at {endpoint}"))?
+        .error_for_status()
+        .context("captain rejected identity request")?;
+    let captain: CaptainAdvertisement = response.json().context("decode captain identity")?;
+    validate_advertisement(&captain)?;
+    Ok(captain)
+}
+
+fn validate_advertisement(captain: &CaptainAdvertisement) -> Result<()> {
+    if captain.protocol != 1 {
+        bail!(
+            "captain uses unsupported Fleet protocol {}",
+            captain.protocol
+        );
+    }
+    crate::state::validate_machine_name(&captain.name)
+        .context("captain advertised an invalid machine name")?;
+    if captain.host != format!("{}.local", captain.name) {
+        bail!("captain hostname does not match its machine name");
+    }
+    if captain.port == 0 {
+        bail!("captain advertised an invalid service port");
+    }
+    let expected = crate::identity::fingerprint_public_key(&captain.ssh_public_key)
+        .context("captain advertised an invalid identity key")?;
+    if captain.fingerprint != expected {
+        bail!("captain fingerprint does not match its identity key");
+    }
     Ok(())
 }
 
-fn addresses(peer: &Peer) -> String {
-    peer.addresses
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+fn browse_linux() -> Result<Vec<String>> {
+    let stdout = capture_until_exit(
+        Command::new("avahi-browse").args(["--resolve", "--terminate", "--parsable", SERVICE_TYPE]),
+        Duration::from_secs(4),
+    )
+    .context("run avahi-browse; install avahi-utils and confirm Avahi is running")?;
+    let mut endpoints = Vec::new();
+    for line in stdout.lines().filter(|line| line.starts_with('=')) {
+        let fields: Vec<_> = line.split(';').collect();
+        if fields.len() > 8 {
+            let host = fields[6].trim_end_matches('.');
+            let port = fields[8];
+            endpoints.push(format!("{host}:{port}"));
+        }
+    }
+    endpoints.sort();
+    endpoints.dedup();
+    Ok(endpoints)
 }
 
-fn preferred_address(peer: &Peer) -> String {
-    peer.connection_address()
-        .map(|address| address.to_string())
-        .unwrap_or_else(|| peer.hostname.clone())
-}
-
-fn parse_color(value: Option<&str>) -> DeviceColor {
-    match value {
-        Some("cyan") => DeviceColor::Cyan,
-        Some("blue") => DeviceColor::Blue,
-        Some("violet") => DeviceColor::Violet,
-        Some("amber") => DeviceColor::Amber,
-        Some("rose") => DeviceColor::Rose,
-        _ => DeviceColor::Emerald,
+fn capture_until_exit(command: &mut Command, duration: Duration) -> Result<String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start timed command")?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut bytes = Vec::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                stdout.read_to_end(&mut bytes)?;
+            }
+            if !status.success() {
+                bail!("command exited with {status}");
+            }
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        if started.elapsed() >= duration {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("command timed out after {} seconds", duration.as_secs());
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
-fn peer_from_info(info: &ServiceInfo) -> Peer {
-    let mut addresses = info.get_addresses().iter().copied().collect::<Vec<_>>();
-    addresses.sort_by_key(|address| match address {
-        IpAddr::V4(address) => (0, address.to_string()),
-        IpAddr::V6(address) if !address.is_unicast_link_local() => (1, address.to_string()),
-        IpAddr::V6(address) => (2, address.to_string()),
-    });
-    let address = connection_address(&addresses).map(|address| address.to_string());
-    let mut services = Vec::new();
-    if let Some(address) = address {
-        for index in 0..32 {
-            let Some(value) = info.get_property_val_str(&format!("svc{index}")) else {
-                break;
-            };
-            if let Some(service) = hosted::decode(value, &address) {
-                services.push(service);
+fn browse_macos() -> Result<Vec<String>> {
+    let output = capture_for(
+        Command::new("dns-sd").args(["-B", SERVICE_TYPE, "local"]),
+        Duration::from_secs(2),
+    )?;
+    let mut instances = Vec::new();
+    for line in output.lines() {
+        if !line.contains(SERVICE_TYPE) || !line.contains(" Add ") {
+            continue;
+        }
+        if let Some(index) = line.find(SERVICE_TYPE) {
+            let instance = line[index + SERVICE_TYPE.len()..]
+                .trim_start_matches('.')
+                .trim();
+            if !instance.is_empty() {
+                instances.push(instance.to_owned());
             }
         }
     }
-    services.sort_by(|a, b| a.name.cmp(&b.name));
-    Peer {
-        device_id: info
-            .get_property_val_str("device_id")
-            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .unwrap_or("")
-            .to_string(),
-        name: info
-            .get_fullname()
-            .split('.')
-            .next()
-            .filter(|name| config::validate_name(name).is_ok())
-            .unwrap_or("unknown")
-            .to_string(),
-        hostname: info
-            .get_hostname()
-            .trim_end_matches('.')
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
-            .take(253)
-            .collect(),
-        user: info
-            .get_property_val_str("user")
-            .filter(|user| ssh::valid_user(user))
-            .unwrap_or("user")
-            .to_string(),
-        port: info
-            .get_property_val_str("ssh_port")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(22),
-        pair_port: info.get_port(),
-        addresses,
-        color: parse_color(info.get_property_val_str("color")),
-        version: info
-            .get_property_val_str("version")
-            .filter(|value| {
-                value.len() <= 32
-                    && value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
-            })
-            .unwrap_or("unknown")
-            .to_string(),
-        fingerprint: info
-            .get_property_val_str("fingerprint")
-            .filter(|value| value.starts_with("SHA256:") && value.len() <= 128)
-            .map(str::to_string),
-        services,
+    let mut endpoints = Vec::new();
+    for instance in instances {
+        let output = capture_for(
+            Command::new("dns-sd").args(["-L", &instance, SERVICE_TYPE, "local"]),
+            Duration::from_secs(2),
+        )?;
+        for line in output.lines() {
+            if let Some(marker) = line.find(" can be reached at ") {
+                let target = line[marker + " can be reached at ".len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                if let Some((host, port)) = target.rsplit_once(':') {
+                    endpoints.push(format!("{}:{}", host.trim_end_matches('.'), port));
+                }
+            }
+        }
     }
+    endpoints.sort();
+    endpoints.dedup();
+    Ok(endpoints)
 }
 
-fn connection_address(addresses: &[IpAddr]) -> Option<IpAddr> {
-    addresses
-        .iter()
-        .find(|address| matches!(address, IpAddr::V4(_)))
-        .or_else(|| {
-            addresses.iter().find(|address| match address {
-                IpAddr::V6(address) => !address.is_unicast_link_local() && !address.is_loopback(),
-                IpAddr::V4(_) => false,
-            })
-        })
-        .copied()
+fn capture_for(command: &mut Command, duration: Duration) -> Result<String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start DNS-SD command")?;
+    let started = Instant::now();
+    while started.elapsed() < duration {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let mut bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_end(&mut bytes)?;
+    }
+    let _ = child.wait();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertisement_becomes_captain_reference() {
+        let id = Uuid::new_v4();
+        let ad = CaptainAdvertisement {
+            protocol: 1,
+            id,
+            name: "obsidian".into(),
+            host: "obsidian.local".into(),
+            port: DEFAULT_PORT,
+            fingerprint: "SHA256:test".into(),
+            ssh_public_key: "ssh-ed25519 AAAA".into(),
+        };
+        assert_eq!(ad.captain_ref().id, id);
+    }
+
+    #[test]
+    fn advertisement_identity_is_self_consistent() {
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElmqI4v+7cZFSmB7soOSl3vymQTl8v7/15ZnHH2DA4d";
+        let mut ad = CaptainAdvertisement {
+            protocol: 1,
+            id: Uuid::new_v4(),
+            name: "obsidian".into(),
+            host: "obsidian.local".into(),
+            port: DEFAULT_PORT,
+            fingerprint: crate::identity::fingerprint_public_key(key).unwrap(),
+            ssh_public_key: key.into(),
+        };
+        assert!(validate_advertisement(&ad).is_ok());
+        ad.fingerprint = "SHA256:attacker".into();
+        assert!(validate_advertisement(&ad).is_err());
+        ad.fingerprint = crate::identity::fingerprint_public_key(key).unwrap();
+        ad.host = "ruby.local".into();
+        assert!(validate_advertisement(&ad).is_err());
+    }
 }

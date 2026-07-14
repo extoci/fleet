@@ -1,4 +1,5 @@
-name: release
+name: Release
+
 on:
   push:
     tags: ["v*"]
@@ -7,26 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: node npm/install.mjs --check
-      - run: npm run version:check
-      - run: npm run pack:check
-      - run: sh -n fleet.sh
-
-  binary:
-    needs: verify
+  build:
     strategy:
       matrix:
         include:
@@ -34,10 +16,10 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -45,23 +27,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf fleet-${{ matrix.target }}.tar.gz fleet
-      - run: shasum -a 256 fleet-${{ matrix.target }}.tar.gz > fleet-${{ matrix.target }}.tar.gz.sha256
+      - name: Package
+        shell: bash
+        run: |
+          asset="fleet-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "$asset" fleet
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" >"$asset.sha256"
+          else
+            shasum -a 256 "$asset" >"$asset.sha256"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             fleet-${{ matrix.target }}.tar.gz
             fleet-${{ matrix.target }}.tar.gz.sha256
-
-  npm:
-    needs: binary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

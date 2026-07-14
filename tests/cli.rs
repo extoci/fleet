@@ -1,77 +1,129 @@
-use std::{fs, process::Command};
+use assert_cmd::Command;
+use fleet::cli::Color;
+use fleet::state::{LocalConfig, Machine, Role, STATE_VERSION, StatePaths};
+use predicates::prelude::*;
+use tempfile::TempDir;
+use uuid::Uuid;
 
-fn fleet() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fleet"))
+fn test_command(home: &TempDir) -> Command {
+    let mut command = Command::cargo_bin("fleet").unwrap();
+    command
+        .env("FLEET_HOME", home.path().join(".fleet"))
+        .env("FLEET_AGENTS_HOME", home.path().join(".agents"))
+        .env("HOME", home.path())
+        .env("USER", "fleet-test")
+        .env("SHELL", "/bin/zsh");
+    command
 }
 
-fn temporary_home(label: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("fleet-test-{label}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
+fn captain_config() -> LocalConfig {
+    LocalConfig {
+        version: STATE_VERSION,
+        role: Role::Captain,
+        machine: Machine {
+            id: Uuid::new_v4(),
+            name: "obsidian".into(),
+            color: Color::Violet,
+            ssh_user: "fleet-test".into(),
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            tools: vec![],
+            public_identity: "ssh-ed25519 AAAATEST".into(),
+            ssh_host_key: None,
+        },
+        captain: None,
+    }
 }
 
 #[test]
-fn no_arguments_is_useful_and_successful() {
-    let output = fleet().output().unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Your machines, one command away."));
+fn help_exposes_only_the_v0_lifecycle() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("join"))
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("leave"))
+        .stdout(predicate::str::contains("transfer").not())
+        .stdout(predicate::str::contains("sync").not());
 }
 
 #[test]
-fn status_json_is_stable_for_an_uninitialized_machine() {
-    let home = temporary_home("status");
-    let output = fleet()
-        .env("HOME", &home)
-        .args(["status", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["initialized"], false);
-    assert_eq!(status["ssh_key_ready"], false);
-    fs::remove_dir_all(home).unwrap();
+fn status_fails_cleanly_when_uninitialized() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in a fleet"));
 }
 
 #[test]
-fn invalid_names_fail_before_touching_the_system() {
-    let home = temporary_home("invalid-name");
-    let output = fleet()
-        .env("HOME", &home)
-        .args(["init", "--name", "not a dns name"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("name must be"));
-    assert!(!home.join(".config/fleet/config.toml").exists());
-    fs::remove_dir_all(home).unwrap();
+fn status_reads_local_captain_state_without_networking() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CAPTAIN"))
+        .stdout(predicate::str::contains("obsidian.local"))
+        .stdout(predicate::str::contains("No members"));
 }
 
-#[cfg(unix)]
 #[test]
-fn remote_command_exit_status_is_preserved() {
-    use std::os::unix::fs::PermissionsExt;
+fn init_dry_run_never_creates_state() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .args([
+            "init",
+            "--name",
+            "fleet-test-captain",
+            "--color",
+            "violet",
+            "--yes",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would create a Fleet identity"));
+    assert!(!home.path().join(".fleet/config.toml").exists());
+}
 
-    let home = temporary_home("remote-exit");
-    let ssh_dir = home.join(".ssh");
-    let bin_dir = home.join("bin");
-    fs::create_dir_all(&ssh_dir).unwrap();
-    fs::create_dir_all(&bin_dir).unwrap();
-    fs::write(ssh_dir.join("id_ed25519_fleet"), "test-only").unwrap();
-    let fake_ssh = bin_dir.join("ssh");
-    fs::write(&fake_ssh, "#!/bin/sh\nexit 42\n").unwrap();
-    fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let output = fleet()
-        .env("HOME", &home)
-        .env("PATH", path)
-        .args(["connect", "example.com", "--", "true"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(42));
-    fs::remove_dir_all(home).unwrap();
+#[test]
+fn init_can_resume_an_existing_captain_idempotently() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .args(["init", "--yes", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resuming captain setup"))
+        .stdout(predicate::str::contains("Would verify identity"));
+}
+
+#[test]
+fn captain_cannot_leave_with_members() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    let mut member = captain_config().machine;
+    member.id = Uuid::new_v4();
+    member.name = "emerald".into();
+    fleet::skill::save_member(&paths, &member).unwrap();
+    test_command(&home)
+        .args(["leave", "--yes", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("members must leave"));
 }

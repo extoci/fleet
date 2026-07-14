@@ -1,6 +1,2 @@
-/target/
-/node_modules/
-/npm/bin/fleet
-/npm/bin/fleet.exe
-/*.tgz
+/target
 .DS_Store
