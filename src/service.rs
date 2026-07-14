@@ -39,6 +39,18 @@ pub fn install() -> Result<()> {
             "launchctl bootstrap",
         )?;
     } else if cfg!(target_os = "linux") {
+        if Command::new("systemctl")
+            .args(["--user", "show-environment"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true)
+        {
+            bail!(
+                "a systemd user session is not available; run `fleet init --no-service` and start `fleet serve` manually"
+            )
+        }
         enable_linger()?;
         let dir = config::home()?.join(".config/systemd/user");
         fs::create_dir_all(&dir)?;
@@ -46,7 +58,7 @@ pub fn install() -> Result<()> {
             dir.join("fleet.service"),
             format!(
                 "[Unit]\nDescription=Fleet mDNS discovery\n\n[Service]\nExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-                executable.display()
+                systemd_arg(&executable.display().to_string())
             ),
         )?;
         checked(
@@ -64,12 +76,24 @@ pub fn install() -> Result<()> {
     } else {
         bail!("background service installation supports macOS and Linux")
     }
+    wait_until_running()?;
     println!("Fleet discovery service installed.");
     Ok(())
 }
 
 fn enable_linger() -> Result<()> {
-    let user = env::var("USER").context("USER is not set")?;
+    let user = env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .or_else(|| {
+            Command::new("id")
+                .arg("-un")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .context("could not determine the current user")?;
     let is_root = Command::new("id")
         .arg("-u")
         .output()
@@ -122,10 +146,11 @@ pub fn is_running() -> bool {
         let target = format!("gui/{}/dev.fleet.discovery", unsafe { libc_getuid() });
         Command::new("launchctl")
             .args(["print", &target])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("state = running")
+            })
             .unwrap_or(false)
     } else if cfg!(target_os = "linux") {
         Command::new("systemctl")
@@ -156,11 +181,55 @@ pub fn restart() -> Result<()> {
     } else {
         bail!("background service supports macOS and Linux")
     }
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    if !is_running() {
+    wait_until_running()
+}
+
+fn wait_until_running() -> Result<()> {
+    let mut consecutive = 0;
+    for _ in 0..30 {
+        if is_running() {
+            consecutive += 1;
+            if consecutive == 3 {
+                return Ok(());
+            }
+        } else {
+            consecutive = 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let detail = if cfg!(target_os = "linux") {
+        Command::new("journalctl")
+            .args(["--user", "-u", "fleet.service", "-n", "12", "--no-pager"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default()
+    } else {
+        fs::read_to_string(config::dir()?.join("service.log"))
+            .unwrap_or_default()
+            .lines()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if detail.is_empty() {
         bail!("Fleet discovery service did not stay running")
     }
-    Ok(())
+    bail!("Fleet discovery service did not stay running:\n{detail}")
+}
+
+fn systemd_arg(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%")
+    )
 }
 
 fn checked(command: &mut Command, label: &str) -> Result<()> {
@@ -190,4 +259,17 @@ unsafe fn libc_getuid() -> u32 {
 #[cfg(not(unix))]
 unsafe fn libc_getuid() -> u32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::systemd_arg;
+
+    #[test]
+    fn systemd_paths_are_quoted_and_escape_specifiers() {
+        assert_eq!(
+            systemd_arg("/home/A User/100%/fleet"),
+            "\"/home/A User/100%%/fleet\""
+        );
+    }
 }

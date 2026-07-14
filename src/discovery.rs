@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
 
@@ -20,6 +20,7 @@ const SERVICE_TYPE: &str = "_fleet._tcp.local.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Peer {
+    pub device_id: String,
     pub name: String,
     pub hostname: String,
     pub user: String,
@@ -28,6 +29,7 @@ pub struct Peer {
     pub addresses: Vec<IpAddr>,
     pub color: DeviceColor,
     pub version: String,
+    pub fingerprint: Option<String>,
     pub services: Vec<DiscoveredService>,
 }
 
@@ -59,8 +61,15 @@ pub fn serve() -> Result<()> {
         ("ssh_port".to_string(), ssh_port),
         ("color".to_string(), color.to_string()),
         ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+        ("fingerprint".to_string(), ssh::public_fingerprint()?),
+        ("device_id".to_string(), config.device_id.clone()),
     ]);
-    for (index, service) in config.services.iter().enumerate() {
+    for (index, service) in config
+        .services
+        .iter()
+        .filter(|service| service.public)
+        .enumerate()
+    {
         properties.insert(format!("svc{index}"), hosted::encode(service));
     }
     let service = ServiceInfo::new(
@@ -112,6 +121,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<Peer>> {
 }
 
 pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
+    let local_id = config::load_optional()?.map(|config| config.device_id);
     let wanted = name
         .trim_end_matches(".local")
         .split('.')
@@ -135,13 +145,35 @@ pub fn resolve(name: &str, timeout: Duration) -> Result<Option<Peer>> {
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
                 let peer = peer_from_info(&info);
+                if local_id
+                    .as_deref()
+                    .is_some_and(|id| !id.is_empty() && peer.device_id == id)
+                {
+                    continue;
+                }
                 if (peer.name.eq_ignore_ascii_case(wanted)
-                    || peer.hostname.eq_ignore_ascii_case(name))
+                    || peer.hostname.eq_ignore_ascii_case(name)
+                    || peer.device_id.eq_ignore_ascii_case(name))
                     && peer.connection_address().is_some()
                 {
+                    if found
+                        .as_ref()
+                        .or(candidate.as_ref())
+                        .is_some_and(|existing: &Peer| {
+                            !existing.device_id.is_empty()
+                                && !peer.device_id.is_empty()
+                                && existing.device_id != peer.device_id
+                        })
+                    {
+                        bail!(
+                            "more than one Fleet device is named `{wanted}`; use its device ID from `fleet ls --json`"
+                        )
+                    }
                     if peer.addresses.iter().any(IpAddr::is_ipv4) {
                         found = Some(peer);
-                        break;
+                        candidate_deadline
+                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
+                        continue;
                     }
                     candidate = Some(peer);
                     candidate_deadline
@@ -179,7 +211,7 @@ pub fn print(peers: &[Peer], plain: bool, json: bool, ui: Ui) -> Result<()> {
         }
         return Ok(());
     }
-    println!("{}  Fleet\n", ui.diamond(DeviceColor::Emerald));
+    println!(" {}  Fleet\n", ui.diamond(DeviceColor::Emerald));
     for peer in peers {
         let ssh_target = format!("{}@{}", peer.user, preferred_address(peer));
         println!(
@@ -252,15 +284,28 @@ fn peer_from_info(info: &ServiceInfo) -> Peer {
     }
     services.sort_by(|a, b| a.name.cmp(&b.name));
     Peer {
+        device_id: info
+            .get_property_val_str("device_id")
+            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .unwrap_or("")
+            .to_string(),
         name: info
             .get_fullname()
             .split('.')
             .next()
+            .filter(|name| config::validate_name(name).is_ok())
             .unwrap_or("unknown")
             .to_string(),
-        hostname: info.get_hostname().trim_end_matches('.').to_string(),
+        hostname: info
+            .get_hostname()
+            .trim_end_matches('.')
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+            .take(253)
+            .collect(),
         user: info
             .get_property_val_str("user")
+            .filter(|user| ssh::valid_user(user))
             .unwrap_or("user")
             .to_string(),
         port: info
@@ -272,8 +317,18 @@ fn peer_from_info(info: &ServiceInfo) -> Peer {
         color: parse_color(info.get_property_val_str("color")),
         version: info
             .get_property_val_str("version")
+            .filter(|value| {
+                value.len() <= 32
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+            })
             .unwrap_or("unknown")
             .to_string(),
+        fingerprint: info
+            .get_property_val_str("fingerprint")
+            .filter(|value| value.starts_with("SHA256:") && value.len() <= 128)
+            .map(str::to_string),
         services,
     }
 }

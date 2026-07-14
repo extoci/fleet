@@ -14,10 +14,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: node npm/install.mjs --check
+      - run: npm run version:check
+      - run: npm run pack:check
       - run: sh -n fleet.sh
 
   binary:

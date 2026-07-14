@@ -1,6 +1,7 @@
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::Duration,
 };
@@ -22,6 +23,8 @@ pub struct HostedService {
     pub target_port: u16,
     pub public_port: u16,
     pub path: String,
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,9 +39,21 @@ pub struct HostedServiceStatus {
     pub local_url: String,
     pub fleet_url: String,
     pub online: bool,
+    pub public: bool,
 }
 
-pub fn expose(name: &str, url: Option<&str>, public_port: Option<u16>, ui: Ui) -> Result<()> {
+pub fn expose(
+    name: &str,
+    url: Option<&str>,
+    public_port: Option<u16>,
+    public: bool,
+    ui: Ui,
+) -> Result<()> {
+    if !public {
+        bail!(
+            "exposed services are reachable by everyone on this LAN; review the service and rerun with `--public`"
+        )
+    }
     let normalized_name = name.to_ascii_lowercase();
     let name = normalized_name.as_str();
     validate_name(name)?;
@@ -81,6 +96,7 @@ pub fn expose(name: &str, url: Option<&str>, public_port: Option<u16>, ui: Ui) -
         target_port,
         public_port,
         path,
+        public: true,
     };
     let online = target_online(&hosted);
     config.services.push(hosted.clone());
@@ -161,15 +177,28 @@ pub fn open(selector: &str, ui: Ui) -> Result<()> {
 }
 
 pub fn start_proxies(services: &[HostedService]) -> Result<()> {
-    for hosted in services.iter().cloned() {
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    for hosted in services.iter().filter(|service| service.public).cloned() {
         let listener = TcpListener::bind(("0.0.0.0", hosted.public_port))
             .with_context(|| format!("expose {} on port {}", hosted.name, hosted.public_port))?;
         thread::spawn(move || {
             for connection in listener.incoming() {
                 match connection {
                     Ok(client) => {
+                        if ACTIVE.fetch_add(1, Ordering::Relaxed) >= 256 {
+                            ACTIVE.fetch_sub(1, Ordering::Relaxed);
+                            drop(client);
+                            continue;
+                        }
                         let hosted = hosted.clone();
                         thread::spawn(move || {
+                            struct ActiveGuard;
+                            impl Drop for ActiveGuard {
+                                fn drop(&mut self) {
+                                    ACTIVE.fetch_sub(1, Ordering::Relaxed);
+                                }
+                            }
+                            let _guard = ActiveGuard;
                             if let Err(error) = proxy(client, &hosted) {
                                 eprintln!("{} proxy: {error:#}", hosted.name);
                             }
@@ -193,7 +222,8 @@ pub fn statuses(device: &str, services: &[HostedService]) -> Vec<HostedServiceSt
                 service.scheme, service.target_host, service.target_port, service.path
             ),
             fleet_url: public_url(device, service),
-            online: target_online(service),
+            online: service.public && target_online(service),
+            public: service.public,
         })
         .collect()
 }
@@ -211,6 +241,13 @@ pub fn decode(value: &str, address: &str) -> Option<DiscoveredService> {
     let scheme = fields.next()?;
     let port = fields.next()?.parse::<u16>().ok()?;
     let path = fields.next()?;
+    if validate_name(&name).is_err()
+        || !matches!(scheme, "http" | "https")
+        || !path.starts_with('/')
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
     let host = if address.contains(':') {
         format!("[{address}]")
     } else {
@@ -384,9 +421,31 @@ mod tests {
             target_port: 4001,
             public_port: 41000,
             path: "/".into(),
+            public: true,
         };
         let decoded = decode(&encode(&service), "192.0.2.2").unwrap();
         assert_eq!(decoded.name, "t3");
         assert_eq!(decoded.url, "http://192.0.2.2:41000/");
+    }
+
+    #[test]
+    fn rejects_hostile_discovery_records() {
+        assert!(decode("docs|javascript|41000|/x", "192.0.2.2").is_none());
+        assert!(decode("bad\u{1b}|http|41000|/x", "192.0.2.2").is_none());
+        assert!(decode("docs|http|41000|no-slash", "192.0.2.2").is_none());
+    }
+
+    #[test]
+    fn legacy_exposures_are_not_public_without_new_consent() {
+        let legacy = r#"
+name = "docs"
+scheme = "http"
+target_host = "127.0.0.1"
+target_port = 8080
+public_port = 41000
+path = "/"
+"#;
+        let service: HostedService = toml::from_str(legacy).unwrap();
+        assert!(!service.public);
     }
 }

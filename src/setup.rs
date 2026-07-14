@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -10,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     config::{self, Config},
     discovery::{self, Peer},
-    service, ssh,
+    git_setup, service, ssh,
     ui::{DeviceColor, Ui},
 };
 
@@ -80,6 +81,11 @@ pub fn init(
 
     let previous_config = previous.clone();
     let config = Config {
+        device_id: previous
+            .as_ref()
+            .map(|config| config.device_id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(config::new_device_id),
         name: name.clone(),
         user: previous
             .as_ref()
@@ -104,7 +110,9 @@ pub fn init(
     let mut service_install_attempted = false;
     let core_setup = (|| -> Result<()> {
         ensure_ssh_server()?;
+        ensure_workstation_tools(ui)?;
         ssh::ensure_key()?;
+        configure_shell(&config)?;
         if install_service {
             service_install_attempted = true;
             service::install()?;
@@ -140,11 +148,18 @@ pub fn init(
     println!();
     ui.ready(color, &name);
     ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
-    if let Err(error) = offer_codex_login(ui) {
-        ui.muted(format!("Codex setup did not finish: {error:#}"));
-    }
-    if let Err(error) = offer_t3_code(ui) {
-        ui.muted(format!("T3 Code did not start: {error:#}"));
+    if io::stdin().is_terminal() {
+        println!();
+        println!("Developer setup");
+        if let Err(error) = git_setup::setup(None, None, false, ui) {
+            ui.muted(format!("Git setup did not finish: {error:#}"));
+        }
+        if let Err(error) = offer_codex_login(ui) {
+            ui.muted(format!("Codex setup did not finish: {error:#}"));
+        }
+        if let Err(error) = offer_t3_code(ui) {
+            ui.muted(format!("T3 Code did not start: {error:#}"));
+        }
     }
     Ok(())
 }
@@ -240,9 +255,11 @@ fn onboarding_wizard(
     } else {
         println!("  • No background discovery; this device will not appear automatically");
     }
-    println!("  • Optional Codex installation and sign-in");
-    println!("  • Optional T3 Code launch with `bunx t3@latest`");
-
+    println!("  • tmux with automatic SSH session resume");
+    println!("  • A {} color-coded shell prompt", color.label());
+    println!("  • Git identity and GitHub CLI setup");
+    println!("  • Codex installation and sign-in");
+    println!("  • T3 Code launch with `bunx t3@latest`");
     println!();
     Ok(
         confirm("Set up this device? [Y/n] ")?.then_some(OnboardingChoices {
@@ -297,12 +314,24 @@ fn choose_allowed_peers(peers: &[Peer], ui: Ui) -> Result<Option<Vec<Peer>>> {
         };
         match parse_peer_selection(&answer, peers.len()) {
             Ok(indexes) => {
-                return Ok(Some(
-                    indexes
-                        .into_iter()
-                        .map(|index| peers[index].clone())
-                        .collect(),
-                ));
+                let selected = indexes
+                    .into_iter()
+                    .map(|index| peers[index].clone())
+                    .collect::<Vec<_>>();
+                for peer in &selected {
+                    match ssh::peer_fingerprint(peer) {
+                        Ok(fingerprint) => println!("    {}  {}", peer.name, fingerprint),
+                        Err(error) => {
+                            bail!("could not verify {}'s Fleet identity: {error:#}", peer.name)
+                        }
+                    }
+                }
+                ui.muted("  Compare these with `fleet identity` on each selected device.");
+                if !confirm_default_no("  Fingerprints verified on those devices? [y/N] ")? {
+                    ui.muted("  No passwordless access will be granted during setup.");
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(Some(selected));
             }
             Err(error) => println!("  {error}"),
         }
@@ -387,47 +416,74 @@ fn confirm(prompt: &str) -> Result<bool> {
     }
 }
 
+fn confirm_default_no(prompt: &str) -> Result<bool> {
+    print!("{prompt}");
+    io::stdout().flush().context("show confirmation prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read confirmation")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+pub fn setup_codex(ui: Ui) -> Result<()> {
+    let codex = find_program("codex");
+    let codex = match codex {
+        Some(codex) => codex,
+        None => install_codex(ui)?,
+    };
+    run_codex_login(&codex)
+}
+
 fn offer_codex_login(ui: Ui) -> Result<()> {
-    if !io::stdin().is_terminal() {
+    let codex = find_program("codex");
+    if codex.as_deref().is_some_and(codex_logged_in) {
+        ui.success("Codex is installed and signed in");
         return Ok(());
     }
-
-    println!();
-    let codex = find_program("codex");
     let prompt = if codex.is_some() {
         "Sign in to Codex to use this device? [Y/n] "
     } else {
         "Install and sign in to Codex on this device? [Y/n] "
     };
     if confirm(prompt)? {
-        let codex = match codex {
-            Some(codex) => codex,
-            None => install_codex(ui)?,
-        };
-        run_codex_login(&codex)
+        setup_codex(ui)
     } else {
-        ui.muted("Skipped Codex sign-in. Run `codex login` whenever you're ready.");
+        ui.muted("Skipped Codex sign-in. Run `fleet tools codex` whenever you're ready.");
         Ok(())
     }
 }
 
-fn offer_t3_code(ui: Ui) -> Result<()> {
-    if !io::stdin().is_terminal() {
-        return Ok(());
-    }
+fn codex_logged_in(executable: &Path) -> bool {
+    Command::new(executable)
+        .args(["login", "status"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
 
+fn offer_t3_code(ui: Ui) -> Result<()> {
     println!();
+    ui.muted("T3 Code is a local web interface for Codex and other coding agents.");
+    if confirm("Start T3 Code now? [Y/n] ")? {
+        start_t3_code(ui)
+    } else {
+        ui.muted("Skipped T3 Code. Run `fleet tools t3` whenever you're ready.");
+        Ok(())
+    }
+}
+
+pub fn start_t3_code(ui: Ui) -> Result<()> {
     ui.muted("T3 Code is a local web interface for Codex and other coding agents.");
     ui.muted(
         "It downloads the latest package, may install native build tools, opens a browser, uses the current directory as a project, and keeps running in this terminal.",
     );
-    if !confirm("Start T3 Code now with `bunx t3@latest`? [Y/n] ")? {
-        ui.muted("Skipped T3 Code. Start it whenever you're ready with `bunx t3@latest`.");
-        return Ok(());
-    }
-    let bunx = find_program("bunx").context(
-        "`bunx` is required; install Bun from https://bun.sh, or use T3 Code's official `npx t3@latest` command",
-    )?;
+    let bunx = ensure_bunx(ui)?;
     ensure_t3_build_tools(ui, &bunx)?;
     let temporary = config::dir()?.join("tmp");
     let _ = std::fs::remove_dir_all(&temporary);
@@ -443,6 +499,28 @@ fn offer_t3_code(ui: Ui) -> Result<()> {
         bail!("`bunx t3@latest` exited with {status}")
     }
     Ok(())
+}
+
+fn ensure_bunx(ui: Ui) -> Result<PathBuf> {
+    if let Some(bunx) = find_program("bunx") {
+        return Ok(bunx);
+    }
+    ensure_curl()?;
+    ui.muted("Installing Bun for T3 Code…");
+    let mut installer = Command::new("sh");
+    installer
+        .arg("-c")
+        .arg("curl -fsSL https://bun.sh/install | bash");
+    checked(installer, "install Bun")?;
+    let bunx = config::home()?.join(".bun/bin/bunx");
+    if !bunx.is_file() {
+        bail!(
+            "Bun was installed but `bunx` was not found at {}",
+            bunx.display()
+        )
+    }
+    ui.success("Bun installed");
+    Ok(bunx)
 }
 
 fn ensure_t3_build_tools(ui: Ui, bunx: &Path) -> Result<()> {
@@ -574,6 +652,149 @@ fn run_codex_login(executable: &Path) -> Result<()> {
     }
 }
 
+fn ensure_workstation_tools(ui: Ui) -> Result<()> {
+    let missing = ["tmux", "git", "gh"]
+        .into_iter()
+        .filter(|program| !available(program))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    ui.muted(format!("Installing {}…", missing.join(", ")));
+    if cfg!(target_os = "macos") {
+        let brew = ensure_homebrew(ui)?;
+        let mut command = Command::new(brew);
+        command.arg("install").args(&missing);
+        checked(command, "install Fleet workstation tools")?;
+    } else if cfg!(target_os = "linux") && available("apt-get") {
+        checked(elevated("apt-get", &["update"]), "update apt packages")?;
+        let mut args = vec!["install", "-y"];
+        args.extend(missing.iter().copied());
+        checked(
+            elevated("apt-get", &args),
+            "install Fleet workstation tools",
+        )?;
+    } else if cfg!(target_os = "linux") && available("dnf") {
+        let mut args = vec!["install", "-y"];
+        args.extend(missing.iter().copied());
+        checked(elevated("dnf", &args), "install Fleet workstation tools")?;
+    } else if cfg!(target_os = "linux") && available("pacman") {
+        let mut args = vec!["-S", "--needed", "--noconfirm"];
+        args.extend(missing.iter().copied());
+        checked(elevated("pacman", &args), "install Fleet workstation tools")?;
+    } else {
+        bail!("could not install tmux, Git, and GitHub CLI on this operating system")
+    }
+    for program in missing {
+        if !available(program) {
+            bail!("{program} is still unavailable after installation")
+        }
+    }
+    ui.success("tmux, Git, and GitHub CLI are ready");
+    Ok(())
+}
+
+fn ensure_homebrew(ui: Ui) -> Result<PathBuf> {
+    if let Some(brew) = find_program("brew") {
+        return Ok(brew);
+    }
+    ensure_curl()?;
+    ui.muted("Installing Homebrew for Fleet's workstation tools…");
+    let mut installer = Command::new("/bin/bash");
+    installer
+        .arg("-c")
+        .arg("$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)")
+        .env("NONINTERACTIVE", "1");
+    checked(installer, "install Homebrew")?;
+    ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .context("Homebrew was installed but its executable could not be found")
+}
+
+fn configure_shell(config: &Config) -> Result<()> {
+    let dir = config::dir()?;
+    fs::create_dir_all(&dir)?;
+    let ansi = config.color.ansi();
+    let zsh_color = match config.color {
+        DeviceColor::Emerald => "green",
+        DeviceColor::Cyan => "cyan",
+        DeviceColor::Blue => "blue",
+        DeviceColor::Violet => "magenta",
+        DeviceColor::Amber => "yellow",
+        DeviceColor::Rose => "red",
+    };
+    let bash = format!(
+        r#"# Generated by Fleet. Re-run `fleet init` to refresh it.
+__fleet_git_branch() {{
+    git branch --show-current 2>/dev/null | sed 's/.*/(&) /'
+}}
+
+__fleet_prompt_command() {{
+    local path branch
+    path=${{PWD/#$HOME/~}}
+    if [ "$path" != "~" ]; then path=${{path##*/}}; fi
+    branch="$(__fleet_git_branch)"
+    PS1="\[\e]0;{name}: ${{PWD/#$HOME/~}}\a\]\[\033[1;{ansi}m\] ◆ \[\033[0m\] ${{path}}/ \[\033[{ansi}m\]${{branch}}\[\033[0m\] "
+}}
+PROMPT_COMMAND=__fleet_prompt_command
+
+if [ -n "${{SSH_CONNECTION:-}}" ] && [ -t 0 ] && [ -t 1 ] && [ -z "${{TMUX:-}}" ] && [ -z "${{NO_TMUX:-}}" ] && command -v tmux >/dev/null 2>&1; then
+    if [ -n "${{TERM:-}}" ] && ! infocmp "$TERM" >/dev/null 2>&1; then
+        export TERM=xterm-256color
+    fi
+    exec tmux new-session -A -s fleet
+fi
+"#,
+        name = config.name
+    );
+    let zsh = format!(
+        r#"# Generated by Fleet. Re-run `fleet init` to refresh it.
+[[ -o interactive ]] || return
+setopt PROMPT_SUBST
+__fleet_git_branch() {{
+    git branch --show-current 2>/dev/null | sed 's/.*/(&) /'
+}}
+PROMPT='%F{{{zsh_color}}} ◆ %f%1~/ %F{{{zsh_color}}}$(__fleet_git_branch)%f '
+
+if [ -n "${{SSH_CONNECTION:-}}" ] && [ -t 0 ] && [ -t 1 ] && [ -z "${{TMUX:-}}" ] && [ -z "${{NO_TMUX:-}}" ] && command -v tmux >/dev/null 2>&1; then
+    if [ -n "${{TERM:-}}" ] && ! infocmp "$TERM" >/dev/null 2>&1; then
+        export TERM=xterm-256color
+    fi
+    exec tmux new-session -A -s fleet
+fi
+"#
+    );
+    fs::write(dir.join("shell.bash"), bash)?;
+    fs::write(dir.join("shell.zsh"), zsh)?;
+    ensure_shell_source(
+        &config::home()?.join(".bashrc"),
+        r#"[ -r "$HOME/.config/fleet/shell.bash" ] && . "$HOME/.config/fleet/shell.bash""#,
+    )?;
+    ensure_shell_source(
+        &config::home()?.join(".zshrc"),
+        r#"[ -r "$HOME/.config/fleet/shell.zsh" ] && . "$HOME/.config/fleet/shell.zsh""#,
+    )?;
+    Ok(())
+}
+
+fn ensure_shell_source(path: &Path, source: &str) -> Result<()> {
+    let old = fs::read_to_string(path).unwrap_or_default();
+    if old.lines().any(|line| line.trim() == source) {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    if !old.is_empty() && !old.ends_with('\n') {
+        writeln!(file)?;
+    }
+    writeln!(file, "\n# Fleet shell integration\n{source}")?;
+    Ok(())
+}
+
 fn ensure_ssh_server() -> Result<()> {
     if cfg!(target_os = "macos") {
         checked(
@@ -664,11 +885,11 @@ fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmation, parse_color, parse_peer_selection};
+    use super::{confirmation, ensure_shell_source, parse_color, parse_peer_selection};
     use crate::ui::DeviceColor;
 
     #[test]
-    fn codex_login_defaults_to_yes() {
+    fn confirmation_accepts_common_answers() {
         assert_eq!(confirmation("\n"), Some(true));
         assert_eq!(confirmation("Y"), Some(true));
         assert_eq!(confirmation("yes"), Some(true));
@@ -696,5 +917,24 @@ mod tests {
         assert_eq!(parse_peer_selection("3, 1, 3", 3).unwrap(), vec![2, 0]);
         assert!(parse_peer_selection("4", 3).is_err());
         assert!(parse_peer_selection("studio", 3).is_err());
+    }
+
+    #[test]
+    fn shell_source_is_idempotent_and_preserves_existing_config() {
+        let path = std::env::temp_dir().join(format!(
+            "fleet-shell-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "alias ll='ls -la'\n").unwrap();
+        let source =
+            r#"[ -r "$HOME/.config/fleet/shell.bash" ] && . "$HOME/.config/fleet/shell.bash""#;
+        ensure_shell_source(&path, source).unwrap();
+        ensure_shell_source(&path, source).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("alias ll='ls -la'\n"));
+        assert_eq!(contents.matches(source).count(), 1);
+        let _ = std::fs::remove_file(path);
     }
 }

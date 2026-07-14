@@ -8,6 +8,8 @@ use crate::ui::DeviceColor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub device_id: String,
     pub name: String,
     pub user: String,
     pub ssh_port: u16,
@@ -17,6 +19,23 @@ pub struct Config {
     pub color: DeviceColor,
     #[serde(default)]
     pub services: Vec<HostedService>,
+}
+
+pub fn new_device_id() -> String {
+    use std::io::Read;
+    let mut bytes = [0_u8; 16];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .is_err()
+    {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::time::SystemTime::now().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        bytes[..8].copy_from_slice(&hasher.finish().to_be_bytes());
+        bytes[8..].copy_from_slice(&hasher.finish().rotate_left(17).to_be_bytes());
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn default_pair_port() -> u16 {
@@ -44,7 +63,12 @@ pub fn load() -> Result<Config> {
             path.display()
         )
     })?;
-    toml::from_str(&source).context("invalid Fleet configuration")
+    let mut config: Config = toml::from_str(&source).context("invalid Fleet configuration")?;
+    if config.device_id.is_empty() {
+        config.device_id = new_device_id();
+        save(&config).context("upgrade Fleet configuration")?;
+    }
+    Ok(config)
 }
 
 pub fn load_optional() -> Result<Option<Config>> {
@@ -113,5 +137,14 @@ mod tests {
         assert!(validate_name(&"a".repeat(63)).is_ok());
         assert!(validate_name(&"a".repeat(64)).is_err());
         assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn device_ids_are_random_shaped_hex() {
+        let first = new_device_id();
+        let second = new_device_id();
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 }

@@ -45,7 +45,9 @@ else
 fi
 tar -xzf "$tmp/$archive" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp/fleet" "$INSTALL_DIR/fleet"
+staged="$INSTALL_DIR/.fleet.tmp.$$"
+install -m 755 "$tmp/fleet" "$staged"
+mv -f "$staged" "$INSTALL_DIR/fleet"
 printf 'Installed %s\n' "$INSTALL_DIR/fleet"
 
 case ":$PATH:" in

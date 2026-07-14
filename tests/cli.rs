@@ -46,3 +46,32 @@ fn invalid_names_fail_before_touching_the_system() {
     assert!(!home.join(".config/fleet/config.toml").exists());
     fs::remove_dir_all(home).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn remote_command_exit_status_is_preserved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = temporary_home("remote-exit");
+    let ssh_dir = home.join(".ssh");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&ssh_dir).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(ssh_dir.join("id_ed25519_fleet"), "test-only").unwrap();
+    let fake_ssh = bin_dir.join("ssh");
+    fs::write(&fake_ssh, "#!/bin/sh\nexit 42\n").unwrap();
+    fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = fleet()
+        .env("HOME", &home)
+        .env("PATH", path)
+        .args(["connect", "example.com", "--", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(42));
+    fs::remove_dir_all(home).unwrap();
+}

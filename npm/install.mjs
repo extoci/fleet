@@ -26,40 +26,51 @@ if (process.argv.includes("--check")) {
 }
 
 await mkdir(dirname(output), { recursive: true });
+const staging = join(root, "npm", `.fleet-install-${process.pid}`);
+const stagedBinary = join(staging, "fleet");
+await rm(staging, { recursive: true, force: true });
+await mkdir(staging, { recursive: true });
 if (process.env.FLEET_BINARY) {
-  await copyFile(process.env.FLEET_BINARY, output);
-  await chmod(output, 0o755);
+  try {
+    await copyFile(process.env.FLEET_BINARY, stagedBinary);
+    await chmod(stagedBinary, 0o755);
+    await rename(stagedBinary, output);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
   process.exit(0);
 }
-if (!target) throw new Error(`Fleet does not publish a binary for ${process.platform}-${process.arch}`);
+if (!target) {
+  await rm(staging, { recursive: true, force: true });
+  throw new Error(`Fleet does not publish a binary for ${process.platform}-${process.arch}`);
+}
 
 const repository = process.env.FLEET_GITHUB_REPOSITORY || "extoci/fleet";
 const version = process.env.npm_package_version;
 const base = process.env.FLEET_RELEASE_BASE || `https://github.com/${repository}/releases/download/v${version}`;
-const archive = join(root, "npm", `fleet-${target}.tar.gz`);
+const archive = join(staging, `fleet-${target}.tar.gz`);
 const temporary = `${archive}.download`;
-
-await download(`${base}/fleet-${target}.tar.gz`, temporary);
-await rename(temporary, archive);
-const checksum = `${archive}.sha256`;
-await download(`${base}/fleet-${target}.tar.gz.sha256`, checksum);
-const expected = (await readFile(checksum, "utf8")).trim().split(/\s+/)[0];
-const actual = await digest(archive);
-await rm(checksum, { force: true });
-if (actual !== expected) {
-  await rm(archive, { force: true });
-  throw new Error("Fleet binary checksum mismatch");
+try {
+  await download(`${base}/fleet-${target}.tar.gz`, temporary);
+  await rename(temporary, archive);
+  const checksum = `${archive}.sha256`;
+  await download(`${base}/fleet-${target}.tar.gz.sha256`, checksum);
+  const expected = (await readFile(checksum, "utf8")).trim().split(/\s+/)[0];
+  const actual = await digest(archive);
+  if (actual !== expected) throw new Error("Fleet binary checksum mismatch");
+  const unpack = spawnSync("tar", ["-xzf", archive, "-C", staging], { stdio: "inherit" });
+  if (unpack.status !== 0 || !existsSync(stagedBinary)) throw new Error("could not unpack the Fleet binary");
+  await chmod(stagedBinary, 0o755);
+  await rename(stagedBinary, output);
+} finally {
+  await rm(staging, { recursive: true, force: true });
 }
-const unpack = spawnSync("tar", ["-xzf", archive, "-C", dirname(output)], { stdio: "inherit" });
-await rm(archive, { force: true });
-if (unpack.status !== 0 || !existsSync(output)) throw new Error("could not unpack the Fleet binary");
-await chmod(output, 0o755);
 
 function download(url, destination, redirects = 0) {
   if (redirects > 8) throw new Error("too many download redirects");
   return new Promise((resolve, reject) => {
     const client = new URL(url).protocol === "http:" ? httpGet : httpsGet;
-    client(url, { headers: { "User-Agent": "fleet-npm-installer" } }, response => {
+    const request = client(url, { headers: { "User-Agent": "fleet-npm-installer" } }, response => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
         resolve(download(new URL(response.headers.location, url), destination, redirects + 1));
@@ -68,7 +79,9 @@ function download(url, destination, redirects = 0) {
       } else {
         resolve(pipeline(response, createWriteStream(destination)));
       }
-    }).on("error", reject);
+    });
+    request.setTimeout(30_000, () => request.destroy(new Error(`download timed out: ${url}`)));
+    request.on("error", reject);
   });
 }
 

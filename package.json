@@ -10,11 +10,12 @@
   "bin": {
     "fleet": "./npm/bin/fleet.mjs"
   },
-  "files": ["npm/bin", "npm/install.mjs", "README.md", "LICENSE"],
+  "files": ["npm/bin/fleet.mjs", "npm/install.mjs", "README.md", "LICENSE"],
   "scripts": {
     "postinstall": "node npm/install.mjs",
     "check": "cargo test && node npm/install.mjs --check",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "node npm/check-pack.mjs",
+    "version:check": "node npm/check-versions.mjs"
   },
   "engines": {
     "node": ">=18"

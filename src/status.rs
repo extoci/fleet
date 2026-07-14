@@ -15,12 +15,17 @@ struct Status {
     version: &'static str,
     initialized: bool,
     name: Option<String>,
+    device_id: Option<String>,
     user: Option<String>,
     color: Option<DeviceColor>,
     config_path: PathBuf,
     ssh_key_path: PathBuf,
     ssh_key_ready: bool,
+    ssh_key_fingerprint: Option<String>,
+    authorized_devices: usize,
     ssh_server_running: bool,
+    tmux_installed: bool,
+    shell_theme_ready: bool,
     discovery_service_running: bool,
     hosted_services: Vec<HostedServiceStatus>,
 }
@@ -28,16 +33,23 @@ struct Status {
 pub fn show(json: bool, ui: Ui) -> Result<()> {
     let config = config::load_optional()?;
     let key = ssh::private_key()?;
+    let ssh_key_ready = key.exists() && key.with_extension("pub").exists();
     let status = Status {
         version: env!("CARGO_PKG_VERSION"),
         initialized: config.is_some(),
         name: config.as_ref().map(|config| config.name.clone()),
+        device_id: config.as_ref().map(|config| config.device_id.clone()),
         user: config.as_ref().map(|config| config.user.clone()),
         color: config.as_ref().map(|config| config.color),
         config_path: config::path()?,
-        ssh_key_ready: key.exists() && key.with_extension("pub").exists(),
+        ssh_key_ready,
+        ssh_key_fingerprint: ssh_key_ready.then(ssh::public_fingerprint).transpose()?,
+        authorized_devices: ssh::access_records()?.len(),
         ssh_key_path: key,
         ssh_server_running: ssh_server_running(),
+        tmux_installed: command_available("tmux"),
+        shell_theme_ready: config::dir()?.join("shell.bash").exists()
+            && config::dir()?.join("shell.zsh").exists(),
         discovery_service_running: service::is_running(),
         hosted_services: config.as_ref().map_or_else(Vec::new, |config| {
             hosted::statuses(&config.name, &config.services)
@@ -56,16 +68,33 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
         check(ui, false, "Not initialized · run `fleet init`");
     }
     check(ui, status.ssh_server_running, "SSH server");
+    check(ui, status.tmux_installed, "tmux session resume");
+    check(ui, status.shell_theme_ready, "Fleet shell theme");
     check(ui, status.ssh_key_ready, "Dedicated SSH key");
+    if status.authorized_devices > 0 {
+        ui.muted(format!(
+            "  {} device{} granted passwordless access",
+            status.authorized_devices,
+            if status.authorized_devices == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
     check(ui, status.discovery_service_running, "Discovery service");
     if !status.hosted_services.is_empty() {
         println!();
         for service in &status.hosted_services {
-            check(
-                ui,
-                service.online,
-                &format!("{} · {}", service.name, service.fleet_url),
-            );
+            let label = if service.public {
+                format!("{} · {}", service.name, service.fleet_url)
+            } else {
+                format!(
+                    "{} · disabled; re-enable with `fleet expose {} {} --public`",
+                    service.name, service.name, service.local_url
+                )
+            };
+            check(ui, service.online, &label);
         }
     }
     Ok(())
@@ -97,4 +126,12 @@ fn ssh_server_running() -> bool {
                 .unwrap_or(false)
         })
     }
+}
+
+fn command_available(program: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", "command -v \"$1\" >/dev/null 2>&1", "fleet", program])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
