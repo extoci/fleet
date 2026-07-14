@@ -1,10 +1,28 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::hosted::HostedService;
 use crate::ui::DeviceColor;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceRole {
+    #[default]
+    Server,
+    Client,
+}
+
+impl DeviceRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Client => "client",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -17,6 +35,8 @@ pub struct Config {
     pub pair_port: u16,
     #[serde(default)]
     pub color: DeviceColor,
+    #[serde(default)]
+    pub role: DeviceRole,
     #[serde(default)]
     pub services: Vec<HostedService>,
 }

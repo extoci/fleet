@@ -22,9 +22,9 @@ The installer stops after placing the binary on your machine. Run `fleet init` w
 
 Published binaries support macOS on Apple Silicon and Intel, plus glibc-based ARM64/x64 Linux distributions equivalent to Ubuntu 22.04 or newer.
 
-During initialization, Fleet asks for the device name and color, then shows nearby Fleet devices and lets you choose which ones may SSH into this machine without a password. Devices you do not choose use the account's normal SSH authentication, typically a password when password login is enabled. Fleet previews the complete workstation setup and waits for confirmation before changing the machine. It may then ask for `sudo` to enable SSH, install tools, and enable boot-time discovery.
+During initialization, Fleet asks whether the device is a server or client, followed by its name and color. A server accepts SSH connections, advertises itself, and offers the full developer-workstation setup. A client is a lightweight controller: it gets a dedicated Fleet key and can discover and connect to servers on demand, but Fleet does not enable inbound SSH or install a background service. Fleet previews the selected setup and waits for confirmation before changing the machine.
 
-One `fleet init` wizard handles the whole machine: a dedicated Fleet SSH key, tmux, Git, GitHub CLI, a color-coded Bash/Zsh prompt, automatic tmux resume on interactive SSH logins, Git identity and GitHub authentication, Codex installation/sign-in, Bun when needed, and T3 Code startup. Existing shell configuration, SSH keys, and unrelated `authorized_keys` entries are preserved. Non-interactive setup still installs and configures the core workstation but skips account-login prompts and T3 startup.
+Server setup includes a dedicated Fleet SSH key, tmux, Git, GitHub CLI, a color-coded Bash/Zsh prompt, automatic tmux resume on interactive SSH logins, Git identity and GitHub authentication, Codex installation/sign-in, Bun when needed, and optional T3 Code startup. Client setup only creates Fleet's configuration and dedicated key. Existing shell configuration, SSH keys, and unrelated `authorized_keys` entries are preserved.
 
 ## Everyday use
 
@@ -64,6 +64,7 @@ Choose a device identity explicitly or let Fleet derive a stable color from its 
 ```sh
 fleet init --name studio --color violet
 fleet init --name build-box --color amber
+fleet init --role client --name powerbook
 ```
 
 Initialization is idempotent. Running it again keeps the existing name, color, ports, and SSH identity unless an option explicitly changes them.
@@ -87,7 +88,7 @@ JSON commands write only JSON to stdout. Remote commands write only the remote c
 Useful commands:
 
 ```text
-fleet init [--name NAME] [--color COLOR] [--no-service]
+fleet init [--name NAME] [--color COLOR] [--role server|client] [--no-service]
 fleet discover|ls [--timeout SECONDS] [--json|--plain]
 fleet connect NAME [-- COMMAND...]
 fleet pair NAME                    # allow NAME to connect here passwordlessly

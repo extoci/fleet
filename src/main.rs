@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use config::DeviceRole;
 use ui::{DeviceColor, Ui};
 
 #[derive(Parser)]
@@ -39,6 +40,9 @@ enum Command {
         /// Device accent advertised to the fleet
         #[arg(long, value_enum)]
         color: Option<DeviceColor>,
+        /// Configure this machine as an SSH host or a lightweight controller
+        #[arg(long, value_enum)]
+        role: Option<DeviceRole>,
         /// Do not install the background discovery service
         #[arg(long)]
         no_service: bool,
@@ -225,8 +229,9 @@ fn run() -> Result<()> {
         Some(Command::Init {
             name,
             color,
+            role,
             no_service,
-        }) => setup::init(name, color, !no_service, ui),
+        }) => setup::init(name, color, role, !no_service, ui),
         Some(Command::Discover {
             timeout,
             plain,

@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    config::{self, Config},
+    config::{self, Config, DeviceRole},
     discovery::{self, Peer},
     git_setup, service, ssh,
     ui::{DeviceColor, Ui},
@@ -18,12 +18,24 @@ use crate::{
 struct OnboardingChoices {
     name: String,
     color: DeviceColor,
+    role: DeviceRole,
     allowed_peers: Vec<Peer>,
+}
+
+struct OnboardingDefaults {
+    name: String,
+    color: DeviceColor,
+    role: DeviceRole,
+    prompt_for_name: bool,
+    prompt_for_color: bool,
+    prompt_for_role: bool,
+    install_service: bool,
 }
 
 pub fn init(
     name: Option<String>,
     color: Option<DeviceColor>,
+    role: Option<DeviceRole>,
     install_service: bool,
     ui: Ui,
 ) -> Result<()> {
@@ -31,6 +43,7 @@ pub fn init(
     let first_run = previous.is_none();
     let prompt_for_name = name.is_none();
     let prompt_for_color = color.is_none();
+    let prompt_for_role = role.is_none();
     let hostname = hostname::get()
         .context("read hostname")?
         .to_string_lossy()
@@ -51,17 +64,21 @@ pub fn init(
     let suggested_color = color
         .or_else(|| previous.as_ref().map(|config| config.color))
         .unwrap_or_else(|| DeviceColor::from_name(&suggested_name));
+    let suggested_role = role
+        .or_else(|| previous.as_ref().map(|config| config.role))
+        .unwrap_or_default();
 
     let choices = if first_run && io::stdin().is_terminal() {
-        let Some(choices) = onboarding_wizard(
-            suggested_name,
-            suggested_color,
+        let defaults = OnboardingDefaults {
+            name: suggested_name,
+            color: suggested_color,
+            role: suggested_role,
             prompt_for_name,
             prompt_for_color,
+            prompt_for_role,
             install_service,
-            ui,
-        )?
-        else {
+        };
+        let Some(choices) = onboarding_wizard(defaults, ui)? else {
             ui.muted("Setup cancelled. Nothing was changed.");
             return Ok(());
         };
@@ -70,12 +87,14 @@ pub fn init(
         OnboardingChoices {
             name: suggested_name,
             color: suggested_color,
+            role: suggested_role,
             allowed_peers: Vec::new(),
         }
     };
     let OnboardingChoices {
         name,
         color,
+        role,
         allowed_peers,
     } = choices;
 
@@ -100,6 +119,7 @@ pub fn init(
             .map(|config| config.pair_port)
             .unwrap_or_else(config::default_pair_port),
         color,
+        role,
         services: previous
             .as_ref()
             .map(|config| config.services.clone())
@@ -109,13 +129,18 @@ pub fn init(
     config::save(&config)?;
     let mut service_install_attempted = false;
     let core_setup = (|| -> Result<()> {
-        ensure_ssh_server()?;
-        ensure_workstation_tools(ui)?;
         ssh::ensure_key()?;
-        configure_shell(&config)?;
-        if install_service {
+        if role == DeviceRole::Server {
+            ensure_ssh_server()?;
+            ensure_workstation_tools(ui)?;
+            configure_shell(&config)?;
+            if install_service {
+                service_install_attempted = true;
+                service::install()?;
+            }
+        } else if discovery_service_was_running {
             service_install_attempted = true;
-            service::install()?;
+            service::uninstall()?;
         }
         Ok(())
     })();
@@ -147,8 +172,13 @@ pub fn init(
     }
     println!();
     ui.ready(color, &name);
-    ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
-    if io::stdin().is_terminal() {
+    if role == DeviceRole::Server {
+        ui.muted("  Connect from another device with: fleet connect ".to_string() + &name);
+    } else {
+        ui.muted("  Connect to a server with: fleet connect <name>");
+        ui.muted("  To install this client's key on a server: fleet ssh pair <name>");
+    }
+    if role == DeviceRole::Server && io::stdin().is_terminal() {
         println!();
         println!("Developer setup");
         if let Err(error) = git_setup::setup(None, None, false, ui) {
@@ -164,17 +194,40 @@ pub fn init(
     Ok(())
 }
 
-fn onboarding_wizard(
-    suggested_name: String,
-    suggested_color: DeviceColor,
-    prompt_for_name: bool,
-    prompt_for_color: bool,
-    install_service: bool,
-    ui: Ui,
-) -> Result<Option<OnboardingChoices>> {
+fn onboarding_wizard(defaults: OnboardingDefaults, ui: Ui) -> Result<Option<OnboardingChoices>> {
+    let OnboardingDefaults {
+        name: suggested_name,
+        color: suggested_color,
+        role: suggested_role,
+        prompt_for_name,
+        prompt_for_color,
+        prompt_for_role,
+        install_service,
+    } = defaults;
     println!();
     println!("{}  Fleet setup", ui.diamond(suggested_color));
     ui.muted("   One identity for SSH, services, and agents.");
+
+    let role = if prompt_for_role {
+        println!();
+        println!("Device role");
+        println!("  1  server  Accept SSH connections and host developer tools");
+        println!("  2  client  Connect to servers without background services");
+        loop {
+            let Some(value) = prompt_with_default("  Role", suggested_role.label())? else {
+                return Ok(None);
+            };
+            match parse_role(&value) {
+                Some(role) => break role,
+                None => println!("  Choose 1/server or 2/client."),
+            }
+        }
+    } else {
+        println!();
+        println!("Device role");
+        println!("  Role  {}", suggested_role.label());
+        suggested_role
+    };
 
     println!();
     println!("Device identity");
@@ -229,15 +282,23 @@ fn onboarding_wizard(
         default_color
     };
 
-    let peers = discover_for_onboarding(ui);
-    let Some(allowed_peers) = choose_allowed_peers(&peers, ui)? else {
-        return Ok(None);
+    let allowed_peers = if role == DeviceRole::Server {
+        let peers = discover_for_onboarding(ui);
+        let Some(allowed_peers) = choose_allowed_peers(&peers, ui)? else {
+            return Ok(None);
+        };
+        allowed_peers
+    } else {
+        Vec::new()
     };
 
     println!();
     println!("Fleet will configure");
-    println!("  • SSH access with a dedicated Fleet key");
-    if allowed_peers.is_empty() {
+    println!("  • A dedicated Fleet SSH key");
+    if role == DeviceRole::Client {
+        println!("  • Outbound connections to Fleet servers");
+        println!("  • No inbound SSH or background Fleet services");
+    } else if allowed_peers.is_empty() {
         println!("  • Other Fleet devices use normal SSH authentication");
     } else {
         println!(
@@ -249,22 +310,25 @@ fn onboarding_wizard(
                 .join(", ")
         );
     }
-    if install_service {
+    if role == DeviceRole::Server && install_service {
         println!("  • Local discovery as {name}.local");
         println!("  • A background service that starts automatically");
-    } else {
+    } else if role == DeviceRole::Server {
         println!("  • No background discovery; this device will not appear automatically");
     }
-    println!("  • tmux with automatic SSH session resume");
-    println!("  • A {} color-coded shell prompt", color.label());
-    println!("  • Git identity and GitHub CLI setup");
-    println!("  • Codex installation and sign-in");
-    println!("  • T3 Code launch with `bunx t3@latest`");
+    if role == DeviceRole::Server {
+        println!("  • tmux with automatic SSH session resume");
+        println!("  • A {} color-coded shell prompt", color.label());
+        println!("  • Git identity and GitHub CLI setup");
+        println!("  • Codex installation and sign-in");
+        println!("  • Optional T3 Code launch with `bunx t3@latest`");
+    }
     println!();
     Ok(
         confirm("Set up this device? [Y/n] ")?.then_some(OnboardingChoices {
             name,
             color,
+            role,
             allowed_peers,
         }),
     )
@@ -395,6 +459,14 @@ fn parse_color(value: &str) -> Option<DeviceColor> {
     DeviceColor::ALL
         .into_iter()
         .find(|color| color.label() == value)
+}
+
+fn parse_role(value: &str) -> Option<DeviceRole> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "server" => Some(DeviceRole::Server),
+        "2" | "client" => Some(DeviceRole::Client),
+        _ => None,
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
@@ -799,7 +871,7 @@ fn ensure_ssh_server() -> Result<()> {
     if cfg!(target_os = "macos") {
         checked(
             elevated("systemsetup", &["-setremotelogin", "on"]),
-            "enable Remote Login",
+            "enable Remote Login (on macOS, grant your terminal Full Disk Access or enable System Settings → General → Sharing → Remote Login)",
         )?;
         return Ok(());
     }
@@ -885,7 +957,8 @@ fn checked_quiet(mut command: Command, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmation, ensure_shell_source, parse_color, parse_peer_selection};
+    use super::{confirmation, ensure_shell_source, parse_color, parse_peer_selection, parse_role};
+    use crate::config::DeviceRole;
     use crate::ui::DeviceColor;
 
     #[test]
@@ -905,6 +978,15 @@ mod tests {
         assert_eq!(parse_color("  VIOLET "), Some(DeviceColor::Violet));
         assert_eq!(parse_color("7"), None);
         assert_eq!(parse_color("orange"), None);
+    }
+
+    #[test]
+    fn role_choices_accept_names_and_numbers() {
+        assert_eq!(parse_role("1"), Some(DeviceRole::Server));
+        assert_eq!(parse_role(" server "), Some(DeviceRole::Server));
+        assert_eq!(parse_role("2"), Some(DeviceRole::Client));
+        assert_eq!(parse_role("CLIENT"), Some(DeviceRole::Client));
+        assert_eq!(parse_role("workstation"), None);
     }
 
     #[test]

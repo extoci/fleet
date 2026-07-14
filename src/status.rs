@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
-    config,
+    config::{self, DeviceRole},
     hosted::{self, HostedServiceStatus},
     service, ssh,
     ui::{DeviceColor, Ui},
@@ -18,6 +18,7 @@ struct Status {
     device_id: Option<String>,
     user: Option<String>,
     color: Option<DeviceColor>,
+    role: Option<DeviceRole>,
     config_path: PathBuf,
     ssh_key_path: PathBuf,
     ssh_key_ready: bool,
@@ -41,6 +42,7 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
         device_id: config.as_ref().map(|config| config.device_id.clone()),
         user: config.as_ref().map(|config| config.user.clone()),
         color: config.as_ref().map(|config| config.color),
+        role: config.as_ref().map(|config| config.role),
         config_path: config::path()?,
         ssh_key_ready,
         ssh_key_fingerprint: ssh_key_ready.then(ssh::public_fingerprint).transpose()?,
@@ -63,13 +65,24 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
     let color = status.color.unwrap_or_default();
     println!("{}  Fleet status\n", ui.diamond(color));
     if let Some(name) = &status.name {
-        check(ui, true, &format!("{name} · {}", color.label()));
+        check(
+            ui,
+            true,
+            &format!(
+                "{name} · {} · {}",
+                color.label(),
+                status.role.unwrap_or_default().label()
+            ),
+        );
     } else {
         check(ui, false, "Not initialized · run `fleet init`");
     }
-    check(ui, status.ssh_server_running, "SSH server");
-    check(ui, status.tmux_installed, "tmux session resume");
-    check(ui, status.shell_theme_ready, "Fleet shell theme");
+    let server = status.role.unwrap_or_default() == DeviceRole::Server;
+    if server {
+        check(ui, status.ssh_server_running, "SSH server");
+        check(ui, status.tmux_installed, "tmux session resume");
+        check(ui, status.shell_theme_ready, "Fleet shell theme");
+    }
     check(ui, status.ssh_key_ready, "Dedicated SSH key");
     if status.authorized_devices > 0 {
         ui.muted(format!(
@@ -82,7 +95,15 @@ pub fn show(json: bool, ui: Ui) -> Result<()> {
             }
         ));
     }
-    check(ui, status.discovery_service_running, "Discovery service");
+    if server {
+        check(ui, status.discovery_service_running, "Discovery service");
+    } else {
+        check(
+            ui,
+            !status.discovery_service_running,
+            "No background Fleet service",
+        );
+    }
     if !status.hosted_services.is_empty() {
         println!();
         for service in &status.hosted_services {
