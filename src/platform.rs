@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -129,7 +130,7 @@ impl Platform {
         Ok(())
     }
 
-    pub fn name_is_in_use(&self, name: &str) -> bool {
+    fn resolved_name_addresses(&self, name: &str) -> Vec<IpAddr> {
         let host = format!("{name}.local");
         let mut command = if self.kind == PlatformKind::MacOs {
             let mut command = Command::new("dscacheutil");
@@ -140,12 +141,38 @@ impl Platform {
             command.args(["--", &host]);
             command
         };
-        output_with_timeout(&mut command, Duration::from_secs(1))
-            .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
+        let Some(output) = output_with_timeout(&mut command, Duration::from_secs(1)) else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let mut addresses: Vec<_> = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .filter_map(|field| {
+                field
+                    .split_once('%')
+                    .map_or(field, |(address, _)| address)
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        addresses
     }
 
-    pub fn name_conflicts(&self, name: &str, current_hostname: &str) -> bool {
-        name_conflicts_from_observations(name, current_hostname, self.name_is_in_use(name))
+    pub fn name_conflicts(&self, name: &str) -> Result<bool> {
+        let resolved = self.resolved_name_addresses(name);
+        if resolved.is_empty() {
+            return Ok(false);
+        }
+        let local: Vec<_> = if_addrs::get_if_addrs()
+            .context("read local network interfaces")?
+            .into_iter()
+            .map(|interface| interface.ip())
+            .collect();
+        Ok(name_conflicts_from_addresses(&resolved, &local))
     }
 
     pub fn set_hostname_and_mdns(&self, name: &str) -> Result<()> {
@@ -529,12 +556,8 @@ impl Platform {
     }
 }
 
-fn name_conflicts_from_observations(
-    requested_name: &str,
-    current_hostname: &str,
-    name_resolves: bool,
-) -> bool {
-    !requested_name.eq_ignore_ascii_case(current_hostname) && name_resolves
+fn name_conflicts_from_addresses(resolved: &[IpAddr], local: &[IpAddr]) -> bool {
+    resolved.iter().any(|address| !local.contains(address))
 }
 
 fn planned(privileged: bool, program: &'static str, args: &[&str]) -> PlannedCommand {
@@ -924,11 +947,22 @@ mod tests {
     }
 
     #[test]
-    fn current_hostname_is_not_a_collision_when_only_case_differs() {
-        assert!(!name_conflicts_from_observations(
-            "powerbook",
-            "Powerbook",
-            true
+    fn this_machines_own_addresses_are_not_a_name_collision() {
+        let loopback = "127.0.0.1".parse().unwrap();
+        let lan = "192.168.1.100".parse().unwrap();
+        assert!(!name_conflicts_from_addresses(
+            &[loopback, lan],
+            &[loopback, lan]
+        ));
+    }
+
+    #[test]
+    fn same_hostname_is_a_collision_when_it_resolves_to_another_machine() {
+        let other_machine = "192.168.1.69".parse().unwrap();
+        let this_machine = "192.168.1.100".parse().unwrap();
+        assert!(name_conflicts_from_addresses(
+            &[other_machine],
+            &[this_machine]
         ));
     }
 

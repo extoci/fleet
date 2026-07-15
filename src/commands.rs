@@ -60,7 +60,7 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     working("Preparing native local-network discovery");
     platform.ensure_discovery()?;
     completed("Native local-network discovery");
-    if platform.name_conflicts(&name, &current) {
+    if platform.name_conflicts(&name)? {
         bail!(
             "{}.local is already in use; choose another machine name",
             name
@@ -134,7 +134,7 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
     let color = choose_color(args.color)?;
-    if platform.name_conflicts(&name, &current) {
+    if platform.name_conflicts(&name)? {
         bail!(
             "{}.local is already in use; choose another machine name",
             name
@@ -328,6 +328,12 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     working("Preparing native local-network discovery");
     platform.ensure_discovery()?;
     completed("Native local-network discovery");
+    if platform.name_conflicts(&config.machine.name)? {
+        bail!(
+            "{}.local resolves to another machine; run `fleet leave --yes`, then rejoin with a unique name",
+            config.machine.name
+        );
+    }
     platform.set_hostname_and_mdns(&config.machine.name)?;
     completed(&format!(
         "System hostname and mDNS name: {}",

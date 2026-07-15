@@ -5,6 +5,7 @@ use crate::state::{Machine, Role, StatePaths};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::net::IpAddr;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +86,7 @@ fn handle_request(
     match (request.method(), request.url()) {
         (&Method::Get, "/v1/identity") => json_response(StatusCode(200), advertisement),
         (&Method::Post, "/v1/join") => {
+            let peer_ip = request.remote_addr().map(|address| address.ip());
             let body = read_body(request)?;
             let registration: JoinRequest =
                 serde_json::from_slice(&body).context("decode join request")?;
@@ -99,7 +101,7 @@ fn handle_request(
                 );
             }
             validate_existing_pin(&members, &registration.machine)?;
-            if let Err(error) = verify_member(paths, &registration.machine) {
+            if let Err(error) = verify_member(paths, &registration.machine, peer_ip) {
                 let _ = crate::ssh_client::regenerate(paths);
                 return Err(error.context("captain could not verify passwordless SSH"));
             }
@@ -205,7 +207,21 @@ fn validate_existing_pin(existing: &[Machine], candidate: &Machine) -> Result<()
     Ok(())
 }
 
-fn verify_member(paths: &StatePaths, machine: &Machine) -> Result<()> {
+#[derive(Debug, PartialEq, Eq)]
+struct SshVerificationTarget {
+    connect_host: String,
+    host_key_alias: String,
+}
+
+fn ssh_verification_target(machine: &Machine, peer_ip: Option<IpAddr>) -> SshVerificationTarget {
+    let host = machine.host();
+    SshVerificationTarget {
+        connect_host: peer_ip.map_or_else(|| host.clone(), |address| address.to_string()),
+        host_key_alias: host,
+    }
+}
+
+fn verify_member(paths: &StatePaths, machine: &Machine, peer_ip: Option<IpAddr>) -> Result<()> {
     let host_key = machine
         .ssh_host_key
         .as_deref()
@@ -227,6 +243,7 @@ fn verify_member(paths: &StatePaths, machine: &Machine) -> Result<()> {
     crate::state::atomic_write(&paths.known_hosts(), next.as_bytes(), 0o600)?;
 
     let identity = identity::ensure(paths)?;
+    let target = ssh_verification_target(machine, peer_ip);
     let destination = format!("{}@{host}", machine.ssh_user);
     let mut command = Command::new("ssh");
     command
@@ -241,11 +258,15 @@ fn verify_member(paths: &StatePaths, machine: &Machine) -> Result<()> {
             "StrictHostKeyChecking=yes",
         ])
         .arg("-o")
+        .arg(format!("HostKeyAlias={}", target.host_key_alias))
+        .arg("-o")
         .arg(format!(
             "UserKnownHostsFile={}",
             paths.known_hosts().display()
         ))
-        .arg(&destination)
+        .arg("-l")
+        .arg(&machine.ssh_user)
+        .arg(&target.connect_host)
         .arg("true");
     let Some(output) = command_output_with_timeout(&mut command, Duration::from_secs(3))? else {
         bail!("failed to connect to {destination}: SSH verification timed out after 3 seconds");
@@ -475,5 +496,14 @@ mod tests {
                 .is_none()
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn ssh_verification_uses_join_peer_while_pinning_the_fleet_hostname() {
+        let machine = valid_machine();
+        let target = ssh_verification_target(&machine, Some("192.168.1.69".parse().unwrap()));
+
+        assert_eq!(target.connect_host, "192.168.1.69");
+        assert_eq!(target.host_key_alias, "emerald.local");
     }
 }
