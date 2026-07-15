@@ -137,6 +137,10 @@ impl Platform {
             .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
     }
 
+    pub fn name_conflicts(&self, name: &str, current_hostname: &str) -> bool {
+        name_conflicts_from_observations(name, current_hostname, self.name_is_in_use(name))
+    }
+
     pub fn set_hostname_and_mdns(&self, name: &str) -> Result<()> {
         if self.kind == PlatformKind::DebianSystemd {
             self.require_linux_systemd_apt()?;
@@ -363,10 +367,10 @@ impl Platform {
             }
             atomic_write(&service_path, plist.as_bytes(), 0o644)?;
             let domain = format!("gui/{}", unsafe { libc_geteuid() });
-            let _ = Command::new("launchctl")
-                .args(["bootout", &domain])
-                .arg(&service_path)
-                .status();
+            run_best_effort(
+                "launchctl",
+                ["bootout", &domain, &service_path.to_string_lossy()],
+            );
             self.run(
                 "launchctl",
                 ["bootstrap", &domain, &service_path.to_string_lossy()],
@@ -400,9 +404,7 @@ impl Platform {
                 if self.dry_run {
                     self.run("launchctl", ["bootout", &domain, &path.to_string_lossy()])?;
                 } else {
-                    let _ = Command::new("launchctl")
-                        .args(["bootout", &domain, &path.to_string_lossy()])
-                        .status();
+                    run_best_effort("launchctl", ["bootout", &domain, &path.to_string_lossy()]);
                     fs::remove_file(path)?;
                 }
             }
@@ -491,6 +493,14 @@ impl Platform {
     }
 }
 
+fn name_conflicts_from_observations(
+    requested_name: &str,
+    current_hostname: &str,
+    name_resolves: bool,
+) -> bool {
+    !requested_name.eq_ignore_ascii_case(current_hostname) && name_resolves
+}
+
 fn planned(privileged: bool, program: &'static str, args: &[&str]) -> PlannedCommand {
     PlannedCommand {
         privileged,
@@ -551,6 +561,18 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<std::
     }
     let _ = child.kill();
     child.wait_with_output().ok()
+}
+
+fn run_best_effort<I, S>(program: &str, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let _ = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -778,6 +800,38 @@ unsafe fn libc_geteuid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn best_effort_commands_do_not_leak_expected_errors() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::best_effort_command_child",
+                "--nocapture",
+            ])
+            .env("FLEET_BEST_EFFORT_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("expected-launchd-error"));
+    }
+
+    #[test]
+    fn best_effort_command_child() {
+        if std::env::var_os("FLEET_BEST_EFFORT_CHILD").is_none() {
+            return;
+        }
+        run_best_effort("sh", ["-c", "printf expected-launchd-error >&2; exit 5"]);
+    }
+
+    #[test]
+    fn current_hostname_is_not_a_collision_when_only_case_differs() {
+        assert!(!name_conflicts_from_observations(
+            "powerbook",
+            "Powerbook",
+            true
+        ));
+    }
 
     #[test]
     fn shell_attach_is_guarded() {

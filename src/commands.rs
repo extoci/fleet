@@ -10,6 +10,7 @@ use crate::state::{
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use std::fs;
+use std::io::{self, IsTerminal};
 use uuid::Uuid;
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -36,14 +37,16 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
     let color = choose_color(args.color)?;
-    if name != current && platform.name_is_in_use(&name) {
+    if platform.name_conflicts(&name, &current) {
         bail!(
             "{}.local is already in use; choose another machine name",
             name
         );
     }
 
-    println!("\nFleet will initialize this machine as captain {name}.local ({color}).");
+    let host = format!("{name}.local");
+    let host_preview = colorize(&host, color, io::stdout().is_terminal());
+    println!("\nFleet will initialize this machine as captain {host_preview} ({color}).");
     println!("Fleet will request sudo to set the system hostname and local-network identity.");
     if !args.yes
         && !Confirm::with_theme(&ColorfulTheme::default())
@@ -128,7 +131,7 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
     let color = choose_color(args.color)?;
-    if name != current && platform.name_is_in_use(&name) {
+    if platform.name_conflicts(&name, &current) {
         bail!(
             "{}.local is already in use; choose another machine name",
             name
@@ -473,13 +476,24 @@ fn choose_color(provided: Option<Color>) -> Result<Color> {
     if let Some(color) = provided {
         return Ok(color);
     }
-    let labels: Vec<_> = Color::ALL.iter().map(ToString::to_string).collect();
+    let labels: Vec<_> = Color::ALL
+        .iter()
+        .map(|color| colorize(&format!("● {color}"), *color, true))
+        .collect();
     let index = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Machine color")
         .items(&labels)
         .default(3)
         .interact()?;
     Ok(Color::ALL[index])
+}
+
+fn colorize(value: &str, color: Color, enabled: bool) -> String {
+    if enabled {
+        format!("\u{1b}[38;5;{}m{value}\u{1b}[0m", color.ansi_256())
+    } else {
+        value.to_owned()
+    }
 }
 
 fn choose_captain(captains: Vec<CaptainAdvertisement>) -> Result<CaptainAdvertisement> {
@@ -620,5 +634,22 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
             "captain service was not visible through mDNS as {}",
             expected.host()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_preview_uses_the_same_palette_as_machine_themes() {
+        assert_eq!(
+            colorize("● orange", Color::Orange, true),
+            "\u{1b}[38;5;208m● orange\u{1b}[0m"
+        );
+        assert_eq!(
+            colorize("powerbook.local", Color::Orange, false),
+            "powerbook.local"
+        );
     }
 }
