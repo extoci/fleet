@@ -5,11 +5,11 @@ use crate::state::{Machine, Role, StatePaths};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use uuid::Uuid;
 
@@ -66,10 +66,8 @@ pub fn run(paths: &StatePaths, listen: &str) -> Result<()> {
             Ok(response) => response,
             Err(error) => {
                 eprintln!("registration request failed: {error:#}");
-                json_response(
-                    StatusCode(400),
-                    &serde_json::json!({"error": error.to_string()}),
-                )?
+                let message = format!("{error:#}");
+                json_response(StatusCode(400), &serde_json::json!({"error": message}))?
             }
         };
         let _ = request.respond(response);
@@ -230,38 +228,61 @@ fn verify_member(paths: &StatePaths, machine: &Machine) -> Result<()> {
 
     let identity = identity::ensure(paths)?;
     let destination = format!("{}@{host}", machine.ssh_user);
-    let mut last = None;
-    for _ in 0..8 {
-        let result = Command::new("ssh")
-            .arg("-i")
-            .arg(&identity.private_key)
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=3",
-                "-o",
-                "StrictHostKeyChecking=yes",
-            ])
-            .arg("-o")
-            .arg(format!(
-                "UserKnownHostsFile={}",
-                paths.known_hosts().display()
-            ))
-            .arg(&destination)
-            .arg("true")
-            .status();
-        match result {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(status) => last = Some(format!("SSH exited with {status}")),
-            Err(error) => last = Some(error.to_string()),
-        }
-        thread::sleep(Duration::from_secs(1));
+    let mut command = Command::new("ssh");
+    command
+        .arg("-i")
+        .arg(&identity.private_key)
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "StrictHostKeyChecking=yes",
+        ])
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            paths.known_hosts().display()
+        ))
+        .arg(&destination)
+        .arg("true");
+    let Some(output) = command_output_with_timeout(&mut command, Duration::from_secs(3))? else {
+        bail!("failed to connect to {destination}: SSH verification timed out after 3 seconds");
+    };
+    if output.status.success() {
+        return Ok(());
     }
-    bail!(
-        "failed to connect to {destination}: {}",
-        last.unwrap_or_else(|| "unknown SSH error".into())
-    )
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    if detail.is_empty() {
+        bail!(
+            "failed to connect to {destination}: SSH exited with {}",
+            output.status
+        );
+    }
+    bail!("failed to connect to {destination}: {detail}")
+}
+
+fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start timed command")?;
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if child.try_wait()?.is_some() {
+            return child
+                .wait_with_output()
+                .map(Some)
+                .context("read command output");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(None)
 }
 
 fn json_response<T: Serialize>(
@@ -333,28 +354,31 @@ fn post<T: Serialize>(endpoint: &str, path: &str, body: &T) -> Result<()> {
     };
     let url = format!("{base}{path}");
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
         .build()?;
-    let mut last_error = None;
-    for _ in 0..8 {
-        match client
-            .post(&url)
-            .json(body)
-            .send()
-            .and_then(|response| response.error_for_status())
-        {
-            Ok(_) => return Ok(()),
-            Err(error) => last_error = Some(error),
-        }
-        thread::sleep(Duration::from_millis(500));
+    let response = client
+        .post(&url)
+        .json(body)
+        .send()
+        .with_context(|| format!("send captain request to {endpoint}"))?;
+    if response.status().is_success() {
+        return Ok(());
     }
-    Err(last_error.context("captain request failed")?.into())
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    let reason = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    bail!("captain rejected request: {reason}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::Color;
+    use std::sync::atomic::AtomicUsize;
 
     const KEY_ONE: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElmqI4v+7cZFSmB7soOSl3vymQTl8v7/15ZnHH2DA4d";
@@ -408,5 +432,48 @@ mod tests {
                 .to_string()
                 .contains("Fleet identity changed")
         );
+    }
+
+    #[test]
+    fn rejected_registration_is_returned_once_with_the_captains_reason() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let request_count = requests.clone();
+        let server_stop = stop.clone();
+        let handle = thread::spawn(move || {
+            while !server_stop.load(Ordering::SeqCst) {
+                if let Some(request) = server.recv_timeout(Duration::from_millis(50)).unwrap() {
+                    request_count.fetch_add(1, Ordering::SeqCst);
+                    request
+                        .respond(
+                            Response::from_string(r#"{"error":"SSH host key mismatch"}"#)
+                                .with_status_code(StatusCode(400)),
+                        )
+                        .unwrap();
+                }
+            }
+        });
+
+        let error = post(&endpoint, "/v1/join", &serde_json::json!({})).unwrap_err();
+        stop.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(error.to_string().contains("SSH host key mismatch"));
+    }
+
+    #[test]
+    fn ssh_verification_process_has_a_hard_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        let started = Instant::now();
+        assert!(
+            command_output_with_timeout(&mut command, Duration::from_millis(50))
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

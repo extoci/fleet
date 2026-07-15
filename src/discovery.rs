@@ -37,30 +37,51 @@ pub fn discover(explicit: Option<&str>) -> Result<Vec<CaptainAdvertisement>> {
     if let Some(endpoint) = explicit {
         return Ok(vec![fetch_identity(endpoint)?]);
     }
-    let mut endpoints = Vec::new();
-    for _ in 0..6 {
-        endpoints = if cfg!(target_os = "macos") {
-            browse_macos()?
-        } else if cfg!(target_os = "linux") {
-            browse_linux()?
-        } else {
-            bail!("Fleet discovery supports macOS and Linux only");
-        };
-        if !endpoints.is_empty() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    let mut captains = Vec::new();
-    for endpoint in endpoints {
-        match fetch_identity(&endpoint) {
-            Ok(captain) => captains.push(captain),
-            Err(error) => {
-                eprintln!("warning: ignored invalid Fleet service at {endpoint}: {error:#}")
+    discover_with(
+        || {
+            if cfg!(target_os = "macos") {
+                browse_macos()
+            } else if cfg!(target_os = "linux") {
+                browse_linux()
+            } else {
+                bail!("Fleet discovery supports macOS and Linux only");
+            }
+        },
+        fetch_identity,
+        6,
+        Duration::from_millis(500),
+    )
+}
+
+fn discover_with<B, F>(
+    mut browse: B,
+    mut fetch: F,
+    attempts: usize,
+    retry_delay: Duration,
+) -> Result<Vec<CaptainAdvertisement>>
+where
+    B: FnMut() -> Result<Vec<String>>,
+    F: FnMut(&str) -> Result<CaptainAdvertisement>,
+{
+    for attempt in 0..attempts {
+        let mut captains = Vec::new();
+        for endpoint in browse()? {
+            if let Ok(captain) = fetch(&endpoint)
+                && !captains
+                    .iter()
+                    .any(|existing: &CaptainAdvertisement| existing.id == captain.id)
+            {
+                captains.push(captain);
             }
         }
+        if !captains.is_empty() {
+            return Ok(captains);
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(retry_delay);
+        }
     }
-    Ok(captains)
+    Ok(Vec::new())
 }
 
 pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {
@@ -255,5 +276,44 @@ mod tests {
         ad.fingerprint = crate::identity::fingerprint_public_key(key).unwrap();
         ad.host = "ruby.local".into();
         assert!(validate_advertisement(&ad).is_err());
+    }
+
+    #[test]
+    fn discovery_retries_after_a_stale_service_until_a_captain_is_valid() {
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElmqI4v+7cZFSmB7soOSl3vymQTl8v7/15ZnHH2DA4d";
+        let captain = CaptainAdvertisement {
+            protocol: 1,
+            id: Uuid::new_v4(),
+            name: "emerald".into(),
+            host: "emerald.local".into(),
+            port: DEFAULT_PORT,
+            fingerprint: crate::identity::fingerprint_public_key(key).unwrap(),
+            ssh_public_key: key.into(),
+        };
+        let mut browses = 0;
+        let found = discover_with(
+            || {
+                browses += 1;
+                Ok(if browses == 1 {
+                    vec!["emerald.local:47651".into()]
+                } else {
+                    vec!["emerald.local:42170".into()]
+                })
+            },
+            |endpoint| {
+                if endpoint.ends_with(":47651") {
+                    bail!("stale service");
+                }
+                Ok(captain.clone())
+            },
+            2,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(browses, 2);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].port, DEFAULT_PORT);
     }
 }

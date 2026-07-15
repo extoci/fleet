@@ -32,17 +32,9 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     let platform = Platform::new(args.dry_run)?;
     let shell = platform.active_shell()?;
     platform.preflight()?;
-    println!("Fleet may request sudo to prepare native local-network discovery.");
-    platform.ensure_discovery()?;
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
     let color = choose_color(args.color)?;
-    if platform.name_conflicts(&name, &current) {
-        bail!(
-            "{}.local is already in use; choose another machine name",
-            name
-        );
-    }
 
     let host = format!("{name}.local");
     let host_preview = colorize(&host, color, io::stdout().is_terminal());
@@ -65,6 +57,15 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
         return Ok(());
     }
 
+    working("Preparing native local-network discovery");
+    platform.ensure_discovery()?;
+    completed("Native local-network discovery");
+    if platform.name_conflicts(&name, &current) {
+        bail!(
+            "{}.local is already in use; choose another machine name",
+            name
+        );
+    }
     let identity = identity::ensure(paths)?;
     completed("Fleet identity and dedicated SSH key");
     platform.set_hostname_and_mdns(&name)?;
@@ -111,7 +112,9 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     let shell = platform.active_shell()?;
     platform.preflight()?;
     println!("Fleet may request sudo to prepare native local-network discovery.");
+    working("Preparing native local-network discovery");
     platform.ensure_discovery()?;
+    completed("Native local-network discovery");
     let captains = crate::discovery::discover(args.captain.as_deref())?;
     if captains.is_empty() {
         bail!("no Fleet captain was discovered on this local network");
@@ -251,6 +254,9 @@ fn resume_init(paths: &StatePaths, args: InitArgs, mut config: LocalConfig) -> R
     }
     identity::ensure(paths)?;
     completed("Fleet identity and dedicated SSH key");
+    working("Preparing native local-network discovery");
+    platform.ensure_discovery()?;
+    completed("Native local-network discovery");
     platform.set_hostname_and_mdns(&config.machine.name)?;
     completed(&format!(
         "System hostname and mDNS name: {}",
@@ -319,6 +325,9 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     }
     identity::ensure(paths)?;
     completed("Fleet identity");
+    working("Preparing native local-network discovery");
+    platform.ensure_discovery()?;
+    completed("Native local-network discovery");
     platform.set_hostname_and_mdns(&config.machine.name)?;
     completed(&format!(
         "System hostname and mDNS name: {}",
@@ -575,6 +584,10 @@ fn completed(label: &str) {
     println!("  ✓ {label}");
 }
 
+fn working(label: &str) {
+    println!("  … {label}");
+}
+
 fn status_line(machine: &Machine) -> String {
     let tools = machine
         .tools
@@ -622,19 +635,21 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
             .unwrap_or_else(|| anyhow::anyhow!("captain service did not answer"))
             .context("captain service failed its local health check"));
     }
-    let discovered = crate::discovery::discover(None)
-        .context("captain HTTP service works, but mDNS advertisement could not be verified")?;
-    if discovered
-        .iter()
-        .any(|captain| captain.id == expected.id && captain.host == expected.host())
-    {
-        Ok(())
-    } else {
-        bail!(
-            "captain service was not visible through mDNS as {}",
-            expected.host()
-        )
+    for _ in 0..6 {
+        let discovered = crate::discovery::discover(None)
+            .context("captain HTTP service works, but mDNS advertisement could not be verified")?;
+        if discovered
+            .iter()
+            .any(|captain| captain.id == expected.id && captain.host == expected.host())
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    bail!(
+        "captain service was not visible through mDNS as {}",
+        expected.host()
+    )
 }
 
 #[cfg(test)]

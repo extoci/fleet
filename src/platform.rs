@@ -2,8 +2,9 @@ use crate::cli::{Color, Tool};
 use crate::state::{StatePaths, atomic_write};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 pub struct Platform {
     pub dry_run: bool,
     kind: PlatformKind,
+    setup_log: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +35,12 @@ impl Platform {
             "linux" => PlatformKind::DebianSystemd,
             _ => bail!("Fleet v0 supports macOS and Linux only"),
         };
-        Ok(Self { dry_run, kind })
+        let setup_log = StatePaths::discover()?.logs_dir().join("setup.log");
+        Ok(Self {
+            dry_run,
+            kind,
+            setup_log,
+        })
     }
 
     pub fn os_name(&self) -> String {
@@ -191,7 +198,7 @@ impl Platform {
             if which::which("brew").is_err() {
                 bail!("tmux is missing; install Homebrew or tmux, then rerun Fleet");
             }
-            self.run("brew", ["install", "tmux"])
+            self.run_quiet("brew", ["install", "tmux"])
         } else {
             self.require_linux_systemd_apt()?;
             self.run_sudo("apt-get", ["update"])?;
@@ -371,7 +378,7 @@ impl Platform {
                 "launchctl",
                 ["bootout", &domain, &service_path.to_string_lossy()],
             );
-            self.run(
+            self.run_quiet(
                 "launchctl",
                 ["bootstrap", &domain, &service_path.to_string_lossy()],
             )?;
@@ -385,12 +392,12 @@ impl Platform {
                 return Ok(());
             }
             atomic_write(&service_path, unit.as_bytes(), 0o644)?;
-            self.run("systemctl", ["--user", "daemon-reload"])?;
-            self.run(
+            self.run_quiet("systemctl", ["--user", "daemon-reload"])?;
+            self.run_quiet(
                 "systemctl",
                 ["--user", "enable", "--now", "fleet-captain.service"],
             )?;
-            self.run("systemctl", ["--user", "restart", "fleet-captain.service"])?;
+            self.run_quiet("systemctl", ["--user", "restart", "fleet-captain.service"])?;
         }
         Ok(())
     }
@@ -409,7 +416,7 @@ impl Platform {
                 }
             }
         } else {
-            let _ = self.run(
+            let _ = self.run_quiet(
                 "systemctl",
                 ["--user", "disable", "--now", "fleet-captain.service"],
             );
@@ -476,20 +483,49 @@ impl Platform {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut all = vec![program.to_owned()];
-        all.extend(
-            args.into_iter()
-                .map(|value| value.as_ref().to_string_lossy().into_owned()),
-        );
-        self.run("sudo", all)
+        if self.dry_run {
+            let mut all = vec![program.to_owned()];
+            all.extend(
+                args.into_iter()
+                    .map(|value| value.as_ref().to_string_lossy().into_owned()),
+            );
+            return self.run("sudo", all);
+        }
+        let authenticated = Command::new("sudo")
+            .args(["-n", "true"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !authenticated {
+            self.run("sudo", ["-v"])?;
+        }
+        let mut all = vec![std::ffi::OsString::from("-n"), program.into()];
+        all.extend(args.into_iter().map(|value| value.as_ref().to_owned()));
+        run_setup_command(&self.setup_log, "sudo", &all)
     }
 
     fn run_planned(&self, command: PlannedCommand) -> Result<()> {
         if command.privileged {
             self.run_sudo(command.program, command.args)
         } else {
-            self.run(command.program, command.args)
+            self.run_quiet(command.program, command.args)
         }
+    }
+
+    fn run_quiet<I, S>(&self, program: &str, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<_> = args
+            .into_iter()
+            .map(|value| value.as_ref().to_owned())
+            .collect();
+        if self.dry_run {
+            return self.run(program, args);
+        }
+        run_setup_command(&self.setup_log, program, &args)
     }
 }
 
@@ -516,18 +552,6 @@ fn hostname_plan(kind: PlatformKind, name: &str) -> Vec<PlannedCommand> {
             .map(|key| planned(true, "scutil", &["--set", key, name]))
             .collect(),
         PlatformKind::DebianSystemd => vec![
-            planned(true, "apt-get", &["update"]),
-            planned(
-                true,
-                "apt-get",
-                &[
-                    "install",
-                    "-y",
-                    "avahi-daemon",
-                    "avahi-utils",
-                    "libnss-mdns",
-                ],
-            ),
             planned(true, "hostnamectl", &["hostname", name]),
             planned(true, "systemctl", &["enable", "--now", "avahi-daemon"]),
             planned(true, "systemctl", &["restart", "avahi-daemon"]),
@@ -573,6 +597,44 @@ where
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+fn run_setup_command(log_path: &Path, program: &str, args: &[std::ffi::OsString]) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).context("create Fleet setup log directory")?;
+    }
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("run {program}"))?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    set_mode(log_path, 0o600)?;
+    writeln!(
+        log,
+        "\n$ {} {}",
+        program,
+        args.iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )?;
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+    if !output.status.success() {
+        bail!(
+            "{program} failed with {}; details: {}",
+            output.status,
+            log_path.display()
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -802,6 +864,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn setup_command_output_is_logged_instead_of_printed() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("setup.log");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::setup_command_output_child",
+                "--nocapture",
+            ])
+            .env("FLEET_SETUP_OUTPUT_CHILD", &log)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("apt-spam"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("systemd-spam"));
+        let logged = fs::read_to_string(log).unwrap();
+        assert!(logged.contains("apt-spam"));
+        assert!(logged.contains("systemd-spam"));
+    }
+
+    #[test]
+    fn setup_command_output_child() {
+        let Some(log) = std::env::var_os("FLEET_SETUP_OUTPUT_CHILD") else {
+            return;
+        };
+        run_setup_command(
+            Path::new(&log),
+            "sh",
+            &[
+                "-c".into(),
+                "printf apt-spam; printf systemd-spam >&2".into(),
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn best_effort_commands_do_not_leak_expected_errors() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -948,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_plan_contains_hostname_mdns_resolver_and_ssh() {
+    fn linux_hostname_plan_does_not_reinstall_discovery_packages() {
         let hostname = hostname_plan(PlatformKind::DebianSystemd, "emerald");
         let rendered = hostname
             .iter()
@@ -957,13 +1056,11 @@ mod tests {
             .join("\n");
         for expected in [
             "hostnamectl hostname emerald",
-            "avahi-daemon",
-            "avahi-utils",
-            "libnss-mdns",
             "systemctl restart avahi-daemon",
         ] {
             assert!(rendered.contains(expected), "missing {expected}");
         }
+        assert!(!rendered.contains("apt-get"));
         assert!(
             ssh_server_plan(PlatformKind::DebianSystemd)
                 .iter()

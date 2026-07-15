@@ -73,7 +73,7 @@ Environment:
 - Multipass 1.16.3 on Apple Silicon macOS
 - `fleet-captain`: Ubuntu 24.04 LTS, arm64, 2 CPUs, 2 GiB memory, 10 GiB disk
 - `fleet-member`: Ubuntu 24.04 LTS, arm64, 2 CPUs, 2 GiB memory, 10 GiB disk
-- Fleet 0.0.1 release build
+- Fleet 0.1.0 release build
 
 Observed evidence:
 
@@ -90,6 +90,7 @@ Observed evidence:
 - `fleet leave --yes` removed the captain key, inventory record, generated SSH host block, and pinned known-host entry. Captain SSH access then failed as expected.
 - After leave, the member remained named `emerald`; its Bash integration, themed tmux configuration, live tmux session, Codex, Claude Code, a test repository-independent user file, and other user state remained.
 - Repeating captain initialization, member joining, and member leaving was idempotent. This caught and verified fixes for missing `avahi-utils`, Avahi's stale pre-rename hostname, mDNS propagation delay, and stale daemon processes after binary replacement.
+- Linux captain initialization remained concise while apt and systemd output was captured in `~/.fleet/logs/setup.log`; initialization also succeeded with a stale, unreachable `_fleet._tcp` advertisement present on port 47651.
 - The hardened build was rerun after the completion audit. Discovery locally verified that the advertised SHA-256 fingerprint matched the canonical Ed25519 captain key before trust, and the captain regenerated its pinned `known_hosts` file from inventory.
 - Fleet's SSH `Include` appeared before pre-existing host rules, and `ssh -G emerald.local` resolved to the Fleet user, dedicated identity, strict host-key checking, and Fleet-managed known-hosts file.
 - After the member left, an empty captain successfully ran `fleet leave`. The service, captain-only skill link/files, generated SSH host configuration, and known-hosts file were removed. The real hostname, Fleet identity, shell/tmux theme, and a user preservation file remained.
