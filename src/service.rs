@@ -24,6 +24,12 @@ pub struct LeaveRequest {
     pub id: Uuid,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignedRequest {
+    pub payload: serde_json::Value,
+    pub signature: String,
+}
+
 pub fn run(paths: &StatePaths, listen: &str) -> Result<()> {
     let config = paths.require()?;
     if config.role != Role::Captain {
@@ -66,8 +72,9 @@ pub fn run(paths: &StatePaths, listen: &str) -> Result<()> {
         let response = match result {
             Ok(response) => response,
             Err(error) => {
-                eprintln!("registration request failed: {error:#}");
-                let message = format!("{error:#}");
+                crate::logging::detail(paths, "captain-request", format!("{error:#}"));
+                eprintln!("Fleet captain request failed. Run `fleet logs` for details.");
+                let message = error.to_string();
                 json_response(StatusCode(400), &serde_json::json!({"error": message}))?
             }
         };
@@ -88,8 +95,17 @@ fn handle_request(
         (&Method::Post, "/v1/join") => {
             let peer_ip = request.remote_addr().map(|address| address.ip());
             let body = read_body(request)?;
-            let registration: JoinRequest =
+            let signed: SignedRequest =
                 serde_json::from_slice(&body).context("decode join request")?;
+            let payload = serde_json::to_vec(&signed.payload)?;
+            let registration: JoinRequest =
+                serde_json::from_value(signed.payload).context("decode signed join payload")?;
+            identity::verify(
+                &registration.machine.public_identity,
+                &payload,
+                &signed.signature,
+            )
+            .context("join request was not signed by the member")?;
             validate_registration(&registration.machine)?;
             let members = skill::load_members(paths)?;
             if members.iter().any(|member| {
@@ -111,8 +127,18 @@ fn handle_request(
         }
         (&Method::Post, "/v1/leave") => {
             let body = read_body(request)?;
-            let leave: LeaveRequest =
+            let signed: SignedRequest =
                 serde_json::from_slice(&body).context("decode leave request")?;
+            let payload = serde_json::to_vec(&signed.payload)?;
+            let leave: LeaveRequest =
+                serde_json::from_value(signed.payload).context("decode signed leave payload")?;
+            let members = skill::load_members(paths)?;
+            let member = members
+                .iter()
+                .find(|member| member.id == leave.id)
+                .context("member is not registered with this captain")?;
+            identity::verify(&member.public_identity, &payload, &signed.signature)
+                .context("leave request was not signed by the registered member")?;
             skill::remove_member(paths, leave.id)?;
             crate::ssh_client::regenerate(paths)?;
             json_response(StatusCode(200), &serde_json::json!({"left": true}))
@@ -352,8 +378,9 @@ fn publish(advertisement: &CaptainAdvertisement) -> Result<Child> {
         .context("publish Fleet captain with native mDNS service")
 }
 
-pub fn register(endpoint: &str, machine: &Machine) -> Result<()> {
-    post(
+pub fn register(paths: &StatePaths, endpoint: &str, machine: &Machine) -> Result<()> {
+    signed_post(
+        paths,
         endpoint,
         "/v1/join",
         &JoinRequest {
@@ -362,8 +389,21 @@ pub fn register(endpoint: &str, machine: &Machine) -> Result<()> {
     )
 }
 
-pub fn notify_leave(endpoint: &str, id: Uuid) -> Result<()> {
-    post(endpoint, "/v1/leave", &LeaveRequest { id })
+pub fn notify_leave(paths: &StatePaths, endpoint: &str, id: Uuid) -> Result<()> {
+    signed_post(paths, endpoint, "/v1/leave", &LeaveRequest { id })
+}
+
+fn signed_post<T: Serialize>(
+    paths: &StatePaths,
+    endpoint: &str,
+    path: &str,
+    body: &T,
+) -> Result<()> {
+    let payload = serde_json::to_value(body)?;
+    let bytes = serde_json::to_vec(&payload)?;
+    let identity = identity::ensure(paths)?;
+    let signature = identity::sign(&identity.private_key, &bytes)?;
+    post(endpoint, path, &SignedRequest { payload, signature })
 }
 
 fn post<T: Serialize>(endpoint: &str, path: &str, body: &T) -> Result<()> {

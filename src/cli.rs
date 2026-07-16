@@ -22,6 +22,12 @@ pub enum Command {
     Status(StatusArgs),
     /// Leave the current fleet without undoing machine setup.
     Leave(LeaveArgs),
+    /// Remove a member from this captain's inventory.
+    Remove(RemoveArgs),
+    /// Check Fleet's local setup and network health.
+    Doctor,
+    /// Show detailed Fleet diagnostic logs.
+    Logs(LogsArgs),
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
@@ -73,6 +79,12 @@ pub struct StatusArgs {
     /// Emit stable JSON for scripts and tests.
     #[arg(long)]
     pub json: bool,
+    /// Check whether recorded machines are currently reachable.
+    #[arg(long)]
+    pub check: bool,
+    /// Refresh checked status until interrupted.
+    #[arg(long)]
+    pub watch: bool,
 }
 
 #[derive(Debug, Args)]
@@ -83,6 +95,28 @@ pub struct LeaveArgs {
     /// Print the mutation plan without changing the machine.
     #[arg(long)]
     pub dry_run: bool,
+    /// Let a captain leave even when stale members remain.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Member name (with or without .local) or machine ID.
+    pub member: String,
+    /// Skip the removal confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    /// Print the mutation plan without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LogsArgs {
+    /// Number of recent log lines to show.
+    #[arg(long, default_value_t = 100)]
+    pub lines: usize,
 }
 
 #[derive(Debug, Args)]

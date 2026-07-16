@@ -127,3 +127,50 @@ fn captain_cannot_leave_with_members() {
         .failure()
         .stderr(predicate::str::contains("members must leave"));
 }
+
+#[test]
+fn captain_can_force_leave_with_stale_members_in_dry_run() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    let mut member = captain_config().machine;
+    member.id = Uuid::new_v4();
+    member.name = "emerald".into();
+    fleet::skill::save_member(&paths, &member).unwrap();
+    test_command(&home)
+        .args(["leave", "--yes", "--force", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would remove Fleet membership"));
+}
+
+#[test]
+fn captain_can_remove_member_by_name() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    let mut member = captain_config().machine;
+    member.id = Uuid::new_v4();
+    member.name = "emerald".into();
+    fleet::skill::save_member(&paths, &member).unwrap();
+    test_command(&home)
+        .args(["remove", "emerald.local", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed emerald.local"));
+    assert!(fleet::skill::load_members(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn logs_has_a_friendly_empty_state() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("logs")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No Fleet diagnostic logs"));
+}

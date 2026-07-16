@@ -3,8 +3,10 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 #[derive(Debug)]
 pub struct Identity {
@@ -105,6 +107,70 @@ pub fn fingerprint_public_key(line: &str) -> Result<String> {
     ))
 }
 
+pub fn sign(private_key: &Path, payload: &[u8]) -> Result<String> {
+    let temp = tempfile::tempdir().context("create signing workspace")?;
+    let message = temp.path().join("request");
+    crate::state::atomic_write(&message, payload, 0o600)?;
+    let output = Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", "fleet-request", "-f"])
+        .arg(private_key)
+        .arg(&message)
+        .output()
+        .context("sign Fleet request with ssh-keygen")?;
+    if !output.status.success() {
+        bail!(
+            "could not sign Fleet request: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let signature = fs::read(message.with_extension("sig")).context("read request signature")?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(signature))
+}
+
+pub fn verify(public_key: &str, payload: &[u8], signature: &str) -> Result<()> {
+    let public_key = public_key_material(public_key)?;
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .context("request signature is not valid base64")?;
+    let temp = tempfile::tempdir().context("create verification workspace")?;
+    let allowed = temp.path().join("allowed_signers");
+    let signature_path = temp.path().join("request.sig");
+    crate::state::atomic_write(
+        &allowed,
+        format!("fleet-device {public_key}\n").as_bytes(),
+        0o600,
+    )?;
+    crate::state::atomic_write(&signature_path, &signature, 0o600)?;
+    let mut child = Command::new("ssh-keygen")
+        .args([
+            "-Y",
+            "verify",
+            "-I",
+            "fleet-device",
+            "-n",
+            "fleet-request",
+            "-f",
+        ])
+        .arg(&allowed)
+        .arg("-s")
+        .arg(&signature_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("verify Fleet request with ssh-keygen")?;
+    child
+        .stdin
+        .take()
+        .context("open verifier input")?
+        .write_all(payload)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!("request signature verification failed");
+    }
+    Ok(())
+}
+
 fn validate_ed25519_blob(blob: &[u8]) -> Result<()> {
     let (algorithm, remainder) = take_ssh_string(blob)?;
     if algorithm != b"ssh-ed25519" {
@@ -190,5 +256,24 @@ mod tests {
                 .to_string()
                 .contains("private key is missing")
         );
+    }
+
+    #[test]
+    fn signatures_bind_requests_to_the_fleet_identity() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_paths = StatePaths {
+            root: first.path().join(".fleet"),
+        };
+        let second_paths = StatePaths {
+            root: second.path().join(".fleet"),
+        };
+        let first_identity = ensure(&first_paths).unwrap();
+        let second_identity = ensure(&second_paths).unwrap();
+        let payload = br#"{"id":"device-one"}"#;
+        let signature = sign(&first_identity.private_key, payload).unwrap();
+        verify(&first_identity.public_key, payload, &signature).unwrap();
+        assert!(verify(&second_identity.public_key, payload, &signature).is_err());
+        assert!(verify(&first_identity.public_key, b"changed", &signature).is_err());
     }
 }

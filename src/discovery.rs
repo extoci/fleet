@@ -63,15 +63,20 @@ where
     B: FnMut() -> Result<Vec<String>>,
     F: FnMut(&str) -> Result<CaptainAdvertisement>,
 {
+    let mut failures = Vec::new();
     for attempt in 0..attempts {
         let mut captains = Vec::new();
         for endpoint in browse()? {
-            if let Ok(captain) = fetch(&endpoint)
-                && !captains
-                    .iter()
-                    .any(|existing: &CaptainAdvertisement| existing.id == captain.id)
-            {
-                captains.push(captain);
+            match fetch(&endpoint) {
+                Ok(captain)
+                    if !captains
+                        .iter()
+                        .any(|existing: &CaptainAdvertisement| existing.id == captain.id) =>
+                {
+                    captains.push(captain)
+                }
+                Ok(_) => {}
+                Err(error) => failures.push(format!("{endpoint}: {error:#}")),
             }
         }
         if !captains.is_empty() {
@@ -81,7 +86,14 @@ where
             thread::sleep(retry_delay);
         }
     }
-    Ok(Vec::new())
+    if failures.is_empty() {
+        Ok(Vec::new())
+    } else {
+        bail!(
+            "Fleet advertisements were found, but none responded correctly: {}",
+            failures.join("; ")
+        )
+    }
 }
 
 pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {

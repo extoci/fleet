@@ -1,4 +1,4 @@
-use crate::cli::{Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, Tool};
+use crate::cli::{Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, Tool};
 use crate::discovery::{CaptainAdvertisement, DEFAULT_PORT};
 use crate::identity;
 use crate::platform::Platform;
@@ -11,6 +11,12 @@ use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use std::fs;
 use std::io::{self, IsTerminal};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use uuid::Uuid;
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -18,8 +24,11 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init(args) => init(&paths, args),
         Command::Join(args) => join(&paths, args),
-        Command::Status(args) => status(&paths, args.json),
+        Command::Status(args) => status(&paths, args.json, args.check || args.watch, args.watch),
         Command::Leave(args) => leave(&paths, args),
+        Command::Remove(args) => remove(&paths, args),
+        Command::Doctor => doctor(&paths),
+        Command::Logs(args) => logs(&paths, args.lines),
         Command::Daemon(args) => service::run(&paths, &args.listen),
     }
 }
@@ -115,22 +124,20 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     working("Preparing native local-network discovery");
     platform.ensure_discovery()?;
     completed("Native local-network discovery");
-    let captains = crate::discovery::discover(args.captain.as_deref())?;
+    let captains = crate::discovery::discover(args.captain.as_deref()).map_err(|error| {
+        crate::logging::user_error(
+            paths,
+            "discovery",
+            "Fleet found a captain advertisement but could not verify it",
+            &error,
+        )
+    })?;
     if captains.is_empty() {
         bail!("no Fleet captain was discovered on this local network");
     }
     let captain = choose_captain(captains)?;
     println!("\nCaptain found: {}", captain.host);
     println!("Identity: {}", captain.fingerprint);
-    if !args.yes
-        && !Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Join this fleet? This trusts the captain on the current LAN")
-            .default(true)
-            .interact()?
-    {
-        bail!("join cancelled");
-    }
-
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
     let color = choose_color(args.color)?;
@@ -141,6 +148,19 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
         );
     }
     let selected = choose_tools(&platform, &args.tool)?;
+
+    println!("\nReady to join:");
+    println!("  Captain: {}", captain.host);
+    println!("  Identity: {}", captain.fingerprint);
+    println!("  This machine: {name}.local ({color})");
+    if !args.yes
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Continue? This trusts the captain discovered on the current LAN")
+            .default(true)
+            .interact()?
+    {
+        bail!("join cancelled");
+    }
 
     println!(
         "Fleet will request sudo to set the hostname and enable native mDNS and Remote Login."
@@ -167,11 +187,18 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     completed("Shell and tmux setup");
 
     let mut newly_installed = Vec::new();
-    let mut tool_errors = Vec::new();
     for tool in selected {
         let existed = platform.tool_installed(tool);
         if let Err(error) = platform.install_tool(tool) {
-            tool_errors.push(format!("{}: {error:#}", tool.display_name()));
+            crate::logging::detail(
+                paths,
+                "tool-install",
+                format!("{}: {error:#}", tool.display_name()),
+            );
+            eprintln!(
+                "Warning: {} could not be installed. Run `fleet logs` for details.",
+                tool.display_name()
+            );
         } else if !existed {
             newly_installed.push(tool);
         }
@@ -179,7 +206,15 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     if !args.no_login {
         for tool in newly_installed {
             if let Err(error) = platform.login_tool(tool) {
-                tool_errors.push(format!("{} login: {error:#}", tool.display_name()));
+                crate::logging::detail(
+                    paths,
+                    "tool-login",
+                    format!("{}: {error:#}", tool.display_name()),
+                );
+                eprintln!(
+                    "Warning: {} login did not complete. Run `fleet logs` for details.",
+                    tool.display_name()
+                );
             }
         }
     }
@@ -204,7 +239,7 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     };
     paths.save(&config)?;
     completed("Local member state");
-    service::register(&endpoint, &config.machine).with_context(|| {
+    service::register(paths, &endpoint, &config.machine).with_context(|| {
         format!(
             "register with captain at {endpoint}; local setup is saved, so rerun `fleet join` after resolving connectivity"
         )
@@ -212,9 +247,6 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     completed("Captain registration and pinned SSH verification");
 
     println!("\nJoined. From the captain, run `ssh {name}.local`.");
-    for error in tool_errors {
-        eprintln!("warning: optional tool setup failed: {error}");
-    }
     Ok(())
 }
 
@@ -307,10 +339,6 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     let endpoint = args
         .captain
         .unwrap_or_else(|| format!("{}:{DEFAULT_PORT}", captain_ref.host));
-    let captain = crate::discovery::fetch_identity(&endpoint)?;
-    if captain.id != captain_ref.id || captain.fingerprint != captain_ref.fingerprint {
-        bail!("captain identity changed; refusing to resume join");
-    }
     let platform = Platform::new(args.dry_run)?;
     let shell = platform.active_shell()?;
     platform.preflight()?;
@@ -322,6 +350,17 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
             shell_name(shell)
         );
         return Ok(());
+    }
+    let captain = crate::discovery::fetch_identity(&endpoint).map_err(|error| {
+        crate::logging::user_error(
+            paths,
+            "resume-join",
+            "The captain could not be reached",
+            &error,
+        )
+    })?;
+    if captain.id != captain_ref.id || captain.fingerprint != captain_ref.fingerprint {
+        bail!("captain identity changed; refusing to resume join");
     }
     identity::ensure(paths)?;
     completed("Fleet identity");
@@ -348,16 +387,26 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     for tool in selected {
         let existed = platform.tool_installed(tool);
         if let Err(error) = platform.install_tool(tool) {
+            crate::logging::detail(
+                paths,
+                "tool-install",
+                format!("{}: {error:#}", tool.display_name()),
+            );
             eprintln!(
-                "warning: optional tool setup failed for {}: {error:#}",
+                "Warning: {} could not be installed. Run `fleet logs` for details.",
                 tool.display_name()
             );
         } else if !existed
             && !args.no_login
             && let Err(error) = platform.login_tool(tool)
         {
+            crate::logging::detail(
+                paths,
+                "tool-login",
+                format!("{}: {error:#}", tool.display_name()),
+            );
             eprintln!(
-                "warning: optional {} login failed: {error:#}",
+                "Warning: {} login did not complete. Run `fleet logs` for details.",
                 tool.display_name()
             );
         }
@@ -371,7 +420,7 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
         .collect();
     config.machine.ssh_host_key = platform.ssh_host_key()?;
     paths.save(&config)?;
-    service::register(&endpoint, &config.machine).context(
+    service::register(paths, &endpoint, &config.machine).context(
         "captain registration still failed; resolve connectivity and rerun `fleet join`",
     )?;
     completed("Captain registration and pinned SSH verification");
@@ -382,7 +431,26 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     Ok(())
 }
 
-fn status(paths: &StatePaths, json: bool) -> Result<()> {
+fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()> {
+    if watch {
+        if json {
+            bail!("`fleet status --watch` cannot be combined with `--json`");
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let signal = stopped.clone();
+        ctrlc::set_handler(move || signal.store(true, Ordering::SeqCst))?;
+        while !stopped.load(Ordering::SeqCst) {
+            if io::stdout().is_terminal() {
+                print!("\x1b[2J\x1b[H");
+            }
+            status(paths, false, true, false)?;
+            if io::stdout().is_terminal() {
+                println!("\nRefreshing every 2 seconds. Press Ctrl-C to stop.");
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        return Ok(());
+    }
     let config = paths.require()?;
     if json {
         let members = if config.role == Role::Captain {
@@ -390,11 +458,35 @@ fn status(paths: &StatePaths, json: bool) -> Result<()> {
         } else {
             vec![]
         };
+        let health = check.then(|| {
+            if config.role == Role::Captain {
+                members
+                    .iter()
+                    .map(|member| (member.host(), reachability(&member.host())))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            } else {
+                config
+                    .captain
+                    .as_ref()
+                    .map(|captain| {
+                        let state = if service_health(&format!("{}:{DEFAULT_PORT}", captain.host))
+                            == "✓"
+                        {
+                            "online"
+                        } else {
+                            "unreachable"
+                        };
+                        std::iter::once((captain.host.clone(), state)).collect()
+                    })
+                    .unwrap_or_default()
+            }
+        });
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "local": config,
                 "members": members,
+                "health": health,
             }))?
         );
         return Ok(());
@@ -408,13 +500,34 @@ fn status(paths: &StatePaths, json: bool) -> Result<()> {
                 println!("  No members have joined yet.");
             }
             for member in members {
-                println!("  {}", status_line(&member));
+                let health = check.then(|| reachability(&member.host()));
+                println!(
+                    "  {}{}",
+                    status_line(&member),
+                    health.map(|v| format!("  {v}")).unwrap_or_default()
+                );
             }
         }
         Role::Member => {
             println!("MEMBER\n  {}", status_line(&config.machine));
             if let Some(captain) = config.captain {
-                println!("\nCAPTAIN\n  {}  {}", captain.host, captain.fingerprint);
+                let health =
+                    check.then(|| service_health(&format!("{}:{DEFAULT_PORT}", captain.host)));
+                println!(
+                    "\nCAPTAIN\n  {}  {}{}",
+                    captain.host,
+                    captain.fingerprint,
+                    health
+                        .map(|value| format!(
+                            "  {}",
+                            if value == "✓" {
+                                "online"
+                            } else {
+                                "unreachable"
+                            }
+                        ))
+                        .unwrap_or_default()
+                );
             }
         }
     }
@@ -427,7 +540,7 @@ fn leave(paths: &StatePaths, args: LeaveArgs) -> Result<()> {
     match config.role {
         Role::Captain => {
             let members = skill::load_members(paths)?;
-            if !members.is_empty() {
+            if !members.is_empty() && !args.force {
                 bail!(
                     "this captain still has {} member(s); those members must leave before the captain",
                     members.len()
@@ -456,23 +569,156 @@ fn leave(paths: &StatePaths, args: LeaveArgs) -> Result<()> {
             let captain = config
                 .captain
                 .context("member state is missing captain information")?;
-            platform.remove_captain_authorization(&captain.ssh_public_key)?;
             let endpoint = format!("{}:{}", captain.host, DEFAULT_PORT);
-            if let Err(error) = service::notify_leave(&endpoint, config.machine.id) {
+            if let Err(error) = service::notify_leave(paths, &endpoint, config.machine.id) {
+                crate::logging::detail(paths, "leave", format!("{error:#}"));
                 eprintln!(
-                    "warning: captain could not be notified and may retain a stale record: {error:#}"
+                    "Warning: the captain could not accept the leave request and may retain this member. The captain can run `fleet remove {}`. Run `fleet logs` for details.",
+                    config.machine.name
                 );
             }
+            platform.remove_captain_authorization(&captain.ssh_public_key)?;
         }
         Role::Captain => {
             platform.stop_captain_service()?;
             skill::uninstall(paths)?;
             crate::ssh_client::uninstall(paths)?;
+            if paths.inventory_dir().exists() {
+                fs::remove_dir_all(paths.inventory_dir()).context("remove captain inventory")?;
+            }
         }
     }
     fs::remove_file(paths.config()).context("remove Fleet membership state")?;
     println!("Left the fleet. Hostname, tools, shell, tmux, and user data were preserved.");
     Ok(())
+}
+
+fn remove(paths: &StatePaths, args: RemoveArgs) -> Result<()> {
+    let config = paths.require()?;
+    if config.role != Role::Captain {
+        bail!("only the captain can remove a member");
+    }
+    let members = skill::load_members(paths)?;
+    let query = args.member.trim_end_matches(".local");
+    let member = members
+        .iter()
+        .find(|member| member.name == query || member.id.to_string() == query)
+        .with_context(|| format!("no member named {query} is registered"))?;
+    if !args.yes
+        && !Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Remove {}.local from the captain inventory? The member must leave locally to revoke captain access",
+            member.name
+        ))
+            .default(false)
+            .interact()?
+    {
+        bail!("removal cancelled");
+    }
+    if args.dry_run {
+        println!(
+            "Would remove {}.local from the captain inventory and SSH configuration.",
+            member.name
+        );
+        return Ok(());
+    }
+    skill::remove_member(paths, member.id)?;
+    crate::ssh_client::regenerate(paths)?;
+    println!(
+        "Removed {}.local from the captain inventory. The member machine was not changed; run `fleet leave` there to revoke captain access.",
+        member.name
+    );
+    Ok(())
+}
+
+fn logs(paths: &StatePaths, lines: usize) -> Result<()> {
+    let mut sources = Vec::new();
+    for (label, path) in [
+        ("Fleet", paths.log_file()),
+        ("Setup", paths.logs_dir().join("setup.log")),
+    ] {
+        match fs::read_to_string(path) {
+            Ok(source) if !source.is_empty() => sources.push((label, source)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("read Fleet diagnostic log"),
+        }
+    }
+    if sources.is_empty() {
+        println!("No Fleet diagnostic logs have been recorded yet.");
+        return Ok(());
+    }
+    for (label, source) in sources {
+        println!("{label} log:");
+        let selected: Vec<_> = source.lines().rev().take(lines).collect();
+        for line in selected.into_iter().rev() {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn doctor(paths: &StatePaths) -> Result<()> {
+    println!("Fleet doctor");
+    let config = match paths.load() {
+        Ok(Some(config)) => {
+            println!("  ✓ Membership state is readable");
+            config
+        }
+        Ok(None) => {
+            println!("  ! This machine is not in a fleet");
+            return Ok(());
+        }
+        Err(error) => {
+            crate::logging::detail(paths, "doctor", format!("{error:#}"));
+            bail!("membership state is damaged. Run `fleet logs` for more information");
+        }
+    };
+    let identity_ok = paths.identity_dir().join("id_ed25519").is_file();
+    println!("  {} Fleet identity", if identity_ok { "✓" } else { "!" });
+    match config.role {
+        Role::Captain => {
+            let members = skill::load_members(paths)?;
+            println!("  ✓ Captain inventory contains {} member(s)", members.len());
+            for member in members {
+                println!("  {} {}", reachability(&member.host()), member.host());
+            }
+        }
+        Role::Member => {
+            let captain = config
+                .captain
+                .context("member state is missing captain information")?;
+            println!(
+                "  {} captain {}",
+                service_health(&format!("{}:{DEFAULT_PORT}", captain.host)),
+                captain.host
+            );
+        }
+    }
+    println!("Detailed diagnostics: `fleet logs`");
+    Ok(())
+}
+
+fn reachability(host: &str) -> &'static str {
+    let address = format!("{host}:22");
+    let reachable = address
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addresses| {
+            addresses.find(|address| {
+                TcpStream::connect_timeout(address, Duration::from_millis(700)).is_ok()
+            })
+        })
+        .is_some();
+    if reachable { "online" } else { "unreachable" }
+}
+
+fn service_health(endpoint: &str) -> &'static str {
+    if crate::discovery::fetch_identity(endpoint).is_ok() {
+        "✓"
+    } else {
+        "!"
+    }
 }
 
 fn choose_name(provided: Option<String>, current: &str) -> Result<String> {

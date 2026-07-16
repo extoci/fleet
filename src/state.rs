@@ -100,6 +100,10 @@ impl StatePaths {
         self.root.join("logs")
     }
 
+    pub fn log_file(&self) -> PathBuf {
+        self.logs_dir().join("fleet.log")
+    }
+
     pub fn known_hosts(&self) -> PathBuf {
         self.root.join("known_hosts")
     }

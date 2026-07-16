@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod discovery;
 pub mod identity;
+pub mod logging;
 pub mod platform;
 pub mod service;
 pub mod skill;

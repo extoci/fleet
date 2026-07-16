@@ -36,6 +36,10 @@ fleet status
 ssh emerald.local
 ```
 
+Use `fleet status --check` for live reachability, `fleet status --watch` to
+monitor it, `fleet doctor` for a concise health check, and `fleet logs` for
+detailed diagnostics.
+
 Interactive SSH creates or reattaches a tmux session named `fleet`. To bypass it for one login, run `ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'`. Non-interactive SSH, SCP, and SFTP are not intercepted.
 
 To leave while preserving the hostname, tools, prompt, tmux setup, repositories, and user data:
@@ -44,11 +48,15 @@ To leave while preserving the hostname, tools, prompt, tmux setup, repositories,
 fleet leave
 ```
 
+If an offline member leaves a stale record, run `fleet remove <name>` on the
+captain. A captain can deliberately discard remaining records with
+`fleet leave --force`.
+
 ## Trust and privacy
 
 Fleet has no account, hosted control plane, relay, or telemetry. State and coordination stay on the local network. Tool and package installation may contact their official download sources.
 
-Captain discovery is unauthenticated mDNS. The confirmation shown by `fleet join` is trust-on-first-use on a trusted LAN, not independently authenticated pairing. After confirmation, Fleet pins identities and SSH host keys.
+Captain discovery is unauthenticated mDNS. The confirmation shown by `fleet join` is trust-on-first-use on a trusted LAN, not independently authenticated pairing. After confirmation, Fleet pins identities and SSH host keys. Member registration and leave requests are signed with the pinned Fleet identity.
 
 ## v0 boundaries
 
