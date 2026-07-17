@@ -48,8 +48,32 @@ fn help_exposes_only_the_v0_lifecycle() {
         .stdout(predicate::str::contains("leave"))
         .stdout(predicate::str::contains("restart"))
         .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("update-all"))
         .stdout(predicate::str::contains("transfer").not())
         .stdout(predicate::str::contains("sync").not());
+}
+
+#[test]
+fn updateall_alias_is_captain_only() {
+    let home = TempDir::new().unwrap();
+    let mut config = captain_config();
+    config.role = Role::Member;
+    config.captain = Some(fleet::state::CaptainRef {
+        id: Uuid::new_v4(),
+        name: "captain".into(),
+        host: "captain.local".into(),
+        fingerprint: "SHA256:test".into(),
+        ssh_public_key: "ssh-ed25519 AAAATEST".into(),
+    });
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&config).unwrap();
+    test_command(&home)
+        .arg("updateall")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only the captain"));
 }
 
 #[test]

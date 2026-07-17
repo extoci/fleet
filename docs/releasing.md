@@ -73,6 +73,12 @@ verifies its checksum, atomically replaces the current executable, and restarts
 the captain service when necessary. Older installations must rerun the installer
 once to gain self-update support.
 
+From a captain, `fleet update-all` (also available as `fleet updateall`) updates
+each registered member over Fleet's pinned SSH connection, then updates the
+captain last. Missing installations and the v0.3 placeholder updater are
+bootstrapped through `https://extoci.lol/fleet`; other member failures are
+reported after Fleet has attempted every machine.
+
 Running the installer again also updates an existing installation. To install
 or roll back to an exact release:
 

@@ -42,6 +42,9 @@ pub enum Command {
     Restart(RestartArgs),
     /// Update Fleet to the latest available version.
     Update,
+    /// Update Fleet on every machine, members first and captain last.
+    #[command(name = "update-all", visible_alias = "updateall")]
+    UpdateAll,
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),

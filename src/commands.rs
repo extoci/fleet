@@ -14,6 +14,7 @@ use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::process::Command as ProcessCommand;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -33,8 +34,110 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Logs(args) => logs(&paths, args.lines),
         Command::Restart(args) => restart(&paths, args),
         Command::Update => update(&paths),
+        Command::UpdateAll => update_all(&paths),
         Command::Daemon(args) => service::run(&paths, &args.listen),
     }
+}
+
+const REMOTE_UPDATE_COMMAND: &str = r#"
+fleet_bin=$(command -v fleet 2>/dev/null || true)
+if [ -z "$fleet_bin" ] && [ -x "$HOME/.local/bin/fleet" ]; then
+  fleet_bin="$HOME/.local/bin/fleet"
+fi
+if [ -z "$fleet_bin" ]; then
+  curl -fsSL https://extoci.lol/fleet | sh
+  exit $?
+fi
+output=$("$fleet_bin" update 2>&1)
+status=$?
+printf '%s\n' "$output"
+if [ "$status" -eq 0 ]; then
+  exit 0
+fi
+case "$output" in
+  *"not implemented yet"*) curl -fsSL https://extoci.lol/fleet | sh ;;
+  *) exit "$status" ;;
+esac
+"#;
+
+fn update_all(paths: &StatePaths) -> Result<()> {
+    let config = paths.require()?;
+    if config.role != Role::Captain {
+        bail!("only the captain can update every machine in the fleet");
+    }
+
+    let members = skill::load_members(paths)?;
+    println!(
+        "Updating Fleet on {} machine(s), members first and captain last.",
+        members.len() + 1
+    );
+    let failures = update_members_with(&members, update_member);
+
+    println!("Updating {} (captain)...", config.machine.host());
+    let captain_result = update(paths);
+    if failures.is_empty() {
+        return captain_result;
+    }
+    if let Err(error) = captain_result {
+        bail!(
+            "updates failed on {} and the captain update failed: {error:#}",
+            failures.join(", ")
+        );
+    }
+    bail!("updates failed on: {}", failures.join(", "))
+}
+
+fn update_members_with<F>(members: &[Machine], mut run: F) -> Vec<String>
+where
+    F: FnMut(&Machine) -> Result<String>,
+{
+    let mut failures = Vec::new();
+    for member in members {
+        let host = member.host();
+        println!("Updating {host}...");
+        match run(member) {
+            Ok(output) => {
+                for line in output.lines().filter(|line| !line.trim().is_empty()) {
+                    println!("  {line}");
+                }
+                println!("  ✓ {host}");
+            }
+            Err(error) => {
+                eprintln!("  ! {host}: {error:#}");
+                failures.push(host);
+            }
+        }
+    }
+    failures
+}
+
+fn update_member(member: &Machine) -> Result<String> {
+    let output = ProcessCommand::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            &member.host(),
+            REMOTE_UPDATE_COMMAND,
+        ])
+        .output()
+        .with_context(|| format!("start SSH to {}", member.host()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    bail!(
+        "remote update exited with {}{}",
+        output.status,
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    )
 }
 
 fn update(paths: &StatePaths) -> Result<()> {
@@ -1085,5 +1188,25 @@ mod tests {
         let output = render_status_rows(&[(status_machine(), Some("online"))], 40, false);
         assert_eq!(output, "  ● emerald.local\n    Linux · Codex · online\n");
         assert!(!output.contains("MACHINE"));
+    }
+
+    #[test]
+    fn update_all_continues_after_a_member_fails() {
+        let mut ruby = status_machine();
+        ruby.name = "ruby".into();
+        let failures = update_members_with(&[status_machine(), ruby], |member| {
+            if member.name == "emerald" {
+                bail!("offline")
+            }
+            Ok("Fleet 0.4.0 is already up to date.".into())
+        });
+        assert_eq!(failures, ["emerald.local"]);
+    }
+
+    #[test]
+    fn remote_update_bootstraps_missing_and_legacy_installations() {
+        assert!(REMOTE_UPDATE_COMMAND.contains("https://extoci.lol/fleet"));
+        assert!(REMOTE_UPDATE_COMMAND.contains("not implemented yet"));
+        assert!(REMOTE_UPDATE_COMMAND.contains("$HOME/.local/bin/fleet"));
     }
 }

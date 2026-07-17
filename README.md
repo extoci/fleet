@@ -24,6 +24,8 @@ After installing v0.4.0 or newer, update in place with:
 
 ```sh
 fleet update
+# From the captain, update every member and then the captain itself
+fleet update-all
 ```
 
 Installations older than v0.4.0 must rerun the installer once to gain the
