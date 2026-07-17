@@ -68,8 +68,13 @@ changes. A failed build therefore cannot produce a partial release.
 
 ## Versions, updates, and rollback
 
-Running the installer again updates an existing installation to the latest
-release. To install or roll back to an exact release:
+On v0.4.0 and newer, `fleet update` downloads the latest native archive,
+verifies its checksum, atomically replaces the current executable, and restarts
+the captain service when necessary. Older installations must rerun the installer
+once to gain self-update support.
+
+Running the installer again also updates an existing installation. To install
+or roll back to an exact release:
 
 ```sh
 curl -fsSL https://extoci.lol/fleet.sh | FLEET_VERSION=v0.3.0 sh
@@ -78,6 +83,3 @@ curl -fsSL https://extoci.lol/fleet.sh | FLEET_VERSION=v0.3.0 sh
 Releases and tags should be treated as immutable. If a release is bad, publish a
 new patch version rather than replacing its assets. GitHub's `latest` URL, and
 therefore `extoci.lol/fleet.sh`, will move to the new patch automatically.
-
-The CLI currently exposes `fleet update` but does not implement it. Until that
-command is implemented, rerunning the installer is the supported update path.

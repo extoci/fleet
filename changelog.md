@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 — 2026-07-18
+
+### Self-update
+
+- Implemented `fleet update` against the latest published GitHub Release.
+- Updates select the native macOS or Linux artifact, verify its SHA-256 checksum,
+  and atomically replace the installed executable.
+- Fleet refuses to downgrade when the published release is older than the
+  running semantic version.
+- Captains automatically restart their background service after a successful
+  update so the daemon and CLI run the same version.
+
 ## 0.3.0 — 2026-07-18
 
 ### Status experience

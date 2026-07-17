@@ -32,9 +32,28 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Doctor => doctor(&paths),
         Command::Logs(args) => logs(&paths, args.lines),
         Command::Restart(args) => restart(&paths, args),
-        Command::Update => bail!("`fleet update` is not implemented yet"),
+        Command::Update => update(&paths),
         Command::Daemon(args) => service::run(&paths, &args.listen),
     }
+}
+
+fn update(paths: &StatePaths) -> Result<()> {
+    match crate::updater::update()? {
+        crate::updater::UpdateOutcome::Current { version } => {
+            println!("Fleet {version} is already up to date.");
+        }
+        crate::updater::UpdateOutcome::Updated { version } => {
+            println!("Fleet updated to {version}.");
+            if paths
+                .load()?
+                .is_some_and(|config| config.role == Role::Captain)
+            {
+                Platform::new(false)?.restart_captain_service()?;
+                println!("Restarted the Fleet captain service.");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn restart(paths: &StatePaths, args: RestartArgs) -> Result<()> {

@@ -8,3 +8,4 @@ pub mod service;
 pub mod skill;
 pub mod ssh_client;
 pub mod state;
+pub mod updater;

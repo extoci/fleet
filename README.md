@@ -20,6 +20,14 @@ FLEET_BINARY="$PWD/target/release/fleet" ./fleet.sh
 ```
 
 The installer downloads the correct checksummed binary from GitHub Releases.
+After installing v0.4.0 or newer, update in place with:
+
+```sh
+fleet update
+```
+
+Installations older than v0.4.0 must rerun the installer once to gain the
+self-update command.
 
 ## Start a fleet
 

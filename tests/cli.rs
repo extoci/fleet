@@ -98,16 +98,6 @@ fn restart_dry_run_targets_the_captain_service() {
 }
 
 #[test]
-fn update_is_an_explicit_placeholder() {
-    let home = TempDir::new().unwrap();
-    test_command(&home)
-        .arg("update")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not implemented yet"));
-}
-
-#[test]
 fn status_fails_cleanly_when_uninitialized() {
     let home = TempDir::new().unwrap();
     test_command(&home)
