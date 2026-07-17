@@ -6,14 +6,20 @@ One machine is the **captain**. Members get real `.local` names, passwordless SS
 
 ## Install
 
-During v0 development, build Fleet and run the checked-in installer:
+Install or update to the latest published release:
+
+```sh
+curl -fsSL https://extoci.lol/fleet.sh | sh
+```
+
+During local development, build Fleet and run the checked-in installer:
 
 ```sh
 cargo build --release
 FLEET_BINARY="$PWD/target/release/fleet" ./fleet.sh
 ```
 
-Published releases can use the same script without `FLEET_BINARY`; it downloads the correct checksummed binary from GitHub Releases.
+The installer downloads the correct checksummed binary from GitHub Releases.
 
 ## Start a fleet
 
@@ -78,3 +84,5 @@ cargo test
 ```
 
 The constrained Multipass and native macOS verification procedure is in [docs/verification.md](docs/verification.md). The requirement-by-requirement completion proof is in [docs/completion-audit-v0.md](docs/completion-audit-v0.md).
+
+The release procedure and hosting setup are in [docs/releasing.md](docs/releasing.md).
