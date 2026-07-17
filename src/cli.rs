@@ -1,13 +1,22 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "fleet",
     version,
+    disable_version_flag = true,
     about = "Make your computers feel like one computer"
 )]
 pub struct Cli {
+    /// Print version information.
+    #[arg(
+        short = 'v',
+        long = "version",
+        visible_short_alias = 'V',
+        action = ArgAction::Version
+    )]
+    pub version: Option<bool>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -28,6 +37,10 @@ pub enum Command {
     Doctor,
     /// Show detailed Fleet diagnostic logs.
     Logs(LogsArgs),
+    /// Restart the captain background service.
+    Restart(RestartArgs),
+    /// Update Fleet to the latest available version.
+    Update,
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
@@ -117,6 +130,13 @@ pub struct LogsArgs {
     /// Number of recent log lines to show.
     #[arg(long, default_value_t = 100)]
     pub lines: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct RestartArgs {
+    /// Print the restart command without running it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

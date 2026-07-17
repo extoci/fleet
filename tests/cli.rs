@@ -46,8 +46,54 @@ fn help_exposes_only_the_v0_lifecycle() {
         .stdout(predicate::str::contains("join"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("leave"))
+        .stdout(predicate::str::contains("restart"))
+        .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("transfer").not())
         .stdout(predicate::str::contains("sync").not());
+}
+
+#[test]
+fn lowercase_v_prints_the_version() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("-v")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fleet 0.2.0"));
+}
+
+#[test]
+fn uppercase_v_still_prints_the_version() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("-V")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fleet 0.2.0"));
+}
+
+#[test]
+fn restart_dry_run_targets_the_captain_service() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .args(["restart", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev.fleet.captain"));
+}
+
+#[test]
+fn update_is_an_explicit_placeholder() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("update")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not implemented yet"));
 }
 
 #[test]

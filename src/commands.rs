@@ -1,4 +1,6 @@
-use crate::cli::{Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, Tool};
+use crate::cli::{
+    Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool,
+};
 use crate::discovery::{CaptainAdvertisement, DEFAULT_PORT};
 use crate::identity;
 use crate::platform::Platform;
@@ -29,8 +31,23 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Remove(args) => remove(&paths, args),
         Command::Doctor => doctor(&paths),
         Command::Logs(args) => logs(&paths, args.lines),
+        Command::Restart(args) => restart(&paths, args),
+        Command::Update => bail!("`fleet update` is not implemented yet"),
         Command::Daemon(args) => service::run(&paths, &args.listen),
     }
+}
+
+fn restart(paths: &StatePaths, args: RestartArgs) -> Result<()> {
+    let config = paths.require()?;
+    if config.role != Role::Captain {
+        bail!("only a captain has a Fleet background service to restart");
+    }
+    let platform = Platform::new(args.dry_run)?;
+    platform.restart_captain_service()?;
+    if !args.dry_run {
+        println!("Restarted the Fleet captain service.");
+    }
+    Ok(())
 }
 
 fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {

@@ -451,6 +451,16 @@ impl Platform {
         Ok(())
     }
 
+    pub fn restart_captain_service(&self) -> Result<()> {
+        if self.kind == PlatformKind::MacOs {
+            let target = format!("gui/{}/dev.fleet.captain", unsafe { libc_geteuid() });
+            self.run("launchctl", ["kickstart", "-k", &target])
+        } else {
+            self.require_linux_systemd_apt()?;
+            self.run("systemctl", ["--user", "restart", "fleet-captain.service"])
+        }
+    }
+
     fn require_linux_systemd_apt(&self) -> Result<()> {
         if self.kind == PlatformKind::DebianSystemd
             && (which::which("systemctl").is_err() || which::which("apt-get").is_err())
@@ -688,10 +698,44 @@ export FLEET_MACHINE_NAME='{name}'
 export FLEET_MACHINE_COLOR='{color}'
 export FLEET_MACHINE_COLOR_256='{code}'
 
+fleet_git_branch() {{
+  if command -v vcprompt >/dev/null 2>&1; then
+    vcprompt -f '(%b) ' 2>/dev/null
+  else
+    git branch --show-current 2>/dev/null | sed 's/.*/(&) /'
+  fi
+}}
+
 if [ -n "${{ZSH_VERSION:-}}" ]; then
-  PROMPT='%F{{{code}}}%n@%m%f %~ %# '
+  fleet_zsh_prompt() {{
+    local branch path
+    path=${{PWD/#$HOME/~}}
+    if [ "$path" != "~" ]; then
+      path="${{path##*/}}"
+    fi
+    branch="$(fleet_git_branch)"
+    print -Pn "\e]0;${{FLEET_MACHINE_NAME}}: ${{PWD/#$HOME/~}}\a"
+    PROMPT="%B%F{{{code}}} ◆ %f%b ${{path}}/ %F{{{code}}}${{branch}}%f "
+  }}
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd fleet_zsh_prompt
+  fleet_zsh_prompt
 elif [ -n "${{BASH_VERSION:-}}" ]; then
-  PS1='\[\e[38;5;{code}m\]\u@\h\[\e[0m\] \w \\$ '
+  fleet_bash_prompt() {{
+    local branch path
+    path=${{PWD/#$HOME/~}}
+    if [ "$path" != "~" ]; then
+      path="${{path##*/}}"
+    fi
+    branch="$(fleet_git_branch)"
+    PS1="\[\e]0;${{FLEET_MACHINE_NAME}}: ${{PWD/#$HOME/~}}\a\]\[\033[1;38;5;{code}m\] ◆ \[\033[0m\] ${{path}}/ \[\033[38;5;{code}m\]${{branch}}\[\033[0m\] "
+  }}
+  PROMPT_COMMAND=fleet_bash_prompt
+fi
+
+if [ "${{TERM:-}}" = xterm-ghostty ] \
+  && ! infocmp xterm-ghostty >/dev/null 2>&1; then
+  export TERM=xterm-256color
 fi
 
 case $- in
@@ -968,7 +1012,7 @@ mod tests {
 
     #[test]
     fn shell_attach_is_guarded() {
-        let rendered = render_shell_init("emerald", Color::Emerald);
+        let rendered = render_shell_init("test-machine", Color::Cyan);
         for guard in [
             "SSH_CONNECTION",
             "[ -t 0 ]",
@@ -979,7 +1023,49 @@ mod tests {
         ] {
             assert!(rendered.contains(guard));
         }
+        assert!(rendered.contains("TERM:-}"));
+        assert!(rendered.contains("infocmp xterm-ghostty"));
+        assert!(rendered.contains("export TERM=xterm-256color"));
         assert!(rendered.contains("new-session -A -s fleet"));
+    }
+
+    #[test]
+    fn fleet_prompts_have_one_machine_agnostic_shape() {
+        for (name, color) in [("machine-one", Color::Red), ("machine-two", Color::Blue)] {
+            let rendered = render_shell_init(name, color);
+            let code = color.ansi_256();
+            assert!(rendered.contains("fleet_git_branch()"));
+            assert!(rendered.contains("path=${PWD/#$HOME/~}"));
+            assert!(rendered.contains("path=\"${path##*/}\""));
+            assert!(rendered.contains(&format!("38;5;{code}m\\] ◆ ")));
+            assert!(rendered.contains("${path}/"));
+            assert!(rendered.contains("${branch}"));
+            assert!(!rendered.contains(r#"\u@\h"#));
+            assert!(!rendered.contains("%n@%m"));
+        }
+    }
+
+    #[test]
+    fn rendered_bash_prompt_executes_and_shows_the_current_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("sample-project");
+        fs::create_dir(&worktree).unwrap();
+        let init = temp.path().join("init.sh");
+        fs::write(&init, render_shell_init("test-machine", Color::Cyan)).unwrap();
+
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-c"])
+            .arg(". \"$1\"; cd \"$2\"; fleet_bash_prompt; printf '%s\n' \"$PS1\"")
+            .arg("fleet-prompt-test")
+            .arg(&init)
+            .arg(&worktree)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let prompt = String::from_utf8(output.stdout).unwrap();
+        assert!(prompt.contains(" ◆ "));
+        assert!(prompt.contains(" sample-project/ "));
+        assert!(!prompt.contains("test-machine@"));
     }
 
     #[test]
