@@ -25,7 +25,14 @@ installer attached to the latest GitHub release.
    Preserve the query string. Do not cache the redirect permanently: GitHub's
    `latest` target changes after every release.
 
-Users can then install or update Fleet with:
+Before the redirect is configured, the public GitHub URL is the canonical
+install command:
+
+```sh
+curl -fsSL https://github.com/extoci/fleet/releases/latest/download/fleet.sh | sh
+```
+
+After the redirect is configured, users can use the shorter equivalent:
 
 ```sh
 curl -fsSL https://extoci.lol/fleet.sh | sh
@@ -72,7 +79,7 @@ Running the installer again updates an existing installation to the latest
 release. To install or roll back to an exact release:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet.sh | FLEET_VERSION=v0.2.0 sh
+curl -fsSL https://github.com/extoci/fleet/releases/latest/download/fleet.sh | FLEET_VERSION=v0.3.0 sh
 ```
 
 Releases and tags should be treated as immutable. If a release is bad, publish a
