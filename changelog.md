@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 — 2026-07-18
+
+### Fleet-wide updates
+
+- Added `fleet update-all` and its `fleet updateall` alias to update every
+  registered member over the captain's pinned SSH connections before updating
+  the captain itself.
+- Missing and older Fleet installations are bootstrapped through the public
+  installer, and failures are collected while updates continue across the fleet.
+
+### Installation and networking
+
+- The installer now prefers a writable user directory already on `PATH` and
+  gives clearer guidance when a new shell is needed.
+- Fixed false hostname-conflict detection for scoped IPv6 link-local addresses
+  returned by macOS.
+
 ## 0.4.0 — 2026-07-18
 
 ### Self-update
