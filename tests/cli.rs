@@ -80,6 +80,11 @@ fn uppercase_v_still_prints_the_version() {
 
 #[test]
 fn restart_dry_run_targets_the_captain_service() {
+    #[cfg(target_os = "macos")]
+    let service_name = "dev.fleet.captain";
+    #[cfg(target_os = "linux")]
+    let service_name = "fleet-captain.service";
+
     let home = TempDir::new().unwrap();
     let paths = StatePaths {
         root: home.path().join(".fleet"),
@@ -89,7 +94,7 @@ fn restart_dry_run_targets_the_captain_service() {
         .args(["restart", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("dev.fleet.captain"));
+        .stdout(predicate::str::contains(service_name));
 }
 
 #[test]
