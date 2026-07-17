@@ -28,6 +28,7 @@ pub enum Command {
     /// Join the captain discovered on this local network.
     Join(JoinArgs),
     /// Show this machine's locally recorded Fleet topology.
+    #[command(visible_alias = "ls")]
     Status(StatusArgs),
     /// Leave the current fleet without undoing machine setup.
     Leave(LeaveArgs),

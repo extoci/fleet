@@ -510,23 +510,37 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
     }
     match config.role {
         Role::Captain => {
-            println!("CAPTAIN\n  {}", status_line(&config.machine));
-            println!("\nMEMBERS");
             let members = skill::load_members(paths)?;
+            let width = terminal_width();
+            let colors = io::stdout().is_terminal();
+            println!("CAPTAIN");
+            print!(
+                "{}",
+                render_status_rows(&[(config.machine, None)], width, colors)
+            );
+            println!("\nMEMBERS");
             if members.is_empty() {
                 println!("  No members have joined yet.");
             }
-            for member in members {
-                let health = check.then(|| reachability(&member.host()));
-                println!(
-                    "  {}{}",
-                    status_line(&member),
-                    health.map(|v| format!("  {v}")).unwrap_or_default()
-                );
+            if !members.is_empty() {
+                let rows = members
+                    .into_iter()
+                    .map(|member| {
+                        let health = check.then(|| reachability(&member.host()));
+                        (member, health)
+                    })
+                    .collect::<Vec<_>>();
+                print!("{}", render_status_rows(&rows, width, colors));
             }
         }
         Role::Member => {
-            println!("MEMBER\n  {}", status_line(&config.machine));
+            let width = terminal_width();
+            let colors = io::stdout().is_terminal();
+            println!("MEMBER");
+            print!(
+                "{}",
+                render_status_rows(&[(config.machine, None)], width, colors)
+            );
             if let Some(captain) = config.captain {
                 let health =
                     check.then(|| service_health(&format!("{}:{DEFAULT_PORT}", captain.host)));
@@ -857,7 +871,71 @@ fn working(label: &str) {
     println!("  … {label}");
 }
 
-fn status_line(machine: &Machine) -> String {
+fn terminal_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(terminal_size::Width(width), _)| usize::from(width))
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+        .unwrap_or(80)
+}
+
+fn render_status_rows(rows: &[(Machine, Option<&str>)], width: usize, colors: bool) -> String {
+    if width < 64 {
+        return rows
+            .iter()
+            .map(|(machine, health)| {
+                let identity = colorize(&format!("● {}", machine.host()), machine.color, colors);
+                let details = [system_name(&machine.os), installed_tools(machine)]
+                    .into_iter()
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let health = health
+                    .as_deref()
+                    .map(|value| format!(" · {value}"))
+                    .unwrap_or_default();
+                format!("  {identity}\n    {details}{health}\n")
+            })
+            .collect();
+    }
+
+    let show_health = rows.iter().any(|(_, health)| health.is_some());
+    let health_width = if show_health { 14 } else { 0 };
+    let system_width = 8;
+    let host_width = rows
+        .iter()
+        .map(|(machine, _)| machine.host().len() + 2)
+        .max()
+        .unwrap_or(20)
+        .clamp(18, 28);
+    let tools_width = width.saturating_sub(host_width + system_width + health_width + 8);
+    let mut output = String::new();
+    output.push_str(&format!(
+        "  {:<host_width$} {:<system_width$} {:<tools_width$}{}\n",
+        "MACHINE",
+        "SYSTEM",
+        "TOOLS",
+        if show_health { "  STATUS" } else { "" }
+    ));
+    for (machine, health) in rows {
+        let plain_identity = format!("● {}", machine.host());
+        let identity = colorize(&plain_identity, machine.color, colors);
+        let tools = truncate(&installed_tools(machine), tools_width);
+        output.push_str(&format!(
+            "  {identity}{:identity_padding$} {:<system_width$} {:<tools_width$}{}\n",
+            "",
+            system_name(&machine.os),
+            tools,
+            health
+                .as_deref()
+                .map(|value| format!("  {value}"))
+                .unwrap_or_default(),
+            identity_padding = host_width.saturating_sub(plain_identity.chars().count()),
+        ));
+    }
+    output
+}
+
+fn installed_tools(machine: &Machine) -> String {
     let tools = machine
         .tools
         .iter()
@@ -865,14 +943,35 @@ fn status_line(machine: &Machine) -> String {
         .map(|state| state.tool.display_name())
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
-        "{:<24} {:<9} {} {}  {}",
-        machine.host(),
-        machine.color,
-        machine.os,
-        machine.arch,
-        if tools.is_empty() { "no tools" } else { &tools }
-    )
+    if tools.is_empty() {
+        "—".into()
+    } else {
+        tools
+    }
+}
+
+fn system_name(os: &str) -> String {
+    match os.to_ascii_lowercase().as_str() {
+        "macos" | "darwin" => "macOS".into(),
+        "linux" => "Linux".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.into();
+    }
+    if width <= 1 {
+        return "…".into();
+    }
+    value.chars().take(width - 1).collect::<String>() + "…"
 }
 
 fn shell_name(shell: crate::platform::Shell) -> &'static str {
@@ -925,6 +1024,23 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn status_machine() -> Machine {
+        Machine {
+            id: Uuid::nil(),
+            name: "emerald".into(),
+            color: Color::Orange,
+            ssh_user: "fleet-test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            tools: vec![ToolState {
+                tool: Tool::Codex,
+                installed: true,
+            }],
+            public_identity: "ssh-ed25519 AAAATEST".into(),
+            ssh_host_key: None,
+        }
+    }
+
     #[test]
     fn color_preview_uses_the_same_palette_as_machine_themes() {
         assert_eq!(
@@ -935,5 +1051,20 @@ mod tests {
             colorize("powerbook.local", Color::Orange, false),
             "powerbook.local"
         );
+    }
+
+    #[test]
+    fn status_rows_use_color_without_printing_its_name() {
+        let output = render_status_rows(&[(status_machine(), None)], 100, true);
+        assert!(output.contains("\u{1b}[38;5;208m● emerald.local\u{1b}[0m"));
+        assert!(!output.contains("orange"));
+        assert!(!output.contains("x86_64"));
+    }
+
+    #[test]
+    fn narrow_status_rows_switch_to_a_stacked_layout() {
+        let output = render_status_rows(&[(status_machine(), Some("online"))], 40, false);
+        assert_eq!(output, "  ● emerald.local\n    Linux · Codex · online\n");
+        assert!(!output.contains("MACHINE"));
     }
 }

@@ -123,6 +123,51 @@ fn status_reads_local_captain_state_without_networking() {
 }
 
 #[test]
+fn ls_is_an_alias_for_status() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .arg("ls")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("obsidian.local"));
+}
+
+#[test]
+fn human_status_hides_color_and_architecture_metadata() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("macOS"))
+        .stdout(predicate::str::contains("violet").not())
+        .stdout(predicate::str::contains("aarch64").not());
+}
+
+#[test]
+fn json_status_keeps_detailed_machine_metadata() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"color\": \"violet\""))
+        .stdout(predicate::str::contains("\"arch\": \"aarch64\""));
+}
+
+#[test]
 fn init_dry_run_never_creates_state() {
     let home = TempDir::new().unwrap();
     test_command(&home)
