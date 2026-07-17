@@ -59,7 +59,10 @@ fn lowercase_v_prints_the_version() {
         .arg("-v")
         .assert()
         .success()
-        .stdout(predicate::str::contains("fleet 0.2.0"));
+        .stdout(predicate::str::contains(format!(
+            "fleet {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]
@@ -69,7 +72,10 @@ fn uppercase_v_still_prints_the_version() {
         .arg("-V")
         .assert()
         .success()
-        .stdout(predicate::str::contains("fleet 0.2.0"));
+        .stdout(predicate::str::contains(format!(
+            "fleet {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 — 2026-07-18
+
+### Status experience
+
+- Reworked `fleet status` into a compact, colored table that adapts to narrow terminals.
+- Hid internal architecture and color metadata from human-readable status while preserving it in JSON output.
+- Added `fleet ls` as an alias for `fleet status`.
+
+### Lifecycle commands
+
+- Added `fleet restart` for restarting the captain background service, including a dry-run mode.
+- Added conventional `-v`, `-V`, and `--version` flags.
+
+### Distribution
+
+- Added native release builds for macOS and Linux on ARM64 and x86-64.
+- Added checksummed archives, an atomic GitHub Release publish step, and the standalone installer as a release asset.
+- Documented the public install, update, rollback, and release procedures.
+
 ## 0.2.0 — 2026-07-16
 
 ### Membership recovery
