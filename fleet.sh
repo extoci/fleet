@@ -3,7 +3,7 @@ set -eu
 
 REPOSITORY="${FLEET_REPOSITORY:-extoci/fleet}"
 VERSION="${FLEET_VERSION:-latest}"
-INSTALL_DIR="${FLEET_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${FLEET_INSTALL_DIR:-}"
 
 fail() {
   printf 'fleet installer: %s\n' "$*" >&2
@@ -13,6 +13,29 @@ fail() {
 command -v uname >/dev/null 2>&1 || fail "uname is required"
 command -v install >/dev/null 2>&1 || fail "install is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
+
+if [ -z "$INSTALL_DIR" ]; then
+  preferred="$HOME/.local/bin"
+  case ":$PATH:" in
+    *":$preferred:"*) INSTALL_DIR="$preferred" ;;
+    *)
+      old_ifs=$IFS
+      IFS=:
+      for directory in $PATH; do
+        case "$directory" in
+          "$HOME"/*|/usr/local/bin|/opt/homebrew/bin)
+            if [ -d "$directory" ] && [ -w "$directory" ]; then
+              INSTALL_DIR="$directory"
+              break
+            fi
+            ;;
+        esac
+      done
+      IFS=$old_ifs
+      INSTALL_DIR="${INSTALL_DIR:-$preferred}"
+      ;;
+  esac
+fi
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) target="aarch64-apple-darwin" ;;
@@ -92,7 +115,9 @@ case ":$PATH:" in
           printf '%s\n' "$line"
         } >>"$rc"
       fi
-      printf 'Added %s to PATH in %s.\n' "$INSTALL_DIR" "$rc"
+      printf 'Added %s to PATH in %s for future terminals.\n' "$INSTALL_DIR" "$rc"
+      printf 'This shell has no writable user directory on PATH; to use Fleet here, run:\n'
+      printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
     else
       printf 'Add %s to PATH before running Fleet.\n' "$INSTALL_DIR"
     fi

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -567,7 +567,24 @@ impl Platform {
 }
 
 fn name_conflicts_from_addresses(resolved: &[IpAddr], local: &[IpAddr]) -> bool {
-    resolved.iter().any(|address| !local.contains(address))
+    resolved.iter().any(|resolved_address| {
+        let resolved_address = without_macos_link_local_scope(*resolved_address);
+        !local
+            .iter()
+            .any(|local_address| without_macos_link_local_scope(*local_address) == resolved_address)
+    })
+}
+
+fn without_macos_link_local_scope(address: IpAddr) -> IpAddr {
+    let IpAddr::V6(address) = address else {
+        return address;
+    };
+    let mut segments = address.segments();
+    if segments[0] == 0xfe80 && segments[1] != 0 && segments[2] == 0 && segments[3] == 0 {
+        segments[1] = 0;
+        return IpAddr::V6(Ipv6Addr::from(segments));
+    }
+    IpAddr::V6(address)
 }
 
 fn planned(privileged: bool, program: &'static str, args: &[&str]) -> PlannedCommand {
@@ -998,6 +1015,24 @@ mod tests {
             &[loopback, lan],
             &[loopback, lan]
         ));
+    }
+
+    #[test]
+    fn macos_scoped_link_local_addresses_are_recognized_as_this_machine() {
+        // dscacheutil inserts the interface index into the second hextet, while
+        // getifaddrs reports the same address without that scope information.
+        let resolved = [
+            "fe80:1::1".parse().unwrap(),
+            "fe80:b::105d:b1d1:d458:16d0".parse().unwrap(),
+            "192.168.1.100".parse().unwrap(),
+        ];
+        let local = [
+            "fe80::1".parse().unwrap(),
+            "fe80::105d:b1d1:d458:16d0".parse().unwrap(),
+            "192.168.1.100".parse().unwrap(),
+        ];
+
+        assert!(!name_conflicts_from_addresses(&resolved, &local));
     }
 
     #[test]

@@ -28,12 +28,12 @@ installer attached to the latest GitHub release.
 Users can install or update Fleet with:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | sh
+curl -fsSL https://extoci.lol/fleet | bash
 ```
 
 The installer detects the platform, downloads the matching archive and checksum
-from GitHub Releases, verifies SHA-256, and atomically installs the binary at
-`~/.local/bin/fleet`.
+from GitHub Releases, verifies SHA-256, and atomically installs the binary in a
+writable user directory already on `PATH` when one is available.
 
 ## Publish a release
 
@@ -83,7 +83,7 @@ Running the installer again also updates an existing installation. To install
 or roll back to an exact release:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | FLEET_VERSION=v0.3.0 sh
+curl -fsSL https://extoci.lol/fleet | FLEET_VERSION=v0.3.0 bash
 ```
 
 Releases and tags should be treated as immutable. If a release is bad, publish a

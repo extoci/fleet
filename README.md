@@ -9,8 +9,11 @@ One machine is the **captain**. Members get real `.local` names, passwordless SS
 Install or update to the latest published release:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | sh
+curl -fsSL https://extoci.lol/fleet | bash
 ```
+
+The installer prefers a writable user directory already on `PATH`, so `fleet`
+is normally available immediately as well as in future terminals.
 
 During local development, build Fleet and run the checked-in installer:
 

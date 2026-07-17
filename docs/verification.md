@@ -15,11 +15,13 @@ cargo test
 ```sh
 cargo build --release
 temporary_home="$(mktemp -d)"
+mkdir -p "$temporary_home/bin"
+PATH="$temporary_home/bin:$PATH"
+export PATH
 HOME="$temporary_home" SHELL=/bin/zsh \
-  FLEET_INSTALL_DIR="$temporary_home/.local/bin" \
   FLEET_BINARY="$PWD/target/release/fleet" \
-  ./fleet.sh
-"$temporary_home/.local/bin/fleet" --version
+  bash ./fleet.sh
+fleet --version
 rm -rf "$temporary_home"
 ```
 

@@ -25,10 +25,12 @@ jobs:
           sh -n fleet.sh
           cargo build --release
           temporary_home="$(mktemp -d)"
+          mkdir -p "$temporary_home/bin"
+          export PATH="$temporary_home/bin:$PATH"
           HOME="$temporary_home" \
             SHELL=/bin/bash \
-            FLEET_INSTALL_DIR="$temporary_home/.local/bin" \
             FLEET_BINARY="$PWD/target/release/fleet" \
-            ./fleet.sh
-          "$temporary_home/.local/bin/fleet" --version
+            bash ./fleet.sh
+          test "$(command -v fleet)" = "$temporary_home/bin/fleet"
+          fleet --version
           rm -rf "$temporary_home"
