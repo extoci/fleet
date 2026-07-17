@@ -9,7 +9,7 @@ One machine is the **captain**. Members get real `.local` names, passwordless SS
 Install or update to the latest published release:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet.sh | sh
+curl -fsSL https://extoci.lol/fleet | sh
 ```
 
 During local development, build Fleet and run the checked-in installer:

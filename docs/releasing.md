@@ -2,7 +2,7 @@
 
 GitHub Releases is Fleet's artifact origin. Each release contains native binaries
 for the four supported OS/architecture pairs, SHA-256 checksums, and a copy of
-the installer. The friendly `extoci.lol/fleet.sh` URL should redirect to the
+the installer. The friendly `extoci.lol/fleet` URL should redirect to the
 installer attached to the latest GitHub release.
 
 ## One-time setup
@@ -16,7 +16,7 @@ installer attached to the latest GitHub release.
 3. Configure an HTTP 302 redirect (for example, with a Cloudflare Redirect Rule)
    from:
 
-       https://extoci.lol/fleet.sh
+       https://extoci.lol/fleet
 
    to:
 
@@ -28,7 +28,7 @@ installer attached to the latest GitHub release.
 Users can install or update Fleet with:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet.sh | sh
+curl -fsSL https://extoci.lol/fleet | sh
 ```
 
 The installer detects the platform, downloads the matching archive and checksum
@@ -77,9 +77,9 @@ Running the installer again also updates an existing installation. To install
 or roll back to an exact release:
 
 ```sh
-curl -fsSL https://extoci.lol/fleet.sh | FLEET_VERSION=v0.3.0 sh
+curl -fsSL https://extoci.lol/fleet | FLEET_VERSION=v0.3.0 sh
 ```
 
 Releases and tags should be treated as immutable. If a release is bad, publish a
 new patch version rather than replacing its assets. GitHub's `latest` URL, and
-therefore `extoci.lol/fleet.sh`, will move to the new patch automatically.
+therefore `extoci.lol/fleet`, will move to the new patch automatically.
