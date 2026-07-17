@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 — 2026-07-18
+
+### Hostname collision detection
+
+- Allow `fleet init` and `fleet join` to keep the machine's current hostname
+  when its own cached or alternate mDNS address appears non-local.
+- Preserve collision detection when choosing a different hostname on both macOS
+  and Linux.
+
 ## 0.5.0 — 2026-07-18
 
 ### Fleet-wide updates

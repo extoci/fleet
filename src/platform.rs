@@ -167,12 +167,18 @@ impl Platform {
         if resolved.is_empty() {
             return Ok(false);
         }
+        let current_hostname = self.current_hostname()?;
         let local: Vec<_> = if_addrs::get_if_addrs()
             .context("read local network interfaces")?
             .into_iter()
             .map(|interface| interface.ip())
             .collect();
-        Ok(name_conflicts_from_addresses(&resolved, &local))
+        Ok(name_conflicts_for_machine(
+            name,
+            &current_hostname,
+            &resolved,
+            &local,
+        ))
     }
 
     pub fn set_hostname_and_mdns(&self, name: &str) -> Result<()> {
@@ -573,6 +579,21 @@ fn name_conflicts_from_addresses(resolved: &[IpAddr], local: &[IpAddr]) -> bool 
             .iter()
             .any(|local_address| without_macos_link_local_scope(*local_address) == resolved_address)
     })
+}
+
+fn name_conflicts_for_machine(
+    requested_name: &str,
+    current_hostname: &str,
+    resolved: &[IpAddr],
+    local: &[IpAddr],
+) -> bool {
+    // There is no rename to validate when Fleet keeps the machine's current
+    // hostname. Resolver caches and temporary interface addresses can otherwise
+    // make the machine's own mDNS record look remote on both macOS and Linux.
+    if requested_name.eq_ignore_ascii_case(current_hostname) {
+        return false;
+    }
+    name_conflicts_from_addresses(resolved, local)
 }
 
 fn without_macos_link_local_scope(address: IpAddr) -> IpAddr {
@@ -1039,9 +1060,24 @@ mod tests {
     fn same_hostname_is_a_collision_when_it_resolves_to_another_machine() {
         let other_machine = "192.168.1.69".parse().unwrap();
         let this_machine = "192.168.1.100".parse().unwrap();
-        assert!(name_conflicts_from_addresses(
+        assert!(name_conflicts_for_machine(
+            "powerbook",
+            "workstation",
             &[other_machine],
-            &[this_machine]
+            &[this_machine],
+        ));
+    }
+
+    #[test]
+    fn current_hostname_does_not_collide_with_its_own_mdns_record() {
+        let stale_or_alternate_address = "192.168.1.69".parse().unwrap();
+        let current_address = "192.168.1.100".parse().unwrap();
+
+        assert!(!name_conflicts_for_machine(
+            "powerbook",
+            "powerbook",
+            &[stale_or_alternate_address],
+            &[current_address],
         ));
     }
 
