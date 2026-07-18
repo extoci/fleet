@@ -62,6 +62,12 @@ runs formatting, Clippy, and tests. It builds on native GitHub-hosted runners fo
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
+Linux assets keep the conventional `unknown-linux-gnu` archive names used by
+the installer, but the executables inside are statically linked musl builds.
+The workflow inspects each Linux executable and refuses to publish it if it has
+a dynamic interpreter. This prevents a release runner's newer glibc from making
+Fleet unusable on older supported Debian and Ubuntu installations.
+
 Only after all four builds succeed does one publish job create the GitHub
 Release and upload all artifacts. GitHub generates release notes from merged
 changes. A failed build therefore cannot produce a partial release.

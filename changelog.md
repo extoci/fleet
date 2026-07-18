@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3 — 2026-07-18
+
+### Linux compatibility
+
+- Ship statically linked Linux executables so Fleet does not depend on the
+  release runner's glibc version.
+- Reject dynamically linked Linux executables during the release workflow
+  before they can reach end users.
+
 ## 0.5.2 — 2026-07-18
 
 ### Fleet membership integrity

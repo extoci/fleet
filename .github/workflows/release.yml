@@ -39,30 +39,49 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            target: aarch64-apple-darwin
+            build_target: aarch64-apple-darwin
+            asset_target: aarch64-apple-darwin
           - os: macos-15-intel
-            target: x86_64-apple-darwin
+            build_target: x86_64-apple-darwin
+            asset_target: x86_64-apple-darwin
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-musl
+            asset_target: aarch64-unknown-linux-gnu
           - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-musl
+            asset_target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build_target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }}
+          key: ${{ matrix.build_target }}
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          echo "CC=musl-gcc" >>"$GITHUB_ENV"
+      - run: cargo build --locked --release --target ${{ matrix.build_target }}
       - name: Smoke-test release binary
-        run: target/${{ matrix.target }}/release/fleet --version
+        run: target/${{ matrix.build_target }}/release/fleet --version
+      - name: Verify Linux binary is static
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.build_target }}/release/fleet"
+          if readelf --program-headers "$binary" | grep -q 'INTERP'; then
+            echo "Linux release binary is dynamically linked and may require a newer glibc" >&2
+            exit 1
+          fi
       - name: Package
         shell: bash
         run: |
-          asset="fleet-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "$asset" fleet
+          asset="fleet-${{ matrix.asset_target }}.tar.gz"
+          tar -C "target/${{ matrix.build_target }}/release" -czf "$asset" fleet
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" >"$asset.sha256"
           else
@@ -70,10 +89,10 @@ jobs:
           fi
       - uses: actions/upload-artifact@v7
         with:
-          name: fleet-${{ matrix.target }}
+          name: fleet-${{ matrix.asset_target }}
           path: |
-            fleet-${{ matrix.target }}.tar.gz
-            fleet-${{ matrix.target }}.tar.gz.sha256
+            fleet-${{ matrix.asset_target }}.tar.gz
+            fleet-${{ matrix.asset_target }}.tar.gz.sha256
           if-no-files-found: error
 
   publish:
