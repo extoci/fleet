@@ -362,6 +362,9 @@ impl Platform {
         }
         let status = Command::new("sh")
             .args(["-c", command])
+            // Installers should only install. Fleet owns the separate login prompt so a
+            // declined prompt cannot be followed by an unexpected authentication flow.
+            .env("NON_INTERACTIVE", "1")
             .status()
             .with_context(|| format!("launch {} installer", tool.display_name()))?;
         if !status.success() {

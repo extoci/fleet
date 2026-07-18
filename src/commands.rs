@@ -342,21 +342,7 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
             newly_installed.push(tool);
         }
     }
-    if !args.no_login {
-        for tool in newly_installed {
-            if let Err(error) = platform.login_tool(tool) {
-                crate::logging::detail(
-                    paths,
-                    "tool-login",
-                    format!("{}: {error:#}", tool.display_name()),
-                );
-                eprintln!(
-                    "Warning: {} login did not complete. Run `fleet logs` for details.",
-                    tool.display_name()
-                );
-            }
-        }
-    }
+    login_to_new_tools(paths, &platform, newly_installed, args.yes, args.no_login)?;
 
     let tools = Tool::ALL
         .into_iter()
@@ -523,6 +509,7 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     platform.ensure_tmux()?;
     platform.install_shell_theme(paths, shell, &config.machine.name, config.machine.color)?;
     completed("Shell and tmux setup");
+    let mut newly_installed = Vec::new();
     for tool in selected {
         let existed = platform.tool_installed(tool);
         if let Err(error) = platform.install_tool(tool) {
@@ -535,21 +522,11 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
                 "Warning: {} could not be installed. Run `fleet logs` for details.",
                 tool.display_name()
             );
-        } else if !existed
-            && !args.no_login
-            && let Err(error) = platform.login_tool(tool)
-        {
-            crate::logging::detail(
-                paths,
-                "tool-login",
-                format!("{}: {error:#}", tool.display_name()),
-            );
-            eprintln!(
-                "Warning: {} login did not complete. Run `fleet logs` for details.",
-                tool.display_name()
-            );
+        } else if !existed {
+            newly_installed.push(tool);
         }
     }
+    login_to_new_tools(paths, &platform, newly_installed, args.yes, args.no_login)?;
     config.machine.tools = Tool::ALL
         .into_iter()
         .map(|tool| ToolState {
@@ -953,6 +930,38 @@ fn choose_tools(platform: &Platform, provided: &[Tool]) -> Result<Vec<Tool>> {
         .items(&labels)
         .interact()?;
     Ok(choices.into_iter().map(|index| missing[index]).collect())
+}
+
+fn login_to_new_tools(
+    paths: &StatePaths,
+    platform: &Platform,
+    tools: Vec<Tool>,
+    yes: bool,
+    no_login: bool,
+) -> Result<()> {
+    if no_login {
+        return Ok(());
+    }
+    for tool in tools {
+        let login = yes
+            || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Login to {}?", tool.display_name()))
+                .default(true)
+                .interact()?;
+        if login && let Err(error) = platform.login_tool(tool) {
+            crate::logging::detail(
+                paths,
+                "tool-login",
+                format!("{}: {error:#}", tool.display_name()),
+            );
+            eprintln!(
+                "Warning: {} login did not complete. Run `fleet logs` for details.",
+                tool.display_name()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn local_machine(
