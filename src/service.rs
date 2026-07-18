@@ -294,21 +294,30 @@ fn verify_member(paths: &StatePaths, machine: &Machine, peer_ip: Option<IpAddr>)
         .arg(&machine.ssh_user)
         .arg(&target.connect_host)
         .arg("true");
-    let Some(output) = command_output_with_timeout(&mut command, Duration::from_secs(3))? else {
-        bail!("failed to connect to {destination}: SSH verification timed out after 3 seconds");
-    };
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr);
-    let detail = detail.trim();
-    if detail.is_empty() {
-        bail!(
-            "failed to connect to {destination}: SSH exited with {}",
-            output.status
-        );
-    }
-    bail!("failed to connect to {destination}: {detail}")
+    retry_transient_ssh(
+        || {
+            let Some(output) = command_output_with_timeout(&mut command, Duration::from_secs(3))?
+            else {
+                bail!(
+                    "failed to connect to {destination}: SSH verification timed out after 3 seconds"
+                );
+            };
+            if output.status.success() {
+                return Ok(());
+            }
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
+            if detail.is_empty() {
+                bail!(
+                    "failed to connect to {destination}: SSH exited with {}",
+                    output.status
+                );
+            }
+            bail!("failed to connect to {destination}: {detail}")
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(250),
+    )
 }
 
 fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
@@ -330,6 +339,35 @@ fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Resu
     let _ = child.kill();
     let _ = child.wait();
     Ok(None)
+}
+
+fn retry_transient_ssh<T>(
+    mut attempt: impl FnMut() -> Result<T>,
+    deadline: Duration,
+    retry_delay: Duration,
+) -> Result<T> {
+    let started = Instant::now();
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let detail = format!("{error:#}");
+                let transient = [
+                    "No route to host",
+                    "Connection refused",
+                    "Connection timed out",
+                    "Operation timed out",
+                    "SSH verification timed out",
+                ]
+                .iter()
+                .any(|needle| detail.contains(needle));
+                if !transient || started.elapsed() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(retry_delay);
+            }
+        }
+    }
 }
 
 fn json_response<T: Serialize>(
@@ -545,5 +583,40 @@ mod tests {
 
         assert_eq!(target.connect_host, "192.168.1.69");
         assert_eq!(target.host_key_alias, "emerald.local");
+    }
+
+    #[test]
+    fn ssh_verification_retries_a_temporarily_unreachable_member() {
+        let attempts = AtomicUsize::new(0);
+        let result: Result<()> = retry_transient_ssh(
+            || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    bail!("ssh: connect to host 192.168.1.69 port 22: No route to host");
+                }
+                Ok(())
+            },
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn ssh_verification_does_not_retry_security_or_authentication_failures() {
+        let attempts = AtomicUsize::new(0);
+        let result: Result<()> = retry_transient_ssh(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                bail!("Host key verification failed")
+            },
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }
