@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 — 2026-07-18
+
+### Fleet membership integrity
+
+- Reject registrations that collide with the captain's name, machine ID, or
+  Fleet identity.
+- Reject reuse of another member's Fleet identity or SSH host key under a new
+  machine ID.
+- Compare pinned SSH keys by canonical key material so comment-only changes do
+  not look like identity rotation, while real key changes remain blocked.
+
 ## 0.5.1 — 2026-07-18
 
 ### Hostname collision detection

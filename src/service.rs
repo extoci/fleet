@@ -108,14 +108,7 @@ fn handle_request(
             .context("join request was not signed by the member")?;
             validate_registration(&registration.machine)?;
             let members = skill::load_members(paths)?;
-            if members.iter().any(|member| {
-                member.name == registration.machine.name && member.id != registration.machine.id
-            }) {
-                bail!(
-                    "a different member already uses {}.local",
-                    registration.machine.name
-                );
-            }
+            validate_topology_conflicts(advertisement, &members, &registration.machine)?;
             validate_existing_pin(&members, &registration.machine)?;
             if let Err(error) = verify_member(paths, &registration.machine, peer_ip) {
                 let _ = crate::ssh_client::regenerate(paths);
@@ -224,13 +217,70 @@ fn validate_existing_pin(existing: &[Machine], candidate: &Machine) -> Result<()
             candidate.name
         );
     }
-    if pinned.public_identity != candidate.public_identity {
+    if !same_public_key(&pinned.public_identity, &candidate.public_identity)? {
         bail!("member Fleet identity changed; refusing registration");
     }
-    if pinned.ssh_host_key != candidate.ssh_host_key {
+    if !same_optional_public_key(
+        pinned.ssh_host_key.as_deref(),
+        candidate.ssh_host_key.as_deref(),
+    )? {
         bail!("member SSH host key changed; refusing registration");
     }
     Ok(())
+}
+
+fn validate_topology_conflicts(
+    captain: &CaptainAdvertisement,
+    existing: &[Machine],
+    candidate: &Machine,
+) -> Result<()> {
+    if candidate.id == captain.id {
+        bail!("member identity conflicts with the captain");
+    }
+    if candidate.name == captain.name {
+        bail!("the captain already uses {}.local", candidate.name);
+    }
+    if same_public_key(&candidate.public_identity, &captain.ssh_public_key)? {
+        bail!("member Fleet identity conflicts with the captain");
+    }
+
+    for member in existing {
+        if member.id != candidate.id && member.name == candidate.name {
+            bail!("a different member already uses {}.local", candidate.name);
+        }
+        if member.id != candidate.id
+            && same_public_key(&member.public_identity, &candidate.public_identity)?
+        {
+            bail!(
+                "member Fleet identity is already registered as {}.local",
+                member.name
+            );
+        }
+        if member.id != candidate.id
+            && same_optional_public_key(
+                member.ssh_host_key.as_deref(),
+                candidate.ssh_host_key.as_deref(),
+            )?
+        {
+            bail!(
+                "member SSH host key is already registered as {}.local",
+                member.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn same_public_key(left: &str, right: &str) -> Result<bool> {
+    Ok(identity::public_key_material(left)? == identity::public_key_material(right)?)
+}
+
+fn same_optional_public_key(left: Option<&str>, right: Option<&str>) -> Result<bool> {
+    match (left, right) {
+        (Some(left), Some(right)) => same_public_key(left, right),
+        (None, None) => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -498,6 +548,18 @@ mod tests {
         }
     }
 
+    fn captain_advertisement() -> CaptainAdvertisement {
+        CaptainAdvertisement {
+            protocol: 1,
+            id: Uuid::new_v4(),
+            name: "obsidian".into(),
+            host: "obsidian.local".into(),
+            port: 42170,
+            fingerprint: "SHA256:test".into(),
+            ssh_public_key: KEY_TWO.into(),
+        }
+    }
+
     #[test]
     fn registration_schema_rejects_untrusted_control_characters() {
         let mut machine = valid_machine();
@@ -530,6 +592,49 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Fleet identity changed")
+        );
+
+        changed = pinned.clone();
+        changed.public_identity.push_str(" another-comment");
+        changed.ssh_host_key = changed
+            .ssh_host_key
+            .map(|key| format!("{key} another-comment"));
+        assert!(validate_existing_pin(std::slice::from_ref(&pinned), &changed).is_ok());
+    }
+
+    #[test]
+    fn registration_rejects_every_topology_identity_collision() {
+        let captain = captain_advertisement();
+        let existing = valid_machine();
+        let mut candidate = valid_machine();
+        candidate.id = Uuid::new_v4();
+        candidate.name = "ruby".into();
+        candidate.public_identity = KEY_TWO.into();
+        candidate.ssh_host_key = Some(KEY_ONE.into());
+
+        assert!(
+            validate_topology_conflicts(&captain, std::slice::from_ref(&existing), &candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("captain")
+        );
+
+        candidate.public_identity = KEY_ONE.into();
+        candidate.ssh_host_key = Some(KEY_TWO.into());
+        assert!(
+            validate_topology_conflicts(&captain, std::slice::from_ref(&existing), &candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("already registered")
+        );
+
+        candidate.public_identity = KEY_TWO.into();
+        candidate.name = captain.name.clone();
+        assert!(
+            validate_topology_conflicts(&captain, &[], &candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("captain already uses")
         );
     }
 
