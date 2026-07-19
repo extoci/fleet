@@ -61,9 +61,9 @@ fn daemon_advertises_and_is_discovered_through_bonjour() {
 
     let captains = fleet::discovery::discover(None).unwrap();
     assert!(
-        captains
-            .iter()
-            .any(|captain| captain.id == id && captain.name == name)
+        captains.iter().any(|connection| {
+            connection.captain().id == id && connection.captain().name == name
+        })
     );
 
     let status = Command::new("kill")

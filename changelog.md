@@ -1,11 +1,16 @@
 # Changelog
 
-## 0.6.4 — 2026-07-19
+## 0.6.5 — 2026-07-19
 
 ### Captain connectivity
 
 - Configure the host firewall for Fleet's captain control port during setup,
   preventing mDNS advertisements from pointing to an unreachable service.
+- Keep the concrete, identity-verified DNS-SD transport for registration and
+  later requests instead of discarding it and resolving the advertised
+  `.local` hostname again.
+- Rediscover existing captains by their pinned identity for resume, leave, and
+  health checks, so those paths use the same reliable connection seam as join.
 
 ## 0.6.3 — 2026-07-19
 

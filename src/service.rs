@@ -1,11 +1,11 @@
-use crate::discovery::{CaptainAdvertisement, SERVICE_TYPE};
+use crate::discovery::{CaptainAdvertisement, CaptainConnection, SERVICE_TYPE};
 use crate::identity;
 use crate::skill;
 use crate::state::{Machine, Role, StatePaths};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -466,10 +466,10 @@ fn publish(advertisement: &CaptainAdvertisement) -> Result<Child> {
         .context("publish Fleet captain with native mDNS service")
 }
 
-pub fn register(paths: &StatePaths, endpoint: &str, machine: &Machine) -> Result<()> {
+pub fn register(paths: &StatePaths, captain: &CaptainConnection, machine: &Machine) -> Result<()> {
     signed_post(
         paths,
-        endpoint,
+        captain,
         "/v1/join",
         &JoinRequest {
             machine: machine.clone(),
@@ -477,13 +477,13 @@ pub fn register(paths: &StatePaths, endpoint: &str, machine: &Machine) -> Result
     )
 }
 
-pub fn notify_leave(paths: &StatePaths, endpoint: &str, id: Uuid) -> Result<()> {
-    signed_post(paths, endpoint, "/v1/leave", &LeaveRequest { id })
+pub fn notify_leave(paths: &StatePaths, captain: &CaptainConnection, id: Uuid) -> Result<()> {
+    signed_post(paths, captain, "/v1/leave", &LeaveRequest { id })
 }
 
 fn signed_post<T: Serialize>(
     paths: &StatePaths,
-    endpoint: &str,
+    captain: &CaptainConnection,
     path: &str,
     body: &T,
 ) -> Result<()> {
@@ -491,61 +491,39 @@ fn signed_post<T: Serialize>(
     let bytes = serde_json::to_vec(&payload)?;
     let identity = identity::ensure(paths)?;
     let signature = identity::sign(&identity.private_key, &bytes)?;
-    post(endpoint, path, &SignedRequest { payload, signature })
+    post(
+        captain.endpoint(),
+        path,
+        &SignedRequest { payload, signature },
+    )
 }
 
 fn post<T: Serialize>(endpoint: &str, path: &str, body: &T) -> Result<()> {
     let endpoint = endpoint.trim_end_matches('/');
-    let mut endpoints = vec![endpoint.to_owned()];
-    if let Some((host, port)) = endpoint.rsplit_once(':')
-        && !host.contains(']')
-        && let Ok(port_number) = port.parse::<u16>()
-        && let Ok(addresses) = (host, port_number).to_socket_addrs()
-    {
-        for address in addresses {
-            let resolved = match address.ip() {
-                IpAddr::V4(ip) => format!("{ip}:{port}"),
-                IpAddr::V6(ip) => format!("[{ip}]:{port}"),
-            };
-            if !endpoints.contains(&resolved) {
-                endpoints.push(resolved);
-            }
-        }
-    }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let mut failures = Vec::new();
-    for candidate in endpoints {
-        let base = if candidate.starts_with("http://") || candidate.starts_with("https://") {
-            candidate.clone()
-        } else {
-            format!("http://{candidate}")
-        };
-        let url = format!("{base}{path}");
-        let response = match client.post(&url).json(body).send() {
-            Ok(response) => response,
-            Err(error) => {
-                failures.push(format!("{candidate}: {error:#}"));
-                continue;
-            }
-        };
-        if response.status().is_success() {
-            return Ok(());
-        }
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        let reason = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        bail!("captain rejected request: {reason}");
+    let base = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        format!("http://{endpoint}")
+    };
+    let response = client
+        .post(format!("{base}{path}"))
+        .json(body)
+        .send()
+        .with_context(|| format!("send captain request to {endpoint}"))?;
+    if response.status().is_success() {
+        return Ok(());
     }
-    bail!(
-        "send captain request to {endpoint} failed: {}",
-        failures.join("; ")
-    )
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    let reason = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    bail!("captain rejected request: {reason}")
 }
 
 #[cfg(test)]

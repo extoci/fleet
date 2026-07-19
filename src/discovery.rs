@@ -22,6 +22,26 @@ pub struct CaptainAdvertisement {
     pub ssh_public_key: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CaptainConnection {
+    captain: CaptainAdvertisement,
+    endpoint: String,
+}
+
+impl CaptainConnection {
+    pub fn captain(&self) -> &CaptainAdvertisement {
+        &self.captain
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn captain_ref(&self) -> CaptainRef {
+        self.captain.captain_ref()
+    }
+}
+
 impl CaptainAdvertisement {
     pub fn captain_ref(&self) -> CaptainRef {
         CaptainRef {
@@ -34,9 +54,9 @@ impl CaptainAdvertisement {
     }
 }
 
-pub fn discover(explicit: Option<&str>) -> Result<Vec<CaptainAdvertisement>> {
+pub fn discover(explicit: Option<&str>) -> Result<Vec<CaptainConnection>> {
     if let Some(endpoint) = explicit {
-        return Ok(vec![fetch_identity(endpoint)?]);
+        return Ok(vec![connect(endpoint)?]);
     }
     discover_with(
         || {
@@ -48,7 +68,7 @@ pub fn discover(explicit: Option<&str>) -> Result<Vec<CaptainAdvertisement>> {
                 bail!("Fleet discovery supports macOS and Linux only");
             }
         },
-        fetch_identity,
+        connect,
         6,
         Duration::from_millis(500),
     )
@@ -59,10 +79,10 @@ fn discover_with<B, F>(
     mut fetch: F,
     attempts: usize,
     retry_delay: Duration,
-) -> Result<Vec<CaptainAdvertisement>>
+) -> Result<Vec<CaptainConnection>>
 where
     B: FnMut() -> Result<Vec<String>>,
-    F: FnMut(&str) -> Result<CaptainAdvertisement>,
+    F: FnMut(&str) -> Result<CaptainConnection>,
 {
     let mut failures = Vec::new();
     for attempt in 0..attempts {
@@ -70,9 +90,9 @@ where
         for endpoint in browse()? {
             match fetch(&endpoint) {
                 Ok(captain)
-                    if !captains
-                        .iter()
-                        .any(|existing: &CaptainAdvertisement| existing.id == captain.id) =>
+                    if !captains.iter().any(|existing: &CaptainConnection| {
+                        existing.captain.id == captain.captain.id
+                    }) =>
                 {
                     captains.push(captain)
                 }
@@ -98,6 +118,10 @@ where
 }
 
 pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {
+    Ok(connect(endpoint)?.captain)
+}
+
+pub fn connect(endpoint: &str) -> Result<CaptainConnection> {
     let endpoint = endpoint.trim_end_matches('/');
     let mut endpoints = vec![endpoint.to_owned()];
     if let Some((host, port)) = endpoint.rsplit_once(':')
@@ -140,11 +164,34 @@ pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {
                 validate_advertisement(&captain)?;
                 Ok(captain)
             }) {
-            Ok(captain) => return Ok(captain),
+            Ok(captain) => {
+                return Ok(CaptainConnection {
+                    captain,
+                    endpoint: candidate,
+                });
+            }
             Err(error) => failures.push(format!("{candidate}: {error:#}")),
         }
     }
     bail!("{}", failures.join("; "))
+}
+
+pub fn connect_pinned(explicit: Option<&str>, expected: &CaptainRef) -> Result<CaptainConnection> {
+    let captains = discover(explicit)?;
+    if let Some(connection) = captains
+        .iter()
+        .find(|connection| connection.captain.id == expected.id)
+    {
+        if connection.captain.fingerprint != expected.fingerprint {
+            bail!("captain identity changed; refusing to connect");
+        }
+        return Ok(connection.clone());
+    }
+    bail!(
+        "pinned captain {} ({}) was not discovered on this local network",
+        expected.host,
+        expected.fingerprint
+    )
 }
 
 fn validate_advertisement(captain: &CaptainAdvertisement) -> Result<()> {
@@ -291,6 +338,8 @@ fn capture_for(command: &mut Command, duration: Duration) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tiny_http::{Header, Response, Server};
 
     #[test]
     fn advertisement_becomes_captain_reference() {
@@ -355,7 +404,10 @@ mod tests {
                 if endpoint.ends_with(":47651") {
                     bail!("stale service");
                 }
-                Ok(captain.clone())
+                Ok(CaptainConnection {
+                    captain: captain.clone(),
+                    endpoint: endpoint.into(),
+                })
             },
             2,
             Duration::ZERO,
@@ -364,6 +416,52 @@ mod tests {
 
         assert_eq!(browses, 2);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].port, DEFAULT_PORT);
+        assert_eq!(found[0].captain.port, DEFAULT_PORT);
+        assert_eq!(found[0].endpoint(), "emerald.local:42170");
+    }
+
+    #[test]
+    fn discovered_transport_is_used_for_follow_up_communication() {
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIElmqI4v+7cZFSmB7soOSl3vymQTl8v7/15ZnHH2DA4d";
+        let captain = CaptainAdvertisement {
+            protocol: 1,
+            id: Uuid::new_v4(),
+            name: "unresolvable-captain".into(),
+            host: "unresolvable-captain.local".into(),
+            port: DEFAULT_PORT,
+            fingerprint: crate::identity::fingerprint_public_key(key).unwrap(),
+            ssh_public_key: key.into(),
+        };
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let discovered_endpoint = server.server_addr().to_string();
+        let response_body = serde_json::to_vec(&captain).unwrap();
+        let server = Arc::new(server);
+        let server_thread = {
+            let server = server.clone();
+            thread::spawn(move || {
+                for _ in 0..2 {
+                    let request = server.recv().unwrap();
+                    request
+                        .respond(Response::from_data(response_body.clone()).with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ))
+                        .unwrap();
+                }
+            })
+        };
+
+        let found = discover_with(
+            || Ok(vec![discovered_endpoint.clone()]),
+            connect,
+            1,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(
+            fetch_identity(found[0].endpoint()).is_ok(),
+            "follow-up communication discarded the working discovery transport {discovered_endpoint}"
+        );
+        server_thread.join().unwrap();
     }
 }

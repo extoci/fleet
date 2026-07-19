@@ -1,7 +1,7 @@
 use crate::cli::{
     Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool, UsageArgs,
 };
-use crate::discovery::{CaptainAdvertisement, DEFAULT_PORT};
+use crate::discovery::{CaptainAdvertisement, CaptainConnection, DEFAULT_PORT};
 use crate::identity;
 use crate::platform::Platform;
 use crate::service;
@@ -333,7 +333,8 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     if captains.is_empty() {
         bail!("no Fleet captain was discovered on this local network");
     }
-    let captain = choose_captain(captains)?;
+    let captain_connection = choose_captain(captains)?;
+    let captain = captain_connection.captain();
     println!("\nCaptain found: {}", captain.host);
     println!("Identity: {}", captain.fingerprint);
     let current = platform.current_hostname()?;
@@ -412,9 +413,6 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
         .collect();
     let mut machine = local_machine(&platform, name.clone(), color, identity.public_key, tools)?;
     machine.ssh_host_key = platform.ssh_host_key()?;
-    let endpoint = args
-        .captain
-        .unwrap_or_else(|| format!("{}:{}", captain.host, captain.port));
     let config = LocalConfig {
         version: STATE_VERSION,
         role: Role::Member,
@@ -423,9 +421,10 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     };
     paths.save(&config)?;
     completed("Local member state");
-    service::register(paths, &endpoint, &config.machine).with_context(|| {
+    service::register(paths, &captain_connection, &config.machine).with_context(|| {
         format!(
-            "register with captain at {endpoint}; local setup is saved, so rerun `fleet join` after resolving connectivity"
+            "register with captain at {}; local setup is saved, so rerun `fleet join` after resolving connectivity",
+            captain_connection.endpoint()
         )
     })?;
     completed("Captain registration and pinned SSH verification");
@@ -517,9 +516,6 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
         .captain
         .clone()
         .context("member state is missing captain information")?;
-    let endpoint = args
-        .captain
-        .unwrap_or_else(|| format!("{}:{DEFAULT_PORT}", captain_ref.host));
     let platform = Platform::new(args.dry_run)?;
     let shell = platform.active_shell()?;
     platform.preflight()?;
@@ -532,17 +528,18 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
         );
         return Ok(());
     }
-    let captain = crate::discovery::fetch_identity(&endpoint).map_err(|error| {
-        crate::logging::user_error(
-            paths,
-            "resume-join",
-            "The captain could not be reached",
-            &error,
-        )
-    })?;
-    if captain.id != captain_ref.id || captain.fingerprint != captain_ref.fingerprint {
-        bail!("captain identity changed; refusing to resume join");
-    }
+    let captain_connection =
+        crate::discovery::connect_pinned(args.captain.as_deref(), &captain_ref).map_err(
+            |error| {
+                crate::logging::user_error(
+                    paths,
+                    "resume-join",
+                    "The captain could not be reached",
+                    &error,
+                )
+            },
+        )?;
+    let captain = captain_connection.captain();
     identity::ensure(paths)?;
     completed("Fleet identity");
     working("Preparing native local-network discovery");
@@ -592,7 +589,7 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
         .collect();
     config.machine.ssh_host_key = platform.ssh_host_key()?;
     paths.save(&config)?;
-    service::register(paths, &endpoint, &config.machine).context(
+    service::register(paths, &captain_connection, &config.machine).context(
         "captain registration still failed; resolve connectivity and rerun `fleet join`",
     )?;
     completed("Captain registration and pinned SSH verification");
@@ -641,9 +638,7 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
                     .captain
                     .as_ref()
                     .map(|captain| {
-                        let state = if service_health(&format!("{}:{DEFAULT_PORT}", captain.host))
-                            == "✓"
-                        {
+                        let state = if captain_health(captain) == "✓" {
                             "online"
                         } else {
                             "unreachable"
@@ -697,8 +692,7 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
                 render_status_rows(&[(config.machine, None)], width, colors)
             );
             if let Some(captain) = config.captain {
-                let health =
-                    check.then(|| service_health(&format!("{}:{DEFAULT_PORT}", captain.host)));
+                let health = check.then(|| captain_health(&captain));
                 println!(
                     "\nCAPTAIN\n  {}  {}{}",
                     captain.host,
@@ -755,8 +749,11 @@ fn leave(paths: &StatePaths, args: LeaveArgs) -> Result<()> {
             let captain = config
                 .captain
                 .context("member state is missing captain information")?;
-            let endpoint = format!("{}:{}", captain.host, DEFAULT_PORT);
-            if let Err(error) = service::notify_leave(paths, &endpoint, config.machine.id) {
+            let notification =
+                crate::discovery::connect_pinned(None, &captain).and_then(|connection| {
+                    service::notify_leave(paths, &connection, config.machine.id)
+                });
+            if let Err(error) = notification {
                 crate::logging::detail(paths, "leave", format!("{error:#}"));
                 eprintln!(
                     "Warning: the captain could not accept the leave request and may retain this member. The captain can run `fleet remove {}`. Run `fleet logs` for details.",
@@ -874,11 +871,7 @@ fn doctor(paths: &StatePaths) -> Result<()> {
             let captain = config
                 .captain
                 .context("member state is missing captain information")?;
-            println!(
-                "  {} captain {}",
-                service_health(&format!("{}:{DEFAULT_PORT}", captain.host)),
-                captain.host
-            );
+            println!("  {} captain {}", captain_health(&captain), captain.host);
         }
     }
     println!("Detailed diagnostics: `fleet logs`");
@@ -899,8 +892,8 @@ fn reachability(host: &str) -> &'static str {
     if reachable { "online" } else { "unreachable" }
 }
 
-fn service_health(endpoint: &str) -> &'static str {
-    if crate::discovery::fetch_identity(endpoint).is_ok() {
+fn captain_health(captain: &crate::state::CaptainRef) -> &'static str {
+    if crate::discovery::connect_pinned(None, captain).is_ok() {
         "✓"
     } else {
         "!"
@@ -943,13 +936,19 @@ fn colorize(value: &str, color: Color, enabled: bool) -> String {
     }
 }
 
-fn choose_captain(captains: Vec<CaptainAdvertisement>) -> Result<CaptainAdvertisement> {
+fn choose_captain(captains: Vec<CaptainConnection>) -> Result<CaptainConnection> {
     if captains.len() == 1 {
         return Ok(captains.into_iter().next().unwrap());
     }
     let labels: Vec<_> = captains
         .iter()
-        .map(|captain| format!("{}  {}", captain.host, captain.fingerprint))
+        .map(|connection| {
+            format!(
+                "{}  {}",
+                connection.captain().host,
+                connection.captain().fingerprint
+            )
+        })
         .collect();
     let index = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Choose a captain")
@@ -1191,10 +1190,9 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
     for _ in 0..6 {
         let discovered = crate::discovery::discover(None)
             .context("captain HTTP service works, but mDNS advertisement could not be verified")?;
-        if discovered
-            .iter()
-            .any(|captain| captain.id == expected.id && captain.host == expected.host())
-        {
+        if discovered.iter().any(|connection| {
+            connection.captain().id == expected.id && connection.captain().host == expected.host()
+        }) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
