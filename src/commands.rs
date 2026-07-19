@@ -296,6 +296,7 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     crate::ssh_client::initialize(paths)?;
     completed("Captain inventory, Fleet skill, and SSH client trust");
     fs::create_dir_all(paths.logs_dir())?;
+    prepare_captain_service(&platform)?;
     platform.install_captain_service(paths)?;
     verify_local_captain_service(paths)?;
     completed("Captain service and mDNS advertisement");
@@ -481,6 +482,7 @@ fn resume_init(paths: &StatePaths, args: InitArgs, mut config: LocalConfig) -> R
     skill::initialize(paths)?;
     crate::ssh_client::initialize(paths)?;
     fs::create_dir_all(paths.logs_dir())?;
+    prepare_captain_service(&platform)?;
     platform.install_captain_service(paths)?;
     verify_local_captain_service(paths)?;
     completed("Captain service and mDNS advertisement");
@@ -1176,9 +1178,7 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
                 local_ready = true;
                 break;
             }
-            Ok(_) => {
-                last_error = Some(anyhow::anyhow!("unexpected captain identity on local port"))
-            }
+            Ok(actual) => last_error = Some(captain_identity_mismatch(&expected, &actual)),
             Err(error) => last_error = Some(error),
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1205,6 +1205,45 @@ fn verify_local_captain_service(paths: &StatePaths) -> Result<()> {
     )
 }
 
+fn prepare_captain_service(platform: &Platform) -> Result<()> {
+    platform.stop_captain_service()?;
+    let endpoint = format!("127.0.0.1:{DEFAULT_PORT}");
+    for _ in 0..12 {
+        if TcpStream::connect_timeout(
+            &endpoint
+                .parse()
+                .expect("constant captain endpoint is valid"),
+            Duration::from_millis(100),
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    if let Ok(actual) = crate::discovery::fetch_identity(&endpoint) {
+        bail!(
+            "another Fleet captain ({}, identity {}) is already using local port {DEFAULT_PORT}; stop that daemon and resume with `fleet init`",
+            actual.host,
+            actual.id
+        );
+    }
+    bail!(
+        "another process is already using Fleet's local port {DEFAULT_PORT}; stop it and resume with `fleet init`"
+    )
+}
+
+fn captain_identity_mismatch(expected: &Machine, actual: &CaptainAdvertisement) -> anyhow::Error {
+    anyhow::anyhow!(
+        "local port {DEFAULT_PORT} answered as {} (identity {}), but current Fleet state expects {} (identity {}); stop the stale daemon and resume with `fleet init`",
+        actual.host,
+        actual.id,
+        expected.host(),
+        expected.id
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1224,6 +1263,26 @@ mod tests {
             public_identity: "ssh-ed25519 AAAATEST".into(),
             ssh_host_key: None,
         }
+    }
+
+    #[test]
+    fn captain_identity_mismatch_explains_the_stale_daemon_and_recovery() {
+        let expected = status_machine();
+        let actual = CaptainAdvertisement {
+            protocol: 1,
+            id: Uuid::new_v4(),
+            name: "old-captain".into(),
+            host: "old-captain.local".into(),
+            port: DEFAULT_PORT,
+            fingerprint: "SHA256:test".into(),
+            ssh_public_key: "ssh-ed25519 AAAATEST".into(),
+        };
+
+        let message = captain_identity_mismatch(&expected, &actual).to_string();
+        assert!(message.contains(&actual.id.to_string()));
+        assert!(message.contains(&expected.id.to_string()));
+        assert!(message.contains("stop the stale daemon"));
+        assert!(message.contains("fleet init"));
     }
 
     #[test]
