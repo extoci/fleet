@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.4 — 2026-07-19
+
+### Captain connectivity
+
+- Configure the host firewall for Fleet's captain control port during setup,
+  preventing mDNS advertisements from pointing to an unreachable service.
+
 ## 0.6.3 — 2026-07-19
 
 ### Network registration reliability

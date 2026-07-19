@@ -196,6 +196,7 @@ impl Platform {
             if which::which("dns-sd").is_err() {
                 bail!("macOS DNS-SD utility is unavailable");
             }
+            self.ensure_fleet_port_access()?;
             return Ok(());
         }
         self.require_linux_systemd_apt()?;
@@ -210,7 +211,29 @@ impl Platform {
                 "libnss-mdns",
             ],
         )?;
-        self.run_sudo("systemctl", ["enable", "--now", "avahi-daemon"])
+        self.run_sudo("systemctl", ["enable", "--now", "avahi-daemon"])?;
+        self.ensure_fleet_port_access()
+    }
+
+    fn ensure_fleet_port_access(&self) -> Result<()> {
+        let executable = std::env::current_exe().context("locate Fleet executable")?;
+        if self.kind == PlatformKind::MacOs {
+            let socketfilterfw = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+            self.run_sudo(socketfilterfw, ["--add", &executable.to_string_lossy()])?;
+            return self.run_sudo(
+                socketfilterfw,
+                ["--unblockapp", &executable.to_string_lossy()],
+            );
+        }
+
+        if which::which("ufw").is_ok() {
+            return self.run_sudo("ufw", ["allow", "42170/tcp", "comment", "Fleet captain"]);
+        }
+        if which::which("firewall-cmd").is_ok() {
+            self.run_sudo("firewall-cmd", ["--permanent", "--add-port=42170/tcp"])?;
+            return self.run_sudo("firewall-cmd", ["--reload"]);
+        }
+        Ok(())
     }
 
     pub fn ensure_ssh_server(&self) -> Result<()> {
