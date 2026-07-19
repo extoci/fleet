@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2 — 2026-07-19
+
+### Network discovery reliability
+
+- Use native service-discovery addresses when verifying captain advertisements,
+  avoiding unusable `.local` IPv6 resolutions.
+- Retry captain identity verification across resolved IPv4 and IPv6 endpoints
+  with actionable per-endpoint diagnostics.
+
 ## 0.6.1 — 2026-07-19
 
 ### Captain service reliability

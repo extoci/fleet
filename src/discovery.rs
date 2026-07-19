@@ -2,6 +2,7 @@ use crate::state::CaptainRef;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::net::ToSocketAddrs;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -98,22 +99,52 @@ where
 
 pub fn fetch_identity(endpoint: &str) -> Result<CaptainAdvertisement> {
     let endpoint = endpoint.trim_end_matches('/');
-    let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        format!("{endpoint}/v1/identity")
-    } else {
-        format!("http://{endpoint}/v1/identity")
-    };
-    let response = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .build()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("contact captain at {endpoint}"))?
-        .error_for_status()
-        .context("captain rejected identity request")?;
-    let captain: CaptainAdvertisement = response.json().context("decode captain identity")?;
-    validate_advertisement(&captain)?;
-    Ok(captain)
+    let mut endpoints = vec![endpoint.to_owned()];
+    if let Some((host, port)) = endpoint.rsplit_once(':')
+        && !host.contains(']')
+        && let Ok(port_number) = port.parse::<u16>()
+        && let Ok(addresses) = (host, port_number).to_socket_addrs()
+    {
+        for address in addresses {
+            let resolved = match address.ip() {
+                std::net::IpAddr::V4(ip) => format!("{ip}:{port}"),
+                std::net::IpAddr::V6(ip) => format!("[{ip}]:{port}"),
+            };
+            if !endpoints.contains(&resolved) {
+                endpoints.push(resolved);
+            }
+        }
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+    let mut failures = Vec::new();
+    for candidate in endpoints {
+        let url = if candidate.starts_with("http://") || candidate.starts_with("https://") {
+            format!("{candidate}/v1/identity")
+        } else {
+            format!("http://{candidate}/v1/identity")
+        };
+        match client
+            .get(&url)
+            .send()
+            .with_context(|| format!("contact captain at {candidate}"))
+            .and_then(|response| {
+                response
+                    .error_for_status()
+                    .context("captain rejected identity request")
+            })
+            .and_then(|response| response.json().context("decode captain identity"))
+            .and_then(|captain: CaptainAdvertisement| {
+                validate_advertisement(&captain)?;
+                Ok(captain)
+            }) {
+            Ok(captain) => return Ok(captain),
+            Err(error) => failures.push(format!("{candidate}: {error:#}")),
+        }
+    }
+    bail!("{}", failures.join("; "))
 }
 
 fn validate_advertisement(captain: &CaptainAdvertisement) -> Result<()> {
@@ -149,9 +180,16 @@ fn browse_linux() -> Result<Vec<String>> {
     for line in stdout.lines().filter(|line| line.starts_with('=')) {
         let fields: Vec<_> = line.split(';').collect();
         if fields.len() > 8 {
-            let host = fields[6].trim_end_matches('.');
+            // Field 7 is the address resolved by Avahi. Using field 6 (the
+            // advertised hostname) makes reqwest perform a fresh lookup and
+            // can select an unreachable IPv6 link-local address.
+            let address = fields[7].trim();
             let port = fields[8];
-            endpoints.push(format!("{host}:{port}"));
+            if address.contains(':') {
+                endpoints.push(format!("[{address}]:{port}"));
+            } else {
+                endpoints.push(format!("{address}:{port}"));
+            }
         }
     }
     endpoints.sort();
