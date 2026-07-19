@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 — 2026-07-19
+
+### Captain service reliability
+
+- Stop the managed captain service before reinstalling it and wait for its
+  local port to become available, preventing stale daemons from masking a
+  failed service restart.
+- Report the expected and observed captain identities with actionable recovery
+  guidance when another Fleet daemon owns the local service port.
+
 ## 0.6.0 — 2026-07-19
 
 ### Remote usage reports
