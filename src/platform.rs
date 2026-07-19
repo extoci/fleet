@@ -247,7 +247,6 @@ impl Platform {
         color: Color,
     ) -> Result<()> {
         let init = render_shell_init(name, color);
-        let tmux = render_tmux(name, color);
         if self.dry_run {
             println!(
                 "Would write {} and configure {}",
@@ -258,7 +257,6 @@ impl Platform {
         }
         fs::create_dir_all(paths.shell_dir()).context("create Fleet shell directory")?;
         atomic_write(&paths.shell_dir().join("init.sh"), init.as_bytes(), 0o644)?;
-        atomic_write(&paths.shell_dir().join("tmux.conf"), tmux.as_bytes(), 0o644)?;
 
         let home = dirs::home_dir().context("could not determine home directory")?;
         let rc = home.join(shell.rc_file());
@@ -267,6 +265,22 @@ impl Platform {
             "# Fleet shell integration",
             "[ -f \"$HOME/.fleet/shell/init.sh\" ] && . \"$HOME/.fleet/shell/init.sh\"",
         )?;
+        self.install_tmux_theme(paths, name, color)
+    }
+
+    pub fn install_tmux_theme(&self, paths: &StatePaths, name: &str, color: Color) -> Result<()> {
+        if self.dry_run {
+            println!("Would configure tmux in {}", paths.shell_dir().display());
+            return Ok(());
+        }
+        fs::create_dir_all(paths.shell_dir()).context("create Fleet shell directory")?;
+        atomic_write(
+            &paths.shell_dir().join("tmux.conf"),
+            render_tmux(name, color).as_bytes(),
+            0o644,
+        )?;
+
+        let home = dirs::home_dir().context("could not determine home directory")?;
         append_marked_line(
             &home.join(".tmux.conf"),
             "# Fleet tmux integration",

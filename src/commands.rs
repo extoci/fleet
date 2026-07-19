@@ -178,7 +178,6 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     }
     paths.ensure_uninitialized()?;
     let platform = Platform::new(args.dry_run)?;
-    let shell = platform.active_shell()?;
     platform.preflight()?;
     let current = platform.current_hostname()?;
     let name = choose_name(args.name, &current)?;
@@ -199,8 +198,7 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
 
     if args.dry_run {
         println!(
-            "Would create a Fleet identity, set the hostname, configure tmux/{}, install the Fleet skill, and start the captain service.",
-            shell_name(shell)
+            "Would create a Fleet identity, set the hostname, configure tmux, install the Fleet skill, and start the captain service."
         );
         return Ok(());
     }
@@ -219,8 +217,8 @@ fn init(paths: &StatePaths, args: InitArgs) -> Result<()> {
     platform.set_hostname_and_mdns(&name)?;
     completed(&format!("System hostname and mDNS name: {name}.local"));
     platform.ensure_tmux()?;
-    platform.install_shell_theme(paths, shell, &name, color)?;
-    completed("Shell and tmux setup");
+    platform.install_tmux_theme(paths, &name, color)?;
+    completed("Tmux setup");
     let machine = local_machine(
         &platform,
         name,
@@ -399,14 +397,10 @@ fn resume_init(paths: &StatePaths, args: InitArgs, mut config: LocalConfig) -> R
         );
     }
     let platform = Platform::new(args.dry_run)?;
-    let shell = platform.active_shell()?;
     platform.preflight()?;
     println!("Resuming captain setup for {}.local.", config.machine.name);
     if args.dry_run {
-        println!(
-            "Would verify identity, hostname/mDNS, tmux/{}, Fleet skill, and captain service.",
-            shell_name(shell)
-        );
+        println!("Would verify identity, hostname/mDNS, tmux, Fleet skill, and captain service.");
         return Ok(());
     }
     identity::ensure(paths)?;
@@ -420,8 +414,8 @@ fn resume_init(paths: &StatePaths, args: InitArgs, mut config: LocalConfig) -> R
         config.machine.host()
     ));
     platform.ensure_tmux()?;
-    platform.install_shell_theme(paths, shell, &config.machine.name, config.machine.color)?;
-    completed("Shell and tmux setup");
+    platform.install_tmux_theme(paths, &config.machine.name, config.machine.color)?;
+    completed("Tmux setup");
     config.machine.tools = detected_tools(&platform);
     paths.save(&config)?;
     skill::initialize(paths)?;
