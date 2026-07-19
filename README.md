@@ -29,6 +29,8 @@ After installing v0.4.0 or newer, update in place with:
 fleet update
 # From the captain, update every member and then the captain itself
 fleet update-all
+# Show the latest ccusage report from a fleet machine
+fleet usage emerald
 ```
 
 Installations older than v0.4.0 must rerun the installer once to gain the

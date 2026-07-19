@@ -45,6 +45,8 @@ pub enum Command {
     /// Update Fleet on every machine, members first and captain last.
     #[command(name = "update-all", visible_alias = "updateall")]
     UpdateAll,
+    /// Show coding-agent usage recorded on a machine.
+    Usage(UsageArgs),
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
@@ -141,6 +143,12 @@ pub struct RestartArgs {
     /// Print the restart command without running it.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UsageArgs {
+    /// Machine name, with or without .local.
+    pub machine: String,
 }
 
 #[derive(Debug, Args)]

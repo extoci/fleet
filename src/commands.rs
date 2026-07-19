@@ -1,5 +1,5 @@
 use crate::cli::{
-    Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool,
+    Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool, UsageArgs,
 };
 use crate::discovery::{CaptainAdvertisement, DEFAULT_PORT};
 use crate::identity;
@@ -35,8 +35,68 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Restart(args) => restart(&paths, args),
         Command::Update => update(&paths),
         Command::UpdateAll => update_all(&paths),
+        Command::Usage(args) => usage(&paths, args),
         Command::Daemon(args) => service::run(&paths, &args.listen),
     }
+}
+
+const REMOTE_USAGE_COMMAND: &str = r#"
+if command -v bunx >/dev/null 2>&1; then
+  exec bunx ccusage@latest
+fi
+if [ -x "$HOME/.bun/bin/bunx" ]; then
+  exec "$HOME/.bun/bin/bunx" ccusage@latest
+fi
+if command -v bun >/dev/null 2>&1; then
+  exec bun x ccusage@latest
+fi
+if [ -x "$HOME/.bun/bin/bun" ]; then
+  exec "$HOME/.bun/bin/bun" x ccusage@latest
+fi
+if command -v pnpm >/dev/null 2>&1; then
+  exec pnpm dlx ccusage@latest
+fi
+if command -v npx >/dev/null 2>&1; then
+  exec npx --yes ccusage@latest
+fi
+printf '%s\n' 'ccusage needs bunx, bun, pnpm, or npx; install Bun or Node.js on this machine' >&2
+exit 127
+"#;
+
+fn usage(paths: &StatePaths, args: UsageArgs) -> Result<()> {
+    let config = paths.require()?;
+    let query = args.machine.trim_end_matches(".local");
+
+    let status = if config.machine.name == query {
+        ProcessCommand::new("sh")
+            .args(["-c", REMOTE_USAGE_COMMAND])
+            .status()
+            .context("start ccusage locally")?
+    } else {
+        if config.role != Role::Captain {
+            bail!("only the captain can request usage from another machine");
+        }
+        let member = skill::load_members(paths)?
+            .into_iter()
+            .find(|member| member.name == query)
+            .with_context(|| format!("no machine named {query} is registered"))?;
+        ProcessCommand::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                &member.host(),
+                REMOTE_USAGE_COMMAND,
+            ])
+            .status()
+            .with_context(|| format!("start SSH to {}", member.host()))?
+    };
+
+    if !status.success() {
+        bail!("ccusage on {query}.local exited with {status}");
+    }
+    Ok(())
 }
 
 const REMOTE_UPDATE_COMMAND: &str = r#"

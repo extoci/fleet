@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 — 2026-07-19
+
+### Remote usage reports
+
+- Added `fleet usage <machine>` to run the latest ccusage report on the local
+  machine or a registered member and stream the result back to the caller.
+- Prefer Bun for direct execution, including its standard user installation
+  path, with automatic fallbacks to Bun, pnpm, or npx when `bunx` is unavailable.
+
 ## 0.5.3 — 2026-07-18
 
 ### Linux compatibility

@@ -49,8 +49,50 @@ fn help_exposes_only_the_v0_lifecycle() {
         .stdout(predicate::str::contains("restart"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("update-all"))
+        .stdout(predicate::str::contains("usage"))
         .stdout(predicate::str::contains("transfer").not())
         .stdout(predicate::str::contains("sync").not());
+}
+
+#[test]
+fn usage_rejects_an_unknown_machine_before_starting_ssh() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    test_command(&home)
+        .args(["usage", "missing.local"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no machine named missing is registered",
+        ));
+}
+
+#[test]
+fn member_cannot_request_another_machines_usage() {
+    let home = TempDir::new().unwrap();
+    let mut config = captain_config();
+    config.role = Role::Member;
+    config.captain = Some(fleet::state::CaptainRef {
+        id: Uuid::new_v4(),
+        name: "captain".into(),
+        host: "captain.local".into(),
+        fingerprint: "SHA256:test".into(),
+        ssh_public_key: "ssh-ed25519 AAAATEST".into(),
+    });
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&config).unwrap();
+    test_command(&home)
+        .args(["usage", "emerald"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "only the captain can request usage",
+        ));
 }
 
 #[test]
