@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 — 2026-07-19
+
+### Network registration reliability
+
+- Apply resolved IPv4 and IPv6 endpoint fallback to join and leave requests,
+  completing the fix for `.local` address-family failures during registration.
+
 ## 0.6.2 — 2026-07-19
 
 ### Network discovery reliability
