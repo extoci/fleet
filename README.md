@@ -29,8 +29,10 @@ After installing v0.4.0 or newer, update in place with:
 fleet update
 # From the captain, update every member and then the captain itself
 fleet update-all
-# Show the latest ccusage report from a fleet machine
-fleet usage emerald
+# Combine usage from every machine (also available as `fleet usage all`)
+fleet usage
+# Limit the report to one or more machines
+fleet usage emerald ruby.local
 ```
 
 Installations older than v0.4.0 must rerun the installer once to gain the

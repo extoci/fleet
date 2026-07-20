@@ -147,8 +147,8 @@ pub struct RestartArgs {
 
 #[derive(Debug, Args)]
 pub struct UsageArgs {
-    /// Machine name, with or without .local.
-    pub machine: String,
+    /// Machine names, with or without .local. Omit them (or pass `all`) for the whole fleet.
+    pub machines: Vec<String>,
 }
 
 #[derive(Debug, Args)]

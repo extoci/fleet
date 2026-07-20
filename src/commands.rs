@@ -11,6 +11,7 @@ use crate::state::{
 };
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -42,61 +43,244 @@ pub fn run(cli: Cli) -> Result<()> {
 
 const REMOTE_USAGE_COMMAND: &str = r#"
 if command -v bunx >/dev/null 2>&1; then
-  exec bunx ccusage@latest
+  exec env LOG_LEVEL=0 bunx ccusage@latest daily --json
 fi
 if [ -x "$HOME/.bun/bin/bunx" ]; then
-  exec "$HOME/.bun/bin/bunx" ccusage@latest
+  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bunx" ccusage@latest daily --json
 fi
 if command -v bun >/dev/null 2>&1; then
-  exec bun x ccusage@latest
+  exec env LOG_LEVEL=0 bun x ccusage@latest daily --json
 fi
 if [ -x "$HOME/.bun/bin/bun" ]; then
-  exec "$HOME/.bun/bin/bun" x ccusage@latest
+  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bun" x ccusage@latest daily --json
 fi
 if command -v pnpm >/dev/null 2>&1; then
-  exec pnpm dlx ccusage@latest
+  exec env LOG_LEVEL=0 pnpm dlx ccusage@latest daily --json
 fi
 if command -v npx >/dev/null 2>&1; then
-  exec npx --yes ccusage@latest
+  exec env LOG_LEVEL=0 npx --yes ccusage@latest daily --json
 fi
 printf '%s\n' 'ccusage needs bunx, bun, pnpm, or npx; install Bun or Node.js on this machine' >&2
 exit 127
 "#;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct UsageTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    total_tokens: u64,
+    total_cost: f64,
+}
+
+impl UsageTotals {
+    fn add(&mut self, other: &Self) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.total_tokens += other.total_tokens;
+        self.total_cost += other.total_cost;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MachineUsage {
+    machine: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    totals: Option<UsageTotals>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct UsageReport {
+    machines: Vec<MachineUsage>,
+    totals: UsageTotals,
+}
+
+#[derive(Deserialize)]
+struct CcusageReport {
+    totals: UsageTotals,
+}
+
 fn usage(paths: &StatePaths, args: UsageArgs) -> Result<()> {
     let config = paths.require()?;
-    let query = args.machine.trim_end_matches(".local");
-
-    let status = if config.machine.name == query {
-        ProcessCommand::new("sh")
-            .args(["-c", REMOTE_USAGE_COMMAND])
-            .status()
-            .context("start ccusage locally")?
+    let report = if config.role == Role::Captain {
+        collect_usage(paths, &args.machines)?
+    } else if is_local_only(&args.machines, &config.machine.name) {
+        report_from_results(vec![(config.machine.name.clone(), run_local_usage())])
     } else {
-        if config.role != Role::Captain {
-            bail!("only the captain can request usage from another machine");
-        }
-        let member = skill::load_members(paths)?
-            .into_iter()
-            .find(|member| member.name == query)
-            .with_context(|| format!("no machine named {query} is registered"))?;
-        ProcessCommand::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                &member.host(),
-                REMOTE_USAGE_COMMAND,
-            ])
-            .status()
-            .with_context(|| format!("start SSH to {}", member.host()))?
+        let captain = config
+            .captain
+            .as_ref()
+            .context("member state is missing captain information")?;
+        let connection = crate::discovery::connect_pinned(None, captain)
+            .context("find the fleet captain for the usage request")?;
+        service::request_usage(paths, &connection, config.machine.id, &args.machines)?
     };
-
-    if !status.success() {
-        bail!("ccusage on {query}.local exited with {status}");
+    print_usage_report(&report);
+    if !report.machines.is_empty()
+        && report
+            .machines
+            .iter()
+            .all(|machine| machine.totals.is_none())
+    {
+        bail!("usage could not be collected from any selected machine");
     }
     Ok(())
+}
+
+fn is_local_only(requested: &[String], local: &str) -> bool {
+    requested.len() == 1 && requested[0].trim_end_matches(".local") == local
+}
+
+pub(crate) fn collect_usage(paths: &StatePaths, requested: &[String]) -> Result<UsageReport> {
+    let config = paths.require()?;
+    if config.role != Role::Captain {
+        bail!("only the captain can collect fleet usage");
+    }
+    let members = skill::load_members(paths)?;
+    let names = select_usage_machines(&config.machine, &members, requested)?;
+    let mut results = Vec::with_capacity(names.len());
+    for name in names {
+        let result = if name == config.machine.name {
+            run_local_usage()
+        } else {
+            run_remote_usage(members.iter().find(|member| member.name == name).unwrap())
+        };
+        results.push((name, result));
+    }
+    Ok(report_from_results(results))
+}
+
+fn select_usage_machines(
+    local: &Machine,
+    members: &[Machine],
+    requested: &[String],
+) -> Result<Vec<String>> {
+    if requested.is_empty() || requested.iter().any(|name| name == "all") {
+        if requested.len() > 1 {
+            bail!("`all` cannot be combined with machine names");
+        }
+        let mut names = vec![local.name.clone()];
+        names.extend(members.iter().map(|member| member.name.clone()));
+        return Ok(names);
+    }
+    let mut names = Vec::new();
+    for raw in requested {
+        let name = raw.trim_end_matches(".local");
+        validate_machine_name(name)?;
+        if name != local.name && !members.iter().any(|member| member.name == name) {
+            bail!("no machine named {name} is registered");
+        }
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+fn run_local_usage() -> Result<UsageTotals> {
+    let output = ProcessCommand::new("sh")
+        .args(["-c", REMOTE_USAGE_COMMAND])
+        .output()
+        .context("start ccusage locally")?;
+    parse_usage_output(output, "local machine")
+}
+
+fn run_remote_usage(member: &Machine) -> Result<UsageTotals> {
+    let output = ProcessCommand::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            &member.host(),
+            REMOTE_USAGE_COMMAND,
+        ])
+        .output()
+        .with_context(|| format!("start SSH to {}", member.host()))?;
+    parse_usage_output(output, &member.host())
+}
+
+fn parse_usage_output(output: std::process::Output, source: &str) -> Result<UsageTotals> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        bail!(
+            "ccusage on {source} exited with {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+    let report: CcusageReport = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("decode ccusage JSON from {source}"))?;
+    Ok(report.totals)
+}
+
+fn report_from_results(results: Vec<(String, Result<UsageTotals>)>) -> UsageReport {
+    let mut report = UsageReport::default();
+    for (machine, result) in results {
+        match result {
+            Ok(totals) => {
+                report.totals.add(&totals);
+                report.machines.push(MachineUsage {
+                    machine,
+                    totals: Some(totals),
+                    error: None,
+                });
+            }
+            Err(error) => report.machines.push(MachineUsage {
+                machine,
+                totals: None,
+                error: Some(format!("{error:#}")),
+            }),
+        }
+    }
+    report
+}
+
+fn print_usage_report(report: &UsageReport) {
+    println!("Fleet usage");
+    println!("{:<24} {:>16} {:>12}", "Machine", "Tokens", "Cost (USD)");
+    for machine in &report.machines {
+        if let Some(totals) = &machine.totals {
+            println!(
+                "{:<24} {:>16} {:>12.2}",
+                format!("{}.local", machine.machine),
+                totals.total_tokens,
+                totals.total_cost
+            );
+        } else {
+            println!(
+                "{:<24} {:>16}",
+                format!("{}.local", machine.machine),
+                "unavailable"
+            );
+            eprintln!(
+                "  {}: {}",
+                machine.machine,
+                machine.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+    println!(
+        "{:<24} {:>16} {:>12.2}",
+        "TOTAL", report.totals.total_tokens, report.totals.total_cost
+    );
+    println!(
+        "Input: {}  Output: {}  Cache write: {}  Cache read: {}",
+        report.totals.input_tokens,
+        report.totals.output_tokens,
+        report.totals.cache_creation_tokens,
+        report.totals.cache_read_tokens
+    );
 }
 
 const REMOTE_UPDATE_COMMAND: &str = r#"
@@ -1328,5 +1512,53 @@ mod tests {
         assert!(REMOTE_UPDATE_COMMAND.contains("https://extoci.lol/fleet"));
         assert!(REMOTE_UPDATE_COMMAND.contains("not implemented yet"));
         assert!(REMOTE_UPDATE_COMMAND.contains("$HOME/.local/bin/fleet"));
+    }
+
+    #[test]
+    fn usage_selection_defaults_to_all_and_accepts_multiple_names() {
+        let local = status_machine();
+        let mut ruby = status_machine();
+        ruby.name = "ruby".into();
+        assert_eq!(
+            select_usage_machines(&local, &[ruby.clone()], &[]).unwrap(),
+            ["emerald", "ruby"]
+        );
+        assert_eq!(
+            select_usage_machines(&local, &[ruby], &["ruby.local".into(), "emerald".into()])
+                .unwrap(),
+            ["ruby", "emerald"]
+        );
+        assert!(select_usage_machines(&local, &[], &["all".into(), "emerald".into()]).is_err());
+    }
+
+    #[test]
+    fn unavailable_machines_do_not_discard_successful_usage() {
+        let totals = UsageTotals {
+            total_tokens: 42,
+            total_cost: 1.25,
+            ..UsageTotals::default()
+        };
+        let report = report_from_results(vec![
+            ("emerald".into(), Ok(totals)),
+            ("ruby".into(), Err(anyhow::anyhow!("offline"))),
+        ]);
+        assert_eq!(report.totals.total_tokens, 42);
+        assert!(
+            report.machines[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("offline")
+        );
+    }
+
+    #[test]
+    fn ccusage_json_without_cost_fields_is_supported() {
+        let report: CcusageReport = serde_json::from_str(
+            r#"{"totals":{"inputTokens":2,"outputTokens":3,"totalTokens":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(report.totals.total_tokens, 5);
+        assert_eq!(report.totals.total_cost, 0.0);
     }
 }

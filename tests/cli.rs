@@ -71,28 +71,13 @@ fn usage_rejects_an_unknown_machine_before_starting_ssh() {
 }
 
 #[test]
-fn member_cannot_request_another_machines_usage() {
+fn usage_accepts_zero_or_multiple_machine_names() {
     let home = TempDir::new().unwrap();
-    let mut config = captain_config();
-    config.role = Role::Member;
-    config.captain = Some(fleet::state::CaptainRef {
-        id: Uuid::new_v4(),
-        name: "captain".into(),
-        host: "captain.local".into(),
-        fingerprint: "SHA256:test".into(),
-        ssh_public_key: "ssh-ed25519 AAAATEST".into(),
-    });
-    let paths = StatePaths {
-        root: home.path().join(".fleet"),
-    };
-    paths.save(&config).unwrap();
     test_command(&home)
-        .args(["usage", "emerald"])
+        .args(["usage", "--help"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "only the captain can request usage",
-        ));
+        .success()
+        .stdout(predicate::str::contains("[MACHINES]..."));
 }
 
 #[test]

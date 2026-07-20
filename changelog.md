@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.6 — 2026-07-20
+
+### Fleet-wide usage reports
+
+- Make `fleet usage` combine structured ccusage totals from every registered
+  machine, with `all` as an explicit equivalent and support for selecting one
+  or more named machines.
+- Keep reachable machines in the report when another machine is offline or
+  lacks Bun/Node, and show the failed machine as unavailable with its cause.
+- Allow members to request fleet-wide reports through the authenticated captain
+  service instead of limiting cross-machine usage queries to the captain.
+
 ## 0.6.5 — 2026-07-19
 
 ### Captain connectivity

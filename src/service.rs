@@ -25,6 +25,12 @@ pub struct LeaveRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UsageRequest {
+    pub id: Uuid,
+    pub machines: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignedRequest {
     pub payload: serde_json::Value,
     pub signature: String,
@@ -135,6 +141,23 @@ fn handle_request(
             skill::remove_member(paths, leave.id)?;
             crate::ssh_client::regenerate(paths)?;
             json_response(StatusCode(200), &serde_json::json!({"left": true}))
+        }
+        (&Method::Post, "/v1/usage") => {
+            let body = read_body(request)?;
+            let signed: SignedRequest =
+                serde_json::from_slice(&body).context("decode usage request")?;
+            let payload = serde_json::to_vec(&signed.payload)?;
+            let usage: UsageRequest =
+                serde_json::from_value(signed.payload).context("decode signed usage payload")?;
+            let members = skill::load_members(paths)?;
+            let member = members
+                .iter()
+                .find(|member| member.id == usage.id)
+                .context("member is not registered with this captain")?;
+            identity::verify(&member.public_identity, &payload, &signed.signature)
+                .context("usage request was not signed by the registered member")?;
+            let report = crate::commands::collect_usage(paths, &usage.machines)?;
+            json_response(StatusCode(200), &report)
         }
         _ => json_response(StatusCode(404), &serde_json::json!({"error": "not found"})),
     }
@@ -481,6 +504,27 @@ pub fn notify_leave(paths: &StatePaths, captain: &CaptainConnection, id: Uuid) -
     signed_post(paths, captain, "/v1/leave", &LeaveRequest { id })
 }
 
+pub(crate) fn request_usage(
+    paths: &StatePaths,
+    captain: &CaptainConnection,
+    id: Uuid,
+    machines: &[String],
+) -> Result<crate::commands::UsageReport> {
+    let payload = serde_json::to_value(UsageRequest {
+        id,
+        machines: machines.to_vec(),
+    })?;
+    let bytes = serde_json::to_vec(&payload)?;
+    let identity = identity::ensure(paths)?;
+    let signature = identity::sign(&identity.private_key, &bytes)?;
+    post_for_json(
+        captain.endpoint(),
+        "/v1/usage",
+        &SignedRequest { payload, signature },
+        Duration::from_secs(300),
+    )
+}
+
 fn signed_post<T: Serialize>(
     paths: &StatePaths,
     captain: &CaptainConnection,
@@ -519,6 +563,39 @@ fn post<T: Serialize>(endpoint: &str, path: &str, body: &T) -> Result<()> {
     let status = response.status();
     let body = response.text().unwrap_or_default();
     let reason = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    bail!("captain rejected request: {reason}")
+}
+
+fn post_for_json<T: Serialize, R: for<'de> Deserialize<'de>>(
+    endpoint: &str,
+    path: &str,
+    body: &T,
+    timeout: Duration,
+) -> Result<R> {
+    let endpoint = endpoint.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()?;
+    let base = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        format!("http://{endpoint}")
+    };
+    let response = client
+        .post(format!("{base}{path}"))
+        .json(body)
+        .send()
+        .with_context(|| format!("send captain request to {endpoint}"))?;
+    let status = response.status();
+    let bytes = response.bytes().context("read captain response")?;
+    if status.is_success() {
+        return serde_json::from_slice(&bytes).context("decode captain response");
+    }
+    let reason = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
         .filter(|value| !value.is_empty())
