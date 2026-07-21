@@ -1,105 +1,99 @@
-# Fleet
+# fleet – make your computers feel like one computer
 
-Fleet makes your local macOS and Linux machines feel like parts of one computer for AI-assisted development.
+[watch the video](https://www.youtube.com/watch?v=ZvUwW5hoY80)
 
-One machine is the **captain**. Members get real `.local` names, passwordless SSH from the captain, persistent themed tmux sessions, and optionally installed Codex or Claude Code. Fleet provides the device fabric; coding tools own delegation and work.
+---
 
-## Install
+fleet is a local tool that magically connects your development machines for ai coding.
 
-Install or update to the latest published release:
+one machine is the **captain**. the others get real `.local` names, passwordless ssh from the captain, persistent themed tmux sessions, and ai agent integrations. 
+
+fleet also gives agents a skill that tells them which machines exist and how to reach them.
+
+fleet only handles the computers. your coding tools decide what work happens on them.
+
+## installation
+
+install or update to the latest release:
 
 ```sh
 curl -fsSL https://extoci.lol/fleet | bash
 ```
 
-The installer prefers a writable user directory already on `PATH`, so `fleet`
-is normally available immediately as well as in future terminals.
+the installer downloads the correct binary for macos or linux, verifies its checksum, and puts `fleet` in a writable user directory on your `PATH` when possible.
 
-During local development, build Fleet and run the checked-in installer:
+## usage
 
-```sh
-cargo build --release
-FLEET_BINARY="$PWD/target/release/fleet" ./fleet.sh
-```
-
-The installer downloads the correct checksummed binary from GitHub Releases.
-After installing v0.4.0 or newer, update in place with:
-
-```sh
-fleet update
-# From the captain, update every member and then the captain itself
-fleet update-all
-# Combine usage from every machine (also available as `fleet usage all`)
-fleet usage
-# Limit the report to one or more machines
-fleet usage emerald ruby.local
-```
-
-Installations older than v0.4.0 must rerun the installer once to gain the
-self-update command.
-
-## Start a fleet
-
-On the captain:
+on the computer you want to use as the captain:
 
 ```sh
 fleet init
 ```
 
-On another machine on the same trusted LAN:
+on another computer on the same trusted network:
 
 ```sh
 fleet join
 ```
 
-Back on the captain:
+back on the captain:
 
 ```sh
 fleet status
-ssh emerald.local
+ssh machine.local
 ```
 
-Use `fleet status --check` for live reachability, `fleet status --watch` to
-monitor it, `fleet doctor` for a concise health check, and `fleet logs` for
-detailed diagnostics.
+that ssh connection opens or reattaches to a tmux session named `fleet`, so closing your laptop does not also close whatever was running on emerald.
 
-Interactive SSH creates or reattaches a tmux session named `fleet`. To bypass it for one login, run `ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'`. Non-interactive SSH, SCP, and SFTP are not intercepted.
+the machines get different terminal colors so you can easily tell where you're connected, at a glance.
 
-To leave while preserving the hostname, tools, prompt, tmux setup, repositories, and user data:
+## commands
+
+run `fleet` without arguments or subcommands to view the full list of commands.
+
+## how it works
+
+fleet is mostly an opinionated setup around things your computers already know how to do:
+
+- mdns gives every machine a name like `emerald.local`
+- ssh gives the captain passwordless access to members
+- tmux keeps work alive between connections
+- shell and tmux colors make it obvious which machine you are using
+- a generated fleet skill makes the machine list readable by compatible coding agents
+
+fleet does not proxy normal work after setup. `ssh emerald.local`, scp, sftp, and ordinary remote commands are still just normal ssh.
+
+interactive ssh enters the persistent tmux session by default. bypass it once with:
 
 ```sh
-fleet leave
+ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'
 ```
 
-If an offline member leaves a stale record, run `fleet remove <name>` on the
-captain. A captain can deliberately discard remaining records with
-`fleet leave --force`.
+## trust and privacy
 
-## Trust and privacy
+fleet has no accounts, hosted control plane, relay, or telemetry. its state and coordination stay on your local network. installing fleet, system packages, codex, or claude code can obviously contact their official download sources.
 
-Fleet has no account, hosted control plane, relay, or telemetry. State and coordination stay on the local network. Tool and package installation may contact their official download sources.
+captain discovery uses unauthenticated mdns. `fleet join` shows you the captain and its fingerprint before trusting it, which is trust-on-first-use for a trusted lan, not magic cryptographic proof that the person next to you is not doing something weird.
 
-Captain discovery is unauthenticated mDNS. The confirmation shown by `fleet join` is trust-on-first-use on a trusted LAN, not independently authenticated pairing. After confirmation, Fleet pins identities and SSH host keys. Member registration and leave requests are signed with the pinned Fleet identity.
+after joining, fleet pins machine identities and ssh host keys. registration and leave requests are signed with the pinned fleet identity.
 
-## v0 boundaries
+## requirements
 
-- macOS and Debian/Ubuntu Linux with systemd and apt
-- Bash and Zsh only
-- One fleet per machine
-- LAN and `.local` addressing only
-- No Tailscale, file transfer, synchronization, task orchestration, T3 Code installation, Windows, or captain recovery
-- Captain discovery is available while the captain user's login session is active
+- macos or debian/ubuntu linux with systemd and apt
+- bash or zsh
+- machines on the same trusted local network
+- one captain and one fleet per machine
 
-See [the product vision](docs/product-vision.md), [v0 specification](docs/spec-v0.md), and [platform research](docs/research/fleet-v0-platform-assumptions.md).
+fleet does **not** do tailscale, task orchestration or windows. it just gives tools access to machines, it does not become the tool using them.
 
-## Development
+## gpt-5.6
 
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
+fleet was exclusively implemented by gpt-5.6 sol. it would've been impossible without it, due to its extremely impressive computer use capabilities across the network.
 
-The constrained Multipass and native macOS verification procedure is in [docs/verification.md](docs/verification.md). The requirement-by-requirement completion proof is in [docs/completion-audit-v0.md](docs/completion-audit-v0.md).
+fleet was used in the development of fleet.
 
-The release procedure and hosting setup are in [docs/releasing.md](docs/releasing.md).
+i wrote more on the [blog post](https://extoci.lol/blog/fleet)
+
+## development
+
+most of the build scripts here are just documentation for my agents. i would recommend you ask your agents to explore the codebase, they'll pick up on everything.
