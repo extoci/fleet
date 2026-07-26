@@ -43,16 +43,16 @@ pub fn run(cli: Cli) -> Result<()> {
 
 const REMOTE_USAGE_COMMAND: &str = r#"
 if command -v bunx >/dev/null 2>&1; then
-  exec env LOG_LEVEL=0 bunx ccusage@latest daily --json
+  exec env LOG_LEVEL=0 bunx --bun ccusage@latest daily --json
 fi
 if [ -x "$HOME/.bun/bin/bunx" ]; then
-  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bunx" ccusage@latest daily --json
+  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bunx" --bun ccusage@latest daily --json
 fi
 if command -v bun >/dev/null 2>&1; then
-  exec env LOG_LEVEL=0 bun x ccusage@latest daily --json
+  exec env LOG_LEVEL=0 bun x --bun ccusage@latest daily --json
 fi
 if [ -x "$HOME/.bun/bin/bun" ]; then
-  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bun" x ccusage@latest daily --json
+  exec env LOG_LEVEL=0 "$HOME/.bun/bin/bun" x --bun ccusage@latest daily --json
 fi
 if command -v pnpm >/dev/null 2>&1; then
   exec env LOG_LEVEL=0 pnpm dlx ccusage@latest daily --json
@@ -64,14 +64,22 @@ printf '%s\n' 'ccusage needs bunx, bun, pnpm, or npx; install Bun or Node.js on 
 exit 127
 "#;
 
+const USAGE_TIMEOUT: Duration = Duration::from_secs(120);
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct UsageTotals {
+    #[serde(alias = "totalInputTokens")]
     input_tokens: u64,
+    #[serde(alias = "totalOutputTokens")]
     output_tokens: u64,
+    #[serde(alias = "totalCacheCreationTokens")]
     cache_creation_tokens: u64,
+    #[serde(alias = "totalCacheReadTokens")]
     cache_read_tokens: u64,
     total_tokens: u64,
+    #[serde(alias = "totalCostUSD", alias = "costUSD")]
     total_cost: f64,
 }
 
@@ -89,6 +97,8 @@ impl UsageTotals {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MachineUsage {
     machine: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    daily: Vec<UsageDay>,
     #[serde(skip_serializing_if = "Option::is_none")]
     totals: Option<UsageTotals>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,8 +111,33 @@ pub(crate) struct UsageReport {
     totals: UsageTotals,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct UsageDay {
+    #[serde(alias = "date")]
+    period: String,
+    agent: String,
+    #[serde(alias = "models")]
+    models_used: Vec<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    total_tokens: u64,
+    #[serde(alias = "costUSD")]
+    total_cost: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    model_breakdowns: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct CcusageReport {
+    #[serde(alias = "data")]
+    daily: Vec<UsageDay>,
+    #[serde(alias = "summary")]
     totals: UsageTotals,
 }
 
@@ -183,30 +218,20 @@ fn select_usage_machines(
     Ok(names)
 }
 
-fn run_local_usage() -> Result<UsageTotals> {
-    let output = ProcessCommand::new("sh")
-        .args(["-c", REMOTE_USAGE_COMMAND])
-        .output()
-        .context("start ccusage locally")?;
+fn run_local_usage() -> Result<CcusageReport> {
+    let mut command = ProcessCommand::new("sh");
+    command.args(["-c", REMOTE_USAGE_COMMAND]);
+    let output = crate::remote::output_with_timeout(&mut command, USAGE_TIMEOUT)
+        .context("run ccusage locally")?;
     parse_usage_output(output, "local machine")
 }
 
-fn run_remote_usage(member: &Machine) -> Result<UsageTotals> {
-    let output = ProcessCommand::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            &member.host(),
-            REMOTE_USAGE_COMMAND,
-        ])
-        .output()
-        .with_context(|| format!("start SSH to {}", member.host()))?;
+fn run_remote_usage(member: &Machine) -> Result<CcusageReport> {
+    let output = crate::remote::ssh_output(&member.host(), REMOTE_USAGE_COMMAND, USAGE_TIMEOUT)?;
     parse_usage_output(output, &member.host())
 }
 
-fn parse_usage_output(output: std::process::Output, source: &str) -> Result<UsageTotals> {
+fn parse_usage_output(output: std::process::Output, source: &str) -> Result<CcusageReport> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         bail!(
@@ -219,25 +244,39 @@ fn parse_usage_output(output: std::process::Output, source: &str) -> Result<Usag
             }
         );
     }
-    let report: CcusageReport = serde_json::from_slice(&output.stdout)
+    let mut report: CcusageReport = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("decode ccusage JSON from {source}"))?;
-    Ok(report.totals)
+    if report.totals.total_tokens == 0 && !report.daily.is_empty() {
+        for day in &report.daily {
+            report.totals.add(&UsageTotals {
+                input_tokens: day.input_tokens,
+                output_tokens: day.output_tokens,
+                cache_creation_tokens: day.cache_creation_tokens,
+                cache_read_tokens: day.cache_read_tokens,
+                total_tokens: day.total_tokens,
+                total_cost: day.total_cost,
+            });
+        }
+    }
+    Ok(report)
 }
 
-fn report_from_results(results: Vec<(String, Result<UsageTotals>)>) -> UsageReport {
+fn report_from_results(results: Vec<(String, Result<CcusageReport>)>) -> UsageReport {
     let mut report = UsageReport::default();
     for (machine, result) in results {
         match result {
-            Ok(totals) => {
-                report.totals.add(&totals);
+            Ok(usage) => {
+                report.totals.add(&usage.totals);
                 report.machines.push(MachineUsage {
                     machine,
-                    totals: Some(totals),
+                    daily: usage.daily,
+                    totals: Some(usage.totals),
                     error: None,
                 });
             }
             Err(error) => report.machines.push(MachineUsage {
                 machine,
+                daily: Vec::new(),
                 totals: None,
                 error: Some(format!("{error:#}")),
             }),
@@ -247,40 +286,143 @@ fn report_from_results(results: Vec<(String, Result<UsageTotals>)>) -> UsageRepo
 }
 
 fn print_usage_report(report: &UsageReport) {
-    println!("Fleet usage");
-    println!("{:<24} {:>16} {:>12}", "Machine", "Tokens", "Cost (USD)");
+    print_usage_border('┌', '┬', '┐');
+    println!(
+        "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
+        "Machine",
+        "Date",
+        "Agent",
+        "Models",
+        "Input",
+        "Output",
+        "Cache Create",
+        "Cache Read",
+        "Total Tokens",
+        "Cost (USD)"
+    );
+    print_usage_border('├', '┼', '┤');
     for machine in &report.machines {
         if let Some(totals) = &machine.totals {
-            println!(
-                "{:<24} {:>16} {:>12.2}",
-                format!("{}.local", machine.machine),
-                totals.total_tokens,
-                totals.total_cost
-            );
+            if machine.daily.is_empty() {
+                print_usage_row(&format!("{}.local", machine.machine), "—", "—", "—", totals);
+            } else {
+                for day in &machine.daily {
+                    print_usage_row(
+                        &format!("{}.local", machine.machine),
+                        &day.period,
+                        &day.agent,
+                        &format_models(&day.models_used),
+                        &UsageTotals {
+                            input_tokens: day.input_tokens,
+                            output_tokens: day.output_tokens,
+                            cache_creation_tokens: day.cache_creation_tokens,
+                            cache_read_tokens: day.cache_read_tokens,
+                            total_tokens: day.total_tokens,
+                            total_cost: day.total_cost,
+                        },
+                    );
+                }
+            }
         } else {
             println!(
-                "{:<24} {:>16}",
-                format!("{}.local", machine.machine),
-                "unavailable"
-            );
-            eprintln!(
-                "  {}: {}",
-                machine.machine,
-                machine.error.as_deref().unwrap_or("unknown error")
+                "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
+                truncate_cell(&format!("{}.local", machine.machine), 18),
+                "—",
+                "—",
+                "unavailable",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
             );
         }
     }
+    print_usage_border('├', '┼', '┤');
+    print_usage_row("TOTAL", "", "", "", &report.totals);
+    print_usage_border('└', '┴', '┘');
+    for machine in report
+        .machines
+        .iter()
+        .filter(|machine| machine.totals.is_none())
+    {
+        eprintln!(
+            "{}.local: {}",
+            machine.machine,
+            machine.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+}
+
+fn print_usage_row(machine: &str, period: &str, agent: &str, models: &str, totals: &UsageTotals) {
     println!(
-        "{:<24} {:>16} {:>12.2}",
-        "TOTAL", report.totals.total_tokens, report.totals.total_cost
+        "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
+        truncate_cell(machine, 18),
+        truncate_cell(period, 10),
+        truncate_cell(agent, 8),
+        truncate_cell(models, 22),
+        format_number(totals.input_tokens),
+        format_number(totals.output_tokens),
+        format_number(totals.cache_creation_tokens),
+        format_number(totals.cache_read_tokens),
+        format_number(totals.total_tokens),
+        format!("${:.2}", totals.total_cost),
     );
-    println!(
-        "Input: {}  Output: {}  Cache write: {}  Cache read: {}",
-        report.totals.input_tokens,
-        report.totals.output_tokens,
-        report.totals.cache_creation_tokens,
-        report.totals.cache_read_tokens
-    );
+}
+
+fn print_usage_border(left: char, join: char, right: char) {
+    let widths = [20, 12, 10, 24, 14, 14, 14, 14, 14, 12];
+    print!("{left}");
+    for (index, width) in widths.iter().enumerate() {
+        print!("{}", "─".repeat(*width));
+        print!(
+            "{}",
+            if index + 1 == widths.len() {
+                right
+            } else {
+                join
+            }
+        );
+    }
+    println!();
+}
+
+fn truncate_cell(value: &str, width: usize) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(width).collect::<String>();
+    if chars.next().is_none() {
+        return prefix;
+    }
+    let mut truncated = prefix
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+fn format_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, byte) in digits.bytes().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(char::from(byte));
+    }
+    formatted
+}
+
+fn format_models(models: &[String]) -> String {
+    if models.is_empty() {
+        return "—".into();
+    }
+    models
+        .iter()
+        .map(|model| model.strip_prefix("claude-").unwrap_or(model).to_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const REMOTE_UPDATE_COMMAND: &str = r#"
@@ -356,17 +498,7 @@ where
 }
 
 fn update_member(member: &Machine) -> Result<String> {
-    let output = ProcessCommand::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            &member.host(),
-            REMOTE_UPDATE_COMMAND,
-        ])
-        .output()
-        .with_context(|| format!("start SSH to {}", member.host()))?;
+    let output = crate::remote::ssh_output(&member.host(), REMOTE_UPDATE_COMMAND, UPDATE_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if output.status.success() {
         return Ok(stdout);
@@ -1539,7 +1671,13 @@ mod tests {
             ..UsageTotals::default()
         };
         let report = report_from_results(vec![
-            ("emerald".into(), Ok(totals)),
+            (
+                "emerald".into(),
+                Ok(CcusageReport {
+                    daily: Vec::new(),
+                    totals,
+                }),
+            ),
             ("ruby".into(), Err(anyhow::anyhow!("offline"))),
         ]);
         assert_eq!(report.totals.total_tokens, 42);
@@ -1560,5 +1698,36 @@ mod tests {
         .unwrap();
         assert_eq!(report.totals.total_tokens, 5);
         assert_eq!(report.totals.total_cost, 0.0);
+    }
+
+    #[test]
+    fn ccusage_daily_json_keeps_every_display_column() {
+        let report: CcusageReport = serde_json::from_str(
+            r#"{
+                "daily":[{
+                    "date":"2026-07-26",
+                    "modelsUsed":["claude-opus-4-1"],
+                    "inputTokens":2,
+                    "outputTokens":3,
+                    "cacheCreationTokens":4,
+                    "cacheReadTokens":5,
+                    "totalTokens":14,
+                    "totalCost":1.25,
+                    "modelBreakdowns":[{"modelName":"claude-opus-4-1","cost":1.25}]
+                }],
+                "totals":{"inputTokens":2,"outputTokens":3,"cacheCreationTokens":4,"cacheReadTokens":5,"totalTokens":14,"totalCost":1.25}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(report.daily[0].period, "2026-07-26");
+        assert_eq!(report.daily[0].models_used, ["claude-opus-4-1"]);
+        assert_eq!(report.daily[0].cache_creation_tokens, 4);
+        assert_eq!(report.daily[0].model_breakdowns.len(), 1);
+    }
+
+    #[test]
+    fn bun_runs_ccusage_itself_instead_of_honoring_an_old_node_shebang() {
+        assert!(REMOTE_USAGE_COMMAND.contains("bunx --bun ccusage@latest"));
+        assert!(REMOTE_USAGE_COMMAND.contains("bun x --bun ccusage@latest"));
     }
 }

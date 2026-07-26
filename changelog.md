@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.7 — 2026-07-26
+
+### Usage compatibility and reporting
+
+- Force Bun to execute ccusage instead of honoring its Node.js shebang, avoiding
+  syntax failures when a remote machine has an older system Node.js.
+- Preserve ccusage's daily rows, models, token categories, model breakdowns,
+  metadata, totals, and costs across fleet requests.
+- Render fleet-wide usage as a ccusage-style daily table with grouped token
+  counts and the complete structured token data.
+- Add hard deadlines and SSH liveness probes to remote usage and update
+  commands so unreachable or stalled machines cannot hang Fleet indefinitely.
+
 ## 0.6.6 — 2026-07-20
 
 ### Fleet-wide usage reports

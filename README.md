@@ -77,6 +77,8 @@ captain discovery uses unauthenticated mdns. `fleet join` shows you the captain 
 
 after joining, fleet pins machine identities and ssh host keys. registration and leave requests are signed with the pinned fleet identity.
 
+fleet uses the operating system's openssh client for machine-to-machine commands. these commands are non-interactive, use the pinned fleet identity and host keys, send liveness probes, and have hard deadlines so an unreachable machine or stalled remote command cannot hang fleet indefinitely.
+
 ## requirements
 
 - macos or debian/ubuntu linux with systemd and apt

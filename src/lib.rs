@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod identity;
 pub mod logging;
 pub mod platform;
+pub mod remote;
 pub mod service;
 pub mod skill;
 pub mod ssh_client;
