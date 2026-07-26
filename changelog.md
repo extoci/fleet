@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.9 — 2026-07-26
+
+### Usage layout
+
+- Size the usage summary to the current terminal instead of assuming a fixed
+  width.
+- Truncate and pad summary cells by Unicode display width so long model or
+  machine names cannot wrap past the border.
+- Use compact highlight values without redundant `tokens` suffixes.
+
 ## 0.6.8 — 2026-07-26
 
 ### Usage summary

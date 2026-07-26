@@ -1,6 +1,6 @@
 [package]
 name = "fleet"
-version = "0.6.8"
+version = "0.6.9"
 edition = "2024"
 description = "Local device fabric for AI-assisted development"
 license = "MIT"
@@ -30,6 +30,7 @@ terminal_size = "0.4"
 tar = "0.4"
 tiny_http = "0.12"
 toml = "0.9"
+unicode-width = "0.2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 which = "8.0"
 

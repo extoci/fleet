@@ -22,6 +22,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -372,6 +373,10 @@ fn print_usage_table(report: &UsageReport) {
 }
 
 fn print_usage_summary(report: &UsageReport) {
+    print!("{}", render_usage_summary(report, terminal_width()));
+}
+
+fn render_usage_summary(report: &UsageReport, available_width: usize) -> String {
     let highlights = usage_highlights(report);
     let rows = [
         (
@@ -396,21 +401,39 @@ fn print_usage_summary(report: &UsageReport) {
             format_highlight(highlights.most_used_day.as_ref(), false),
         ),
     ];
-    let width = 62;
-    println!("╭{}╮", "─".repeat(width));
-    println!("│ {:<60} │", "Fleet Usage Summary");
-    println!("├{}┤", "─".repeat(width));
+    let panel_width = available_width.clamp(4, 64);
+    let inner_width = panel_width - 2;
+    let content_width = inner_width - 2;
+    let mut output = String::new();
+    output.push_str(&format!("╭{}╮\n", "─".repeat(inner_width)));
+    output.push_str(&format!(
+        "│ {} │\n",
+        pad_right("Fleet Usage Summary", content_width)
+    ));
+    output.push_str(&format!("├{}┤\n", "─".repeat(inner_width)));
     for (label, value) in rows {
-        println!("│ {label:<22} {:>37} │", truncate_cell(&value, 37));
+        if content_width >= 42 {
+            let label_width = 22;
+            let value_width = content_width - label_width - 1;
+            output.push_str(&format!(
+                "│ {} {} │\n",
+                pad_right(label, label_width),
+                pad_left(&value, value_width)
+            ));
+        } else {
+            output.push_str(&format!("│ {} │\n", pad_right(label, content_width)));
+            output.push_str(&format!("│ {} │\n", pad_left(&value, content_width)));
+        }
     }
-    println!("╰{}╯", "─".repeat(width));
+    output.push_str(&format!("╰{}╯\n", "─".repeat(inner_width)));
+    output
 }
 
 fn format_highlight(highlight: Option<&(String, u64)>, machine: bool) -> String {
     highlight
         .map(|(name, tokens)| {
             format!(
-                "{}{} ({} tokens)",
+                "{}{} · {}",
                 name,
                 if machine { ".local" } else { "" },
                 format_number(*tokens)
@@ -510,17 +533,40 @@ fn print_usage_border(left: char, join: char, right: char) {
 }
 
 fn truncate_cell(value: &str, width: usize) -> String {
-    let mut chars = value.chars();
-    let prefix = chars.by_ref().take(width).collect::<String>();
-    if chars.next().is_none() {
-        return prefix;
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
     }
-    let mut truncated = prefix
-        .chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>();
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let mut truncated = String::new();
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width + 1 > width {
+            break;
+        }
+        truncated.push(character);
+        used += character_width;
+    }
     truncated.push('…');
     truncated
+}
+
+fn pad_right(value: &str, width: usize) -> String {
+    let value = truncate_cell(value, width);
+    format!(
+        "{value}{}",
+        " ".repeat(width - UnicodeWidthStr::width(value.as_str()))
+    )
+}
+
+fn pad_left(value: &str, width: usize) -> String {
+    let value = truncate_cell(value, width);
+    format!(
+        "{}{value}",
+        " ".repeat(width - UnicodeWidthStr::width(value.as_str()))
+    )
 }
 
 fn format_number(value: u64) -> String {
@@ -1938,6 +1984,54 @@ mod tests {
         };
 
         assert_eq!(usage_highlights(&report).most_used_model, None);
+    }
+
+    #[test]
+    fn usage_summary_never_exceeds_the_available_terminal_width() {
+        let report = UsageReport {
+            machines: vec![MachineUsage {
+                machine: "powerbook-with-an-unreasonably-long-name".into(),
+                daily: vec![UsageDay {
+                    period: "2026-07-26".into(),
+                    total_tokens: 1_666_857_280,
+                    model_breakdowns: vec![serde_json::json!({
+                        "modelName": "模型-with-an-unreasonably-long-name",
+                        "totalTokens": 1_666_857_280
+                    })],
+                    ..UsageDay::default()
+                }],
+                totals: Some(UsageTotals {
+                    total_tokens: 1_666_857_280,
+                    ..UsageTotals::default()
+                }),
+                error: None,
+            }],
+            totals: UsageTotals {
+                input_tokens: 93_821_412,
+                output_tokens: 6_564_573,
+                total_tokens: 1_666_857_280,
+                total_cost: 1_654.82,
+                ..UsageTotals::default()
+            },
+        };
+
+        for width in [24, 40, 48, 64] {
+            let rendered = render_usage_summary(&report, width);
+            assert!(
+                rendered
+                    .lines()
+                    .all(|line| UnicodeWidthStr::width(line) <= width),
+                "summary overflowed {width} columns:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_values_are_compact_and_do_not_truncate_the_word_tokens() {
+        assert_eq!(
+            format_highlight(Some(&("powerbook".into(), 1_666_857_280)), true),
+            "powerbook.local · 1,666,857,280"
+        );
     }
 
     #[test]
