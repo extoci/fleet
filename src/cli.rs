@@ -147,6 +147,9 @@ pub struct RestartArgs {
 
 #[derive(Debug, Args)]
 pub struct UsageArgs {
+    /// Show the full per-machine, per-day usage table.
+    #[arg(long)]
+    pub all: bool,
     /// Machine names, with or without .local. Omit them (or pass `all`) for the whole fleet.
     pub machines: Vec<String>,
 }

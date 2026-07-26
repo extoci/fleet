@@ -47,6 +47,13 @@ that ssh connection opens or reattaches to a tmux session named `fleet`, so clos
 
 the machines get different terminal colors so you can easily tell where you're connected, at a glance.
 
+view a fleet-wide coding-agent usage summary, or include the full daily table:
+
+```sh
+fleet usage
+fleet usage --all
+```
+
 ## commands
 
 run `fleet` without arguments or subcommands to view the full list of commands.

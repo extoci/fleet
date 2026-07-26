@@ -12,6 +12,7 @@ use crate::state::{
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -141,6 +142,13 @@ struct CcusageReport {
     totals: UsageTotals,
 }
 
+#[derive(Debug, PartialEq)]
+struct UsageHighlights {
+    most_used_model: Option<(String, u64)>,
+    most_used_machine: Option<(String, u64)>,
+    most_used_day: Option<(String, u64)>,
+}
+
 fn usage(paths: &StatePaths, args: UsageArgs) -> Result<()> {
     let config = paths.require()?;
     let report = if config.role == Role::Captain {
@@ -156,7 +164,7 @@ fn usage(paths: &StatePaths, args: UsageArgs) -> Result<()> {
             .context("find the fleet captain for the usage request")?;
         service::request_usage(paths, &connection, config.machine.id, &args.machines)?
     };
-    print_usage_report(&report);
+    print_usage_report(&report, args.all);
     if !report.machines.is_empty()
         && report
             .machines
@@ -285,7 +293,26 @@ fn report_from_results(results: Vec<(String, Result<CcusageReport>)>) -> UsageRe
     report
 }
 
-fn print_usage_report(report: &UsageReport) {
+fn print_usage_report(report: &UsageReport, show_all: bool) {
+    if show_all {
+        print_usage_table(report);
+        println!();
+    }
+    print_usage_summary(report);
+    for machine in report
+        .machines
+        .iter()
+        .filter(|machine| machine.totals.is_none())
+    {
+        eprintln!(
+            "{}.local: {}",
+            machine.machine,
+            machine.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+}
+
+fn print_usage_table(report: &UsageReport) {
     print_usage_border('┌', '┬', '┐');
     println!(
         "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
@@ -342,17 +369,111 @@ fn print_usage_report(report: &UsageReport) {
     print_usage_border('├', '┼', '┤');
     print_usage_row("TOTAL", "", "", "", &report.totals);
     print_usage_border('└', '┴', '┘');
-    for machine in report
-        .machines
-        .iter()
-        .filter(|machine| machine.totals.is_none())
-    {
-        eprintln!(
-            "{}.local: {}",
-            machine.machine,
-            machine.error.as_deref().unwrap_or("unknown error")
-        );
+}
+
+fn print_usage_summary(report: &UsageReport) {
+    let highlights = usage_highlights(report);
+    let rows = [
+        (
+            "Total Input Tokens",
+            format_number(report.totals.input_tokens),
+        ),
+        (
+            "Total Output Tokens",
+            format_number(report.totals.output_tokens),
+        ),
+        ("Total Cost", format!("${:.2}", report.totals.total_cost)),
+        (
+            "Most Used Model",
+            format_highlight(highlights.most_used_model.as_ref(), false),
+        ),
+        (
+            "Most Used Machine",
+            format_highlight(highlights.most_used_machine.as_ref(), true),
+        ),
+        (
+            "Most Used Day",
+            format_highlight(highlights.most_used_day.as_ref(), false),
+        ),
+    ];
+    let width = 62;
+    println!("╭{}╮", "─".repeat(width));
+    println!("│ {:<60} │", "Fleet Usage Summary");
+    println!("├{}┤", "─".repeat(width));
+    for (label, value) in rows {
+        println!("│ {label:<22} {:>37} │", truncate_cell(&value, 37));
     }
+    println!("╰{}╯", "─".repeat(width));
+}
+
+fn format_highlight(highlight: Option<&(String, u64)>, machine: bool) -> String {
+    highlight
+        .map(|(name, tokens)| {
+            format!(
+                "{}{} ({} tokens)",
+                name,
+                if machine { ".local" } else { "" },
+                format_number(*tokens)
+            )
+        })
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn usage_highlights(report: &UsageReport) -> UsageHighlights {
+    let mut model_tokens = BTreeMap::<String, u64>::new();
+    let mut day_tokens = BTreeMap::<String, u64>::new();
+
+    for machine in &report.machines {
+        for day in &machine.daily {
+            *day_tokens.entry(day.period.clone()).or_default() += day.total_tokens;
+            for breakdown in &day.model_breakdowns {
+                let Some(model) = breakdown
+                    .get("modelName")
+                    .or_else(|| breakdown.get("model"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let tokens = json_u64(breakdown, "totalTokens").unwrap_or_else(|| {
+                    [
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheCreationTokens",
+                        "cacheReadTokens",
+                    ]
+                    .iter()
+                    .filter_map(|key| json_u64(breakdown, key))
+                    .sum()
+                });
+                *model_tokens.entry(model.to_owned()).or_default() += tokens;
+            }
+        }
+    }
+
+    UsageHighlights {
+        most_used_model: largest_entry(model_tokens),
+        most_used_machine: report
+            .machines
+            .iter()
+            .filter_map(|machine| {
+                machine
+                    .totals
+                    .as_ref()
+                    .map(|totals| (machine.machine.clone(), totals.total_tokens))
+            })
+            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0))),
+        most_used_day: largest_entry(day_tokens),
+    }
+}
+
+fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn largest_entry(values: BTreeMap<String, u64>) -> Option<(String, u64)> {
+    values
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
 }
 
 fn print_usage_row(machine: &str, period: &str, agent: &str, models: &str, totals: &UsageTotals) {
@@ -1723,6 +1844,100 @@ mod tests {
         assert_eq!(report.daily[0].models_used, ["claude-opus-4-1"]);
         assert_eq!(report.daily[0].cache_creation_tokens, 4);
         assert_eq!(report.daily[0].model_breakdowns.len(), 1);
+    }
+
+    #[test]
+    fn usage_highlights_aggregate_models_machines_and_days_by_tokens() {
+        let report = UsageReport {
+            machines: vec![
+                MachineUsage {
+                    machine: "emerald".into(),
+                    daily: vec![
+                        UsageDay {
+                            period: "2026-07-25".into(),
+                            total_tokens: 70,
+                            model_breakdowns: vec![serde_json::json!({
+                                "modelName": "sonnet",
+                                "inputTokens": 40,
+                                "outputTokens": 10,
+                                "cacheReadTokens": 20
+                            })],
+                            ..UsageDay::default()
+                        },
+                        UsageDay {
+                            period: "2026-07-26".into(),
+                            total_tokens: 30,
+                            model_breakdowns: vec![serde_json::json!({
+                                "modelName": "opus",
+                                "totalTokens": 30
+                            })],
+                            ..UsageDay::default()
+                        },
+                    ],
+                    totals: Some(UsageTotals {
+                        total_tokens: 100,
+                        ..UsageTotals::default()
+                    }),
+                    error: None,
+                },
+                MachineUsage {
+                    machine: "powerbook".into(),
+                    daily: vec![UsageDay {
+                        period: "2026-07-25".into(),
+                        total_tokens: 80,
+                        model_breakdowns: vec![serde_json::json!({
+                            "modelName": "opus",
+                            "totalTokens": 80
+                        })],
+                        ..UsageDay::default()
+                    }],
+                    totals: Some(UsageTotals {
+                        total_tokens: 80,
+                        ..UsageTotals::default()
+                    }),
+                    error: None,
+                },
+            ],
+            totals: UsageTotals {
+                total_tokens: 180,
+                ..UsageTotals::default()
+            },
+        };
+
+        assert_eq!(
+            usage_highlights(&report),
+            UsageHighlights {
+                most_used_model: Some(("opus".into(), 110)),
+                most_used_machine: Some(("emerald".into(), 100)),
+                most_used_day: Some(("2026-07-25".into(), 150)),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_highlights_do_not_guess_model_tokens_without_breakdowns() {
+        let report = UsageReport {
+            machines: vec![MachineUsage {
+                machine: "emerald".into(),
+                daily: vec![UsageDay {
+                    period: "2026-07-26".into(),
+                    models_used: vec!["unknown-share".into()],
+                    total_tokens: 42,
+                    ..UsageDay::default()
+                }],
+                totals: Some(UsageTotals {
+                    total_tokens: 42,
+                    ..UsageTotals::default()
+                }),
+                error: None,
+            }],
+            totals: UsageTotals {
+                total_tokens: 42,
+                ..UsageTotals::default()
+            },
+        };
+
+        assert_eq!(usage_highlights(&report).most_used_model, None);
     }
 
     #[test]

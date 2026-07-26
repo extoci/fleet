@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8 — 2026-07-26
+
+### Usage summary
+
+- Make `fleet usage` default to a compact fleet-wide summary with total input
+  and output tokens, total cost, and the most-used model, machine, and day.
+- Rank models, machines, and days by token count, aggregating model and daily
+  usage across machines.
+- Add `fleet usage --all` for the complete per-machine, per-day table.
+
 ## 0.6.7 — 2026-07-26
 
 ### Usage compatibility and reporting

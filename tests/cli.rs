@@ -77,7 +77,8 @@ fn usage_accepts_zero_or_multiple_machine_names() {
         .args(["usage", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("[MACHINES]..."));
+        .stdout(predicate::str::contains("[MACHINES]..."))
+        .stdout(predicate::str::contains("--all"));
 }
 
 #[test]
