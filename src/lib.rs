@@ -3,6 +3,7 @@ pub mod commands;
 pub mod discovery;
 pub mod identity;
 pub mod logging;
+pub mod network_hint;
 pub mod platform;
 pub mod remote;
 pub mod service;

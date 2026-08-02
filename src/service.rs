@@ -100,6 +100,9 @@ fn handle_request(
         (&Method::Get, "/v1/identity") => json_response(StatusCode(200), advertisement),
         (&Method::Post, "/v1/join") => {
             let peer_ip = request.remote_addr().map(|address| address.ip());
+            if peer_ip.is_some_and(crate::tailscale::is_tailscale_ip) {
+                bail!("Fleet joining is only accepted from the trusted local network");
+            }
             let body = read_body(request)?;
             let signed: SignedRequest =
                 serde_json::from_slice(&body).context("decode join request")?;
@@ -122,6 +125,22 @@ fn handle_request(
             }
             skill::save_member(paths, &registration.machine)?;
             crate::ssh_client::regenerate(paths)?;
+            // Mapping discovery is optional metadata. Do not hold the single
+            // request worker open while a member's SSH command or Tailscale
+            // daemon is slow; the next update or explicit check can retry it.
+            let refresh_paths = paths.clone();
+            let refresh_machine = registration.machine.clone();
+            std::thread::spawn(move || {
+                if let Err(error) =
+                    crate::ssh_client::refresh_mapping(&refresh_paths, &refresh_machine)
+                {
+                    crate::logging::detail(
+                        &refresh_paths,
+                        "tailscale-mapping",
+                        format!("{}: {error:#}", refresh_machine.name),
+                    );
+                }
+            });
             json_response(StatusCode(201), &serde_json::json!({"joined": true}))
         }
         (&Method::Post, "/v1/leave") => {
@@ -139,6 +158,7 @@ fn handle_request(
             identity::verify(&member.public_identity, &payload, &signed.signature)
                 .context("leave request was not signed by the registered member")?;
             skill::remove_member(paths, leave.id)?;
+            crate::tailscale::remove_mapping(paths, leave.id)?;
             crate::ssh_client::regenerate(paths)?;
             json_response(StatusCode(200), &serde_json::json!({"left": true}))
         }

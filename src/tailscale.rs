@@ -1,16 +1,87 @@
 //! Read-only access to the local Tailscale client.
 
+use crate::state::{StatePaths, atomic_write};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::IpAddr;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const TAILSCALE: &str = "tailscale";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+const MAPPING_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MappingFile {
+    version: u32,
+    #[serde(default)]
+    members: BTreeMap<Uuid, String>,
+}
+
+fn mapping_path(paths: &StatePaths) -> std::path::PathBuf {
+    paths.root.join("tailscale.toml")
+}
+
+pub fn mapped_peer(paths: &StatePaths, member: Uuid) -> Result<Option<String>> {
+    let path = mapping_path(paths);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let file: MappingFile =
+        toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
+    if file.version != MAPPING_VERSION {
+        bail!("unsupported Tailscale mapping version {}", file.version);
+    }
+    file.members
+        .get(&member)
+        .map(|value| normalize_fqdn(value))
+        .transpose()
+}
+
+pub fn save_mapping(paths: &StatePaths, member: Uuid, fqdn: &str) -> Result<()> {
+    let mut file = load_mapping_file(paths)?;
+    file.members.insert(member, normalize_fqdn(fqdn)?);
+    save_mapping_file(paths, &file)
+}
+
+pub fn remove_mapping(paths: &StatePaths, member: Uuid) -> Result<()> {
+    let mut file = load_mapping_file(paths)?;
+    if file.members.remove(&member).is_some() {
+        save_mapping_file(paths, &file)?;
+    }
+    Ok(())
+}
+
+fn load_mapping_file(paths: &StatePaths) -> Result<MappingFile> {
+    let path = mapping_path(paths);
+    if !path.exists() {
+        return Ok(MappingFile {
+            version: MAPPING_VERSION,
+            members: BTreeMap::new(),
+        });
+    }
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let file: MappingFile =
+        toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
+    if file.version != MAPPING_VERSION {
+        bail!("unsupported Tailscale mapping version {}", file.version);
+    }
+    Ok(file)
+}
+
+fn save_mapping_file(paths: &StatePaths, file: &MappingFile) -> Result<()> {
+    std::fs::create_dir_all(&paths.root)?;
+    let source = toml::to_string_pretty(file).context("serialize Tailscale mappings")?;
+    atomic_write(&mapping_path(paths), source.as_bytes(), 0o600)
+}
 
 /// Return the normalized MagicDNS name reported for the local Tailscale node.
 ///
@@ -285,5 +356,21 @@ mod tests {
         assert!(parse_peer_ips(b"").is_err());
         assert!(parse_peer_ips(b"not-an-ip\n").is_err());
         assert!(parse_peer_ips(b"192.168.1.2\n").is_err());
+    }
+
+    #[test]
+    fn mappings_round_trip_and_normalize_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = StatePaths {
+            root: temp.path().join(".fleet"),
+        };
+        let member = Uuid::new_v4();
+        save_mapping(&paths, member, "Emerald.Example.TS.NET.").unwrap();
+        assert_eq!(
+            mapped_peer(&paths, member).unwrap().as_deref(),
+            Some("emerald.example.ts.net")
+        );
+        remove_mapping(&paths, member).unwrap();
+        assert!(mapped_peer(&paths, member).unwrap().is_none());
     }
 }

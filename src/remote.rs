@@ -14,21 +14,32 @@ const SSH_KEEPALIVE_SECS: &str = "5";
 /// liveness settings. The outer deadline also covers DNS resolution and a remote
 /// process that stops producing output, which OpenSSH's ConnectTimeout does not.
 pub fn ssh_output(host: &str, remote_command: &str, timeout: Duration) -> Result<Output> {
+    ssh_output_with_proxy(host, remote_command, timeout, None)
+}
+
+/// Run a command over the member's pinned SSH configuration while bypassing
+/// Fleet's route selector. This is used only while learning a member's
+/// optional network metadata, so the bootstrap path cannot depend on the
+/// mapping it is about to create.
+pub fn ssh_output_direct(host: &str, remote_command: &str, timeout: Duration) -> Result<Output> {
+    ssh_output_with_proxy(host, remote_command, timeout, Some("none"))
+}
+
+fn ssh_output_with_proxy(
+    host: &str,
+    remote_command: &str,
+    timeout: Duration,
+    proxy_command: Option<&str>,
+) -> Result<Output> {
     let mut command = Command::new("ssh");
-    command.args([
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectionAttempts=1",
-        "-o",
-        &format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"),
-        "-o",
-        &format!("ServerAliveInterval={SSH_KEEPALIVE_SECS}"),
-        "-o",
-        "ServerAliveCountMax=2",
-        host,
-        remote_command,
-    ]);
+    command.args(["-o", "BatchMode=yes", "-o", "ConnectionAttempts=1"]);
+    command.args(["-o", &format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}")]);
+    command.args(["-o", &format!("ServerAliveInterval={SSH_KEEPALIVE_SECS}")]);
+    command.args(["-o", "ServerAliveCountMax=2"]);
+    if let Some(proxy_command) = proxy_command {
+        command.args(["-o", &format!("ProxyCommand={proxy_command}")]);
+    }
+    command.args([host, remote_command]);
     output_with_timeout(&mut command, timeout)
         .with_context(|| format!("communicate with {host} over SSH"))
 }

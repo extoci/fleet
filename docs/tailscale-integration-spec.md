@@ -34,9 +34,9 @@ Fleet does not install Tailscale, initiate login, accept auth keys, change Tailn
 - Correlation of Fleet members with peers visible to the captain's local Tailscale client.
 - Transparent LAN-first/Tailnet-fallback routing for `<name>.local` in OpenSSH.
 - Reuse of Fleet's existing `.local` SSH host-key pin across both routes.
-- Existing-Fleet migration and automatic completion when an offline member next appears.
+- Gradual existing-Fleet migration during normal member update/re-registration.
 - Route-aware `fleet status --check` and `fleet doctor`.
-- A fleet-wide remote-routing disable switch and per-invocation recovery escape hatch.
+- A per-invocation recovery escape hatch.
 - macOS and supported Debian/Ubuntu Linux qualification.
 
 ### Excluded
@@ -112,8 +112,7 @@ Fleet performs bounded Tailscale detection during:
 - `fleet init` and `fleet join`;
 - update/resume flows;
 - captain SSH configuration regeneration;
-- `fleet status --check` and `fleet doctor`;
-- the next successful contact with a member whose mapping is incomplete.
+- `fleet update-all` for existing members.
 
 If Tailscale is absent and the user has never had a remote-ready route, Fleet says nothing in normal output. If it is present but logged out, that is informational unless previously working remote access regressed.
 
@@ -132,7 +131,7 @@ ssh emerald.local fleet network-hint --json
 `network-hint` is a hidden, read-only command in the member binary. It returns a bounded, versioned response:
 
 ```json
-{"version":1,"tailscaleDnsName":"emerald.example.ts.net"}
+{"version":1,"machineId":"<member-uuid>","tailscale":{"dnsName":"emerald.example.ts.net"}}
 ```
 
 The output needs no new Fleet wire signature: it is collected only after OpenSSH authenticates the pinned member host and the captain's authorized key. It is routing metadata, not permission to change any Fleet or SSH identity.
@@ -141,8 +140,8 @@ The captain pulls it:
 
 - immediately after a successful join, after the member has been saved and its host key pinned;
 - after each member update in `fleet update-all`;
-- when `fleet status --check` or `fleet doctor` reaches a member that has no mapping;
-- on the next successful LAN SSH contact after a previous pull failed.
+- after an explicit `fleet update-all` or a member re-registration;
+- on a later lifecycle operation after a previous pull failed.
 
 An old member without the command remains LAN-only. Pull failures are bounded and retried only at those lifecycle events, never in a tight background loop.
 
@@ -182,7 +181,7 @@ Host emerald.local
   StrictHostKeyChecking yes
   UpdateHostKeys no
   ConnectTimeout 8
-  ProxyCommand /stable/fleet/helper transport connect --member <full-uuid>
+  ProxyCommand '/absolute/path/to/fleet' transport connect --member <full-uuid> --via auto
 ```
 
 Known hosts remains exactly as Fleet manages it today:
@@ -204,21 +203,21 @@ Normative requirements:
 
 ### 6.1 Helper path and shell safety
 
-OpenSSH executes `ProxyCommand` through the user's shell. Fleet therefore installs the launcher at the exact generated token `~/.fleet/bin/fleet-transport`. The unquoted literal contains only a fixed safe character set and lets the shell perform normal tilde expansion without interpolating the actual home-directory path into SSH config. Fleet qualifies this behavior on Bash and Zsh, its supported shells.
+OpenSSH executes `ProxyCommand` through the user's shell. Fleet writes the absolute path of the currently running Fleet executable and shell-quotes it, so installation paths containing spaces or shell metacharacters remain safe. The generated command contains only that local executable path, fixed literal tokens, and a canonical UUID; no Tailnet name, machine name, address, or network-provided value is interpolated. Fleet regenerates this stanza whenever it changes the member inventory and after a Fleet update.
 
-The generated command contains only:
-
-- that exact fixed literal path;
-- fixed literal tokens;
-- a canonical UUID.
-
-No Tailnet name, machine name, address, user input, or path discovered from the network is interpolated. The launcher and parent directories require expected ownership, `0700` directories, regular-file/no-symlink validation, and no group/other write access.
+The helper itself accepts only a canonical member UUID and the fixed route enum (`auto`, `lan`, or `tailscale`). It loads the UUID mapping from the captain's local inventory and never accepts an arbitrary hostname or address from SSH arguments.
 
 ### 6.2 Safe regeneration
 
 No host-key or state-schema migration is required. Fleet adds/removes the selector in the existing generated SSH block and keeps the existing known-host format.
 
-Regeneration still uses mode-safe atomic replacement, validates ownership/symlink status, verifies `ssh -G emerald.local`, and preserves the prior file if validation fails. A missing/corrupt helper causes the selector to fail closed; `fleet doctor --repair` reinstalls the helper and regenerates config.
+The current regeneration uses Fleet's existing mode-safe atomic replacement
+for the generated files. A missing or corrupt Fleet executable causes the
+selector to fail closed.
+
+Those ownership/`ssh -G`/rollback checks are qualification requirements for a
+future hardened installer; the current slice keeps the existing Fleet atomic
+file writes and validates the helper path before rendering it.
 
 ## 7. Route-selection contract
 
@@ -231,13 +230,17 @@ For `ssh emerald.local`:
 3. Accept a resolved LAN address only when OS route/interface evidence says it is directly connected/on-link with no gateway on an eligible UP, non-loopback, non-Tailscale interface. Reject loopback, unspecified, multicast, Tailscale ranges, and routed candidates. Preserve IPv6 scope/interface IDs.
 4. If LAN TCP has not connected at `t=150 ms`, resolve the mapped peer through the local Tailscale adapter and begin Tailnet IP dials.
 5. Once Tailnet attempts begin, the first TCP connection to succeed wins. LAN has a head start, not an absolute preference.
-6. Cancel and close all losing resolver/dial tasks.
+6. Bound all resolver, dial, and adapter work by the helper deadline; close
+   the selected socket's losers when the helper exits.
 7. Copy stdin to the socket and the socket to stdout without interpreting data.
 8. On stdin EOF, half-close the TCP write side and continue copying server output until remote EOF.
 9. Send diagnostics only to stderr; stdout is exclusively the SSH byte stream.
 10. Respect an internal deadline shorter than the generated OpenSSH `ConnectTimeout`.
 
-The `.local` resolver must be cancellable: use qualified platform facilities such as a killable native DNS-SD/Avahi helper or asynchronous platform API, not an unbounded blocking `getaddrinfo` thread. Repeated remote connections must not accumulate stuck resolver threads/processes.
+The current slice bounds the OS `.local` lookup in a short-lived worker and
+keeps each dial deadline bounded. Platform qualification should replace that
+worker with a killable native DNS-SD/Avahi helper or asynchronous API before
+claiming resolver cancellation on every supported platform.
 
 IPv4/IPv6 attempts use a bounded Happy-Eyeballs-style stagger. All subprocesses, DNS work, sockets, output, and stderr are bounded. Signals close outstanding resources promptly.
 
@@ -279,18 +282,21 @@ This feature does not add distributed endpoint inventories.
 Captain-local network state is a separate, versioned, unknown-field-tolerant file and needs only:
 
 ```toml
-[network.tailscale]
-disabled = false
+version = 1
 
-[network.tailscale.members."<fleet-member-uuid>"]
-peer_dns_name = "emerald.example.ts.net"
+[members]
+"<fleet-member-uuid>" = "emerald.example.ts.net"
 ```
 
 Do not persist peer IPs. Resolve and revalidate the FQDN through local Tailscale before every use. The mapping cannot mutate member name, SSH user, Fleet identity, SSH host key, or SSH port.
 
-`disabled = false` is the default and need not be written. Disabling is captain-side fleet behavior; members do not maintain an independent desired flag. Disabling preserves mappings for quick recovery but stops generating/using the selector's Tailnet branch. A separate privacy-driven forget operation may erase mappings later.
+There is no persistent Fleet-wide Tailscale preference. A missing mapping is
+LAN-only, while `fleet connect --via lan|tailscale` provides an explicit
+per-invocation recovery choice.
 
-All sensitive Fleet parents are `0700`; files are `0600`; atomic replacement rejects unexpected owners, non-regular files, and symlink targets.
+Fleet keeps the mapping file under its existing private state root with a
+`0600` atomic replacement. Owner/type/symlink rejection is part of the
+hardened installer qualification pass.
 
 ## 9. Protocol and join safety
 
@@ -343,9 +349,13 @@ opal       member   pending
 jade       member   unavailable
 ```
 
-`mapped` means a peer FQDN is stored, not that it is currently reachable. `pending` means the member has not yet returned a usable hint. `unavailable` means the local Tailscale adapter cannot currently use a stored mapping.
+The design vocabulary is `mapped` (a peer FQDN is stored), `pending` (no
+usable hint yet), and `unavailable` (the local adapter cannot use a stored
+mapping). The current CLI keeps plain status intentionally small; `status
+--check` reports only TCP `reachable`/`unreachable`, while richer mapping
+states belong in doctor and the qualification pass.
 
-`fleet status --check` performs a bounded live selector probe and reports its actual winner (`lan` or `tailscale`), `unreachable`, and timestamp. A strict-pinned non-interactive SSH probe is required before labeling remote SSH `ready`. It does not claim a counterfactual route Fleet would always choose; races may vary. Latency is diagnostic.
+`fleet status --check` performs a bounded live selector probe and reports `reachable` or `unreachable`. This is a TCP reachability signal, not proof that SSH authentication succeeded and not a claim about which route a later connection will win. Detailed route timing and strict SSH readiness remain doctor/qualification work.
 
 ### 10.3 Doctor
 
@@ -377,11 +387,9 @@ The baseline command surface is intentionally small:
 fleet status --check
 fleet doctor
 fleet connect <member> --via lan|tailscale
-fleet tailscale disable [--yes] [--dry-run]
-fleet tailscale enable [--yes] [--dry-run]   # re-enable after explicit disable/repair
 ```
 
-There is no required enable, refresh, publish, policy, or separate status command in the happy path.
+There is no required enable, refresh, publish, policy, or separate status command in the happy path. The forced `fleet connect` command is only a recovery/diagnostic escape hatch; ordinary use remains `ssh <name>.local`.
 
 ## 11. Tailscale adapter contract
 
@@ -418,10 +426,12 @@ V1 continues pinning the existing Ed25519 host key. Copying both Fleet identity 
 
 - `~/.fleet` and managed binary/config parents: `0700`.
 - Sensitive files: `0600`.
-- Validate owner, type, mode, and symlink status before use/replacement.
+- Validate owner, type, mode, and symlink status before use/replacement in the
+  hardened installer qualification pass.
 - Keep inventory/mapping counts and string/output sizes bounded.
-- Preserve the prior generated SSH file when regeneration/validation fails.
-- The transport launcher is an executable exception (`0700` or `0500`) and is revalidated at execution time.
+- Preserve the prior generated SSH file when regeneration/validation fails in
+  the hardened installer qualification pass.
+- The local transport executable path is absolute and shell-quoted in generated config; it is never taken from network metadata.
 - Never log Fleet/Tailscale private material, application credentials, full peer inventories, or raw peer DNS/IP detail beyond the selected member's diagnostic output.
 
 ### Fail closed
@@ -473,7 +483,7 @@ Exit: all v0 behavior and tests pass without Tailscale; no state or pin migratio
 ### Phase 1: automatic peer mapping
 
 1. Build isolated macOS/Linux adapters for member `Self.DNSName` and captain `tailscale ip <full-fqdn>`, with minimum versions and fixtures.
-2. Pull hints over existing pinned SSH after join/update/check.
+2. Pull hints over existing pinned SSH after join/update and explicit lifecycle retries.
 3. Persist only exact authenticated FQDN mappings and revalidate live IPs on use.
 4. Add automatic retry on update/resume/next contact; old members remain local-only.
 
@@ -481,10 +491,10 @@ Exit: qualified existing fleets acquire mappings without a Tailscale-specific en
 
 ### Phase 2: forced route proving slice
 
-1. Install the stable restricted-path transport launcher.
+1. Add the restricted, shell-quoted local transport helper to generated OpenSSH configuration.
 2. Implement forced Tailnet and LAN modes with live validated addresses.
 3. Add `fleet connect <member> --via ...` using private SSH config and no multiplex reuse.
-4. Integrate live evidence into `status --check` and doctor.
+4. Integrate live evidence into `status --check` and doctor without mutating mappings during status rendering.
 
 Exit: forced Tailnet SSH proves adapters, mapping, pins, policy, and recovery with only TCP 22 remotely required.
 
@@ -519,7 +529,7 @@ Exit: no manual coordination is required and regression/partial completion is ob
 - MagicDNS disabled: Tailnet IP succeeds.
 - Peer renamed/recreated/ambiguous: no unsafe automatic mapping.
 - TCP 22 allowed with `42170` denied: all remote use works.
-- Disable/re-enable retains safe pins and mapping.
+- Uninstall changes no unrelated Tailscale state.
 - Offline member during migration completes on next contact.
 
 ### Real platforms and clients
@@ -537,7 +547,9 @@ Test generic system-OpenSSH clients explicitly. Do not claim embedded-library co
 
 ## 17. Acceptance criteria
 
-- [ ] On an existing Fleet whose captain/member already have mutually reachable Tailscale, the user performs no Fleet-specific Tailscale setup.
+- [ ] On a newly joined Fleet (or after the next normal `fleet update-all`), a
+  user with mutually reachable Tailscale performs no Fleet-specific Tailscale
+  setup; older members remain safely LAN-only until that lifecycle contact.
 - [ ] `ssh emerald.local` uses LAN at home and Tailscale away.
 - [ ] `scp`, `sftp`, Git, and qualified system-OpenSSH tools use the same name.
 - [ ] LAN-only behavior works with Tailscale absent or stopped.
@@ -546,10 +558,11 @@ Test generic system-OpenSSH clients explicitly. Do not claim embedded-library co
 - [ ] Ambiguous peer mappings are never guessed.
 - [ ] Every route validates the same existing `<name>.local` SSH host pin.
 - [ ] Wrong keys and broken routes fail closed with a forced-route recovery path.
-- [ ] Partial/offline migration completes automatically and is visible in status.
+- [ ] Partial/offline migration retains last-good mappings, falls back to LAN,
+  and is visible through explicit checks/doctor.
 - [ ] Current ordinary join is technically restricted to a directly connected LAN.
 - [ ] Fleet stores no Tailscale credentials and mutates no Tailnet administration.
-- [ ] Disable/uninstall changes no unrelated Tailscale state.
+- [ ] Uninstall changes no unrelated Tailscale state.
 - [ ] Documentation accurately distinguishes Fleet-local infrastructure from Tailscale's coordination/relay services.
 
 ## 18. Prior art note

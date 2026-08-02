@@ -45,11 +45,16 @@ pub enum Command {
     /// Update Fleet on every machine, members first and captain last.
     #[command(name = "update-all", visible_alias = "updateall")]
     UpdateAll,
+    /// Recover or diagnose a member SSH connection.
+    Connect(ConnectArgs),
     /// Show coding-agent usage recorded on a machine.
     Usage(UsageArgs),
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
+    /// Emit local network correlation metadata for another Fleet machine.
+    #[command(name = "network-hint", hide = true)]
+    NetworkHint(NetworkHintArgs),
     /// Open an SSH transport for generated OpenSSH configuration.
     #[command(hide = true)]
     Transport(TransportArgs),
@@ -158,10 +163,26 @@ pub struct UsageArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ConnectArgs {
+    /// Member name, with or without .local, or member ID.
+    pub member: String,
+    /// Force one route for recovery/diagnostics.
+    #[arg(long, value_enum)]
+    pub via: TransportRoute,
+}
+
+#[derive(Debug, Args)]
 pub struct DaemonArgs {
     /// Listen address; normally supplied by the service definition.
     #[arg(long, default_value = "0.0.0.0:42170")]
     pub listen: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkHintArgs {
+    /// Emit the stable machine-readable schema.
+    #[arg(long, required = true)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -192,6 +213,16 @@ pub enum TransportRoute {
     Auto,
     Lan,
     Tailscale,
+}
+
+impl std::fmt::Display for TransportRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "auto",
+            Self::Lan => "lan",
+            Self::Tailscale => "tailscale",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]

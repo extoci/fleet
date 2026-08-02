@@ -50,8 +50,43 @@ fn help_exposes_only_the_v0_lifecycle() {
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("update-all"))
         .stdout(predicate::str::contains("usage"))
+        .stdout(predicate::str::contains("network-hint").not())
         .stdout(predicate::str::contains("transfer").not())
         .stdout(predicate::str::contains("sync").not());
+}
+
+#[test]
+fn network_hint_requires_json_and_fleet_state() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("network-hint")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--json"));
+    test_command(&home)
+        .args(["network-hint", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in a fleet"));
+}
+
+#[test]
+fn network_hint_emits_a_stable_empty_schema_without_tailscale() {
+    let home = TempDir::new().unwrap();
+    let config = captain_config();
+    let machine_id = config.machine.id;
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&config).unwrap();
+    test_command(&home)
+        .env("PATH", "")
+        .args(["network-hint", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(format!(
+            "{{\"version\":1,\"machineId\":\"{machine_id}\",\"tailscale\":null}}\n"
+        )));
 }
 
 #[test]

@@ -110,7 +110,7 @@ The topology is intentionally asymmetric. The captain can access members. Fleet 
 
 ### Local first
 
-Fleet state and Fleet protocol traffic stay on the user's network. Fleet has no hosted control plane, account system, relay, or telemetry. Core operations remain useful without internet connectivity after required software has been installed.
+Fleet state and Fleet protocol traffic stay on the user's network. Fleet has no hosted control plane, account system, relay, or telemetry. Core operations remain useful without internet connectivity after required software has been installed. When a user already runs Tailscale, Fleet may use it as an optional local endpoint substrate; Fleet does not administer that network.
 
 Fleet may download Fleet releases, operating-system packages, and selected tools from their official sources. "Local first" applies to state and coordination, not to ordinary software downloads.
 
@@ -188,7 +188,7 @@ The user installs Fleet on another machine, opens a shell there, and runs `fleet
 
 ### Use the fleet
 
-The user or an agent on the captain accesses a member using ordinary SSH and its `.local` hostname. Fleet does not wrap every remote command and does not need to remain in the execution path.
+The user or an agent on the captain accesses a member using ordinary SSH and its `.local` hostname. Fleet does not terminate or relay SSH; a small local selector may remain in the connection path only to choose the LAN or an already-connected Tailscale socket.
 
 `fleet status` exposes the locally known topology and machine metadata. Detailed liveness monitoring, task tracking, and workload telemetry are not part of the product.
 
@@ -242,7 +242,7 @@ For v0, the skill exists only on the captain. File transfer and skill replicatio
 
 - Delegation, orchestration, scheduling, or task tracking
 - Machine recommendations, descriptions, or workload roles
-- Tailscale or other remote-network integration
+- Task orchestration, scheduling, and hosted remote-network control planes
 - Fleet-owned relay, cloud API, accounts, or telemetry
 - File transfer, synchronization, or repository distribution
 - Member-to-member SSH trust
@@ -258,7 +258,6 @@ For v0, the skill exists only on the captain. File transfer and skill replicatio
 
 ## Deferred possibilities, not commitments
 
-- Tailscale as an additional transport while preserving Fleet identity
 - `fleet sync` or `fleet transfer` for explicit file movement
 - Skills on members after synchronization exists
 - Additional installable tools

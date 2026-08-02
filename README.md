@@ -68,7 +68,7 @@ fleet is mostly an opinionated setup around things your computers already know h
 - shell and tmux colors make it obvious which machine you are using
 - a generated fleet skill makes the machine list readable by compatible coding agents
 
-fleet does not proxy normal work after setup. `ssh emerald.local`, scp, sftp, and ordinary remote commands are still just normal ssh.
+Fleet does not terminate or relay normal work after setup. `ssh emerald.local`, scp, sftp, and ordinary remote commands remain normal OpenSSH; Fleet's tiny local ProxyCommand only chooses the LAN or an already-connected Tailscale socket before OpenSSH performs its usual key exchange.
 
 interactive ssh enters the persistent tmux session by default. bypass it once with:
 
@@ -78,7 +78,7 @@ ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'
 
 ## trust and privacy
 
-fleet has no accounts, hosted control plane, relay, or telemetry. its state and coordination stay on your local network. installing fleet, system packages, codex, or claude code can obviously contact their official download sources.
+fleet has no Fleet-hosted accounts, control plane, relay, or telemetry. its state and coordination stay local. when Tailscale is already installed and connected, Fleet can use the user's Tailnet for private remote reachability; Tailscale may use its own coordination service or DERP relays. installing fleet, system packages, codex, or claude code can obviously contact their official download sources.
 
 captain discovery uses unauthenticated mdns. `fleet join` shows you the captain and its fingerprint before trusting it, which is trust-on-first-use for a trusted lan, not magic cryptographic proof that the person next to you is not doing something weird.
 
@@ -90,10 +90,10 @@ fleet uses the operating system's openssh client for machine-to-machine commands
 
 - macos or debian/ubuntu linux with systemd and apt
 - bash or zsh
-- machines on the same trusted local network
+- machines on a trusted local network for initial joining
 - one captain and one fleet per machine
 
-fleet does **not** do tailscale, task orchestration or windows. it just gives tools access to machines, it does not become the tool using them.
+fleet does optional Tailscale routing for members after their normal join or the next `fleet update-all`, while preserving ordinary `ssh <name>.local`; it does not install or administer Tailscale. Fleet also does not do task orchestration or Windows. it gives tools access to machines, it does not become the tool using them.
 
 ## gpt-5.6
 
