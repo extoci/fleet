@@ -50,6 +50,9 @@ pub enum Command {
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
+    /// Open an SSH transport for generated OpenSSH configuration.
+    #[command(hide = true)]
+    Transport(TransportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -159,6 +162,36 @@ pub struct DaemonArgs {
     /// Listen address; normally supplied by the service definition.
     #[arg(long, default_value = "0.0.0.0:42170")]
     pub listen: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TransportArgs {
+    #[command(subcommand)]
+    pub command: TransportCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransportCommand {
+    /// Connect standard input and output to a Fleet member's SSH port.
+    Connect(TransportConnectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TransportConnectArgs {
+    /// Fleet member identity. Generated configuration always supplies this value.
+    #[arg(long)]
+    pub member: uuid::Uuid,
+    /// Restrict route selection for recovery and diagnostics.
+    #[arg(long, value_enum, default_value_t = TransportRoute::Auto)]
+    pub via: TransportRoute,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum TransportRoute {
+    #[default]
+    Auto,
+    Lan,
+    Tailscale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]

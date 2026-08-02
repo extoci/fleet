@@ -40,6 +40,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::UpdateAll => update_all(&paths),
         Command::Usage(args) => usage(&paths, args),
         Command::Daemon(args) => service::run(&paths, &args.listen),
+        Command::Transport(args) => match args.command {
+            crate::cli::TransportCommand::Connect(args) => {
+                crate::ssh_client::transport_connect(&paths, args.member, args.via)
+            }
+        },
     }
 }
 
