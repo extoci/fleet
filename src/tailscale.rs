@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -15,6 +17,8 @@ const TAILSCALE: &str = "tailscale";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 const MAPPING_VERSION: u32 = 1;
+
+static MAPPING_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MappingFile {
@@ -46,17 +50,29 @@ pub fn mapped_peer(paths: &StatePaths, member: Uuid) -> Result<Option<String>> {
 }
 
 pub fn save_mapping(paths: &StatePaths, member: Uuid, fqdn: &str) -> Result<()> {
-    let mut file = load_mapping_file(paths)?;
-    file.members.insert(member, normalize_fqdn(fqdn)?);
-    save_mapping_file(paths, &file)
+    with_mapping_lock(|| {
+        let mut file = load_mapping_file(paths)?;
+        file.members.insert(member, normalize_fqdn(fqdn)?);
+        save_mapping_file(paths, &file)
+    })
 }
 
 pub fn remove_mapping(paths: &StatePaths, member: Uuid) -> Result<()> {
-    let mut file = load_mapping_file(paths)?;
-    if file.members.remove(&member).is_some() {
-        save_mapping_file(paths, &file)?;
-    }
-    Ok(())
+    with_mapping_lock(|| {
+        let mut file = load_mapping_file(paths)?;
+        if file.members.remove(&member).is_some() {
+            save_mapping_file(paths, &file)?;
+        }
+        Ok(())
+    })
+}
+
+fn with_mapping_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock = MAPPING_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Tailscale mapping lock is poisoned"))?;
+    operation()
 }
 
 fn load_mapping_file(paths: &StatePaths) -> Result<MappingFile> {
@@ -182,7 +198,8 @@ fn parse_peer_ips(output: &[u8]) -> Result<Vec<IpAddr>> {
 }
 
 fn run_tailscale(arguments: &[&str]) -> Result<Vec<u8>> {
-    let mut command = Command::new(TAILSCALE);
+    let program = tailscale_program();
+    let mut command = Command::new(&program);
     command
         .args(arguments)
         .stdin(Stdio::null())
@@ -191,7 +208,7 @@ fn run_tailscale(arguments: &[&str]) -> Result<Vec<u8>> {
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
-        .with_context(|| format!("start `{TAILSCALE} {}`", arguments.join(" ")))?;
+        .with_context(|| format!("start `{}` {}", program.display(), arguments.join(" ")))?;
     let stdout = child.stdout.take().context("capture Tailscale stdout")?;
     let stderr = child.stderr.take().context("capture Tailscale stderr")?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout));
@@ -244,6 +261,29 @@ fn run_tailscale(arguments: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn tailscale_program() -> PathBuf {
+    // An explicitly empty PATH is used by tests and by callers that want to
+    // disable optional Tailscale discovery. Do not bypass that contract with
+    // well-known absolute paths.
+    if std::env::var_os("PATH").is_some_and(|path| path.is_empty()) {
+        return PathBuf::from(TAILSCALE);
+    }
+    if let Ok(path) = which::which(TAILSCALE) {
+        return path;
+    }
+    [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/usr/bin/tailscale",
+        "/bin/tailscale",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+    .unwrap_or_else(|| PathBuf::from(TAILSCALE))
+}
+
 struct BoundedOutput {
     bytes: Vec<u8>,
     truncated: bool,
@@ -291,6 +331,8 @@ fn terminate_process_group(child: &mut Child) {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn parses_self_dns_name_fixture() {
@@ -372,5 +414,34 @@ mod tests {
         );
         remove_mapping(&paths, member).unwrap();
         assert!(mapped_peer(&paths, member).unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_mapping_updates_preserve_every_member() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Arc::new(StatePaths {
+            root: temp.path().join(".fleet"),
+        });
+        let barrier = Arc::new(Barrier::new(8));
+        let members: Vec<_> = (0..8).map(|_| Uuid::new_v4()).collect();
+        let handles = members
+            .iter()
+            .enumerate()
+            .map(|(index, member)| {
+                let paths = paths.clone();
+                let barrier = barrier.clone();
+                let member = *member;
+                thread::spawn(move || {
+                    barrier.wait();
+                    save_mapping(&paths, member, &format!("member{index}.example.ts.net")).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        for member in members {
+            assert!(mapped_peer(&paths, member).unwrap().is_some());
+        }
     }
 }

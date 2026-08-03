@@ -11,6 +11,18 @@ use std::sync::mpsc;
 use std::time::Duration;
 use uuid::Uuid;
 
+const REMOTE_NETWORK_HINT_COMMAND: &str = r#"
+fleet_bin=$(command -v fleet 2>/dev/null || true)
+if [ -z "$fleet_bin" ] && [ -x "$HOME/.local/bin/fleet" ]; then
+  fleet_bin="$HOME/.local/bin/fleet"
+fi
+if [ -z "$fleet_bin" ]; then
+  echo 'Fleet executable was not found on the member' >&2
+  exit 127
+fi
+exec "$fleet_bin" network-hint --json
+"#;
+
 pub fn initialize(paths: &StatePaths) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let ssh = home.join(".ssh");
@@ -163,11 +175,26 @@ struct NetworkHintTailscale {
 /// A mapping is saved only after the captain's own Tailscale client resolves it
 /// to a valid Tailscale address.
 pub fn refresh_mapping(paths: &StatePaths, member: &crate::state::Machine) -> Result<bool> {
-    let output = crate::remote::ssh_output_direct(
-        &member.host(),
-        "fleet network-hint --json",
-        Duration::from_secs(8),
-    )?;
+    // Bootstrap without a mapping over the original LAN path. Once a mapping
+    // exists, use the normal selector so update-all can refresh a member while
+    // the captain is away from the LAN or after its MagicDNS name changes.
+    let has_mapping = crate::tailscale::mapped_peer(paths, member.id)
+        .ok()
+        .flatten()
+        .is_some();
+    let output = if has_mapping {
+        crate::remote::ssh_output(
+            &member.host(),
+            REMOTE_NETWORK_HINT_COMMAND,
+            Duration::from_secs(8),
+        )?
+    } else {
+        crate::remote::ssh_output_direct(
+            &member.host(),
+            REMOTE_NETWORK_HINT_COMMAND,
+            Duration::from_secs(8),
+        )?
+    };
     if !output.status.success() {
         anyhow::bail!("member network hint exited with {}", output.status);
     }
@@ -512,5 +539,12 @@ mod tests {
         assert_eq!(hint.version, 1);
         assert_eq!(hint.machine_id, id);
         assert_eq!(hint.tailscale.unwrap().dns_name, "emerald.example.ts.net");
+    }
+
+    #[test]
+    fn network_hint_command_finds_user_local_fleet_installations() {
+        assert!(REMOTE_NETWORK_HINT_COMMAND.contains("command -v fleet"));
+        assert!(REMOTE_NETWORK_HINT_COMMAND.contains("$HOME/.local/bin/fleet"));
+        assert!(REMOTE_NETWORK_HINT_COMMAND.contains("exec \"$fleet_bin\" network-hint --json"));
     }
 }

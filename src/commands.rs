@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::process::Command as ProcessCommand;
 use std::sync::{
     Arc,
@@ -1437,7 +1437,14 @@ fn doctor(paths: &StatePaths) -> Result<()> {
             let members = skill::load_members(paths)?;
             println!("  ✓ Captain inventory contains {} member(s)", members.len());
             for member in members {
-                println!("  {} {}", reachability(&member.host()), member.host());
+                let health = crate::ssh_client::probe_transport(
+                    paths,
+                    member.id,
+                    crate::cli::TransportRoute::Auto,
+                )
+                .map(|_| "online")
+                .unwrap_or("unreachable");
+                println!("  {health} {}", member.host());
                 match crate::tailscale::mapped_peer(paths, member.id) {
                     Ok(Some(peer)) => println!("    Tailscale mapping: {peer}"),
                     Ok(None) => println!("    Tailscale mapping: LAN-only/pending"),
@@ -1454,20 +1461,6 @@ fn doctor(paths: &StatePaths) -> Result<()> {
     }
     println!("Detailed diagnostics: `fleet logs`");
     Ok(())
-}
-
-fn reachability(host: &str) -> &'static str {
-    let address = format!("{host}:22");
-    let reachable = address
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addresses| {
-            addresses.find(|address| {
-                TcpStream::connect_timeout(address, Duration::from_millis(700)).is_ok()
-            })
-        })
-        .is_some();
-    if reachable { "online" } else { "unreachable" }
 }
 
 fn captain_health(captain: &crate::state::CaptainRef) -> &'static str {

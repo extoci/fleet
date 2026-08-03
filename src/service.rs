@@ -3,9 +3,10 @@ use crate::identity;
 use crate::skill;
 use crate::state::{Machine, Role, StatePaths};
 use anyhow::{Context, Result, bail};
+use if_addrs::{IfAddr, Interface};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,10 +100,9 @@ fn handle_request(
     match (request.method(), request.url()) {
         (&Method::Get, "/v1/identity") => json_response(StatusCode(200), advertisement),
         (&Method::Post, "/v1/join") => {
-            let peer_ip = request.remote_addr().map(|address| address.ip());
-            if peer_ip.is_some_and(crate::tailscale::is_tailscale_ip) {
-                bail!("Fleet joining is only accepted from the trusted local network");
-            }
+            let peer = request.remote_addr();
+            validate_join_source(peer.copied())?;
+            let peer_ip = peer.map(|address| normalize_join_peer(address.ip()));
             let body = read_body(request)?;
             let signed: SignedRequest =
                 serde_json::from_slice(&body).context("decode join request")?;
@@ -181,6 +181,91 @@ fn handle_request(
         }
         _ => json_response(StatusCode(404), &serde_json::json!({"error": "not found"})),
     }
+}
+
+/// Keep the existing enrollment ceremony on a directly connected LAN.
+///
+/// The captain listener is intentionally bound to all addresses, so rejecting
+/// only Tailscale address space is insufficient: another VPN, routed subnet,
+/// or exposed interface could otherwise enroll a fresh Fleet identity. The
+/// source must be on-link with an operational, non-tunnel interface.
+fn validate_join_source(peer: Option<SocketAddr>) -> Result<()> {
+    let peer = peer
+        .context("Fleet could not identify the join source")
+        .map(|address| normalize_join_peer(address.ip()))?;
+    if !is_valid_join_peer(peer) {
+        bail!("Fleet joining is only accepted from the trusted local network");
+    }
+    let interfaces = if_addrs::get_if_addrs().context("inspect local network interfaces")?;
+    if interfaces.iter().any(|interface| {
+        eligible_join_interface(interface) && interface_is_on_link(interface, peer)
+    }) {
+        return Ok(());
+    }
+    bail!("Fleet joining is only accepted from a directly connected local network")
+}
+
+fn normalize_join_peer(peer: IpAddr) -> IpAddr {
+    match peer {
+        IpAddr::V6(address) => address
+            .to_ipv4()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        peer => peer,
+    }
+}
+
+fn is_valid_join_peer(peer: IpAddr) -> bool {
+    !peer.is_unspecified()
+        && !peer.is_loopback()
+        && !peer.is_multicast()
+        && !crate::tailscale::is_tailscale_ip(peer)
+}
+
+fn eligible_join_interface(interface: &Interface) -> bool {
+    if !interface.is_oper_up()
+        || interface.is_loopback()
+        || interface.is_p2p()
+        || crate::tailscale::is_tailscale_ip(interface.ip())
+    {
+        return false;
+    }
+    let name = interface.name.to_ascii_lowercase();
+    ![
+        "lo",
+        "lo0",
+        "awdl",
+        "llw",
+        "bridge",
+        "docker",
+        "br-",
+        "virbr",
+        "veth",
+        "tailscale",
+        "utun",
+        "tun",
+        "tap",
+        "wg",
+        "zt",
+    ]
+    .iter()
+    .any(|prefix| name == *prefix || name.starts_with(prefix))
+}
+
+fn interface_is_on_link(interface: &Interface, peer: IpAddr) -> bool {
+    match (&interface.addr, peer) {
+        (IfAddr::V4(local), IpAddr::V4(peer)) => same_ipv4_subnet(local.ip, peer, local.netmask),
+        (IfAddr::V6(local), IpAddr::V6(peer)) => same_ipv6_subnet(local.ip, peer, local.netmask),
+        _ => false,
+    }
+}
+
+fn same_ipv4_subnet(local: Ipv4Addr, peer: Ipv4Addr, netmask: Ipv4Addr) -> bool {
+    u32::from(local) & u32::from(netmask) == u32::from(peer) & u32::from(netmask)
+}
+
+fn same_ipv6_subnet(local: Ipv6Addr, peer: Ipv6Addr, netmask: Ipv6Addr) -> bool {
+    u128::from(local) & u128::from(netmask) == u128::from(peer) & u128::from(netmask)
 }
 
 fn read_body(request: &mut tiny_http::Request) -> Result<Vec<u8>> {
@@ -807,6 +892,44 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn join_source_normalizes_mapped_ipv4_addresses() {
+        let mapped: IpAddr = "::ffff:192.168.1.20".parse().unwrap();
+        assert_eq!(
+            normalize_join_peer(mapped),
+            "192.168.1.20".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn join_source_accepts_only_the_same_local_subnet() {
+        let local = "192.168.1.10".parse().unwrap();
+        let netmask = "255.255.255.0".parse().unwrap();
+        assert!(same_ipv4_subnet(
+            local,
+            "192.168.1.20".parse().unwrap(),
+            netmask
+        ));
+        assert!(!same_ipv4_subnet(
+            local,
+            "192.168.2.20".parse().unwrap(),
+            netmask
+        ));
+
+        let local = "fd00::10".parse().unwrap();
+        let netmask = "ffff:ffff:ffff:ffff::".parse().unwrap();
+        assert!(same_ipv6_subnet(
+            local,
+            "fd00::20".parse().unwrap(),
+            netmask
+        ));
+        assert!(!same_ipv6_subnet(
+            local,
+            "fd00:1::20".parse().unwrap(),
+            netmask
+        ));
     }
 
     #[test]
