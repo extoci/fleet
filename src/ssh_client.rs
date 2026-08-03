@@ -279,6 +279,8 @@ fn connect_lan(host: &str, timeout: Duration) -> Result<TcpStream> {
     let addresses = receiver
         .recv_timeout(timeout)
         .map_err(|_| anyhow::anyhow!("resolve {host} timed out"))??;
+    let addresses = crate::network::filter_direct_lan_addresses(addresses)
+        .context("filter resolved LAN addresses")?;
     connect_addresses(addresses, timeout.saturating_sub(started.elapsed()))
         .with_context(|| format!("connect to {host} on SSH port 22"))
 }

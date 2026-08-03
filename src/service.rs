@@ -1,12 +1,12 @@
 use crate::discovery::{CaptainAdvertisement, CaptainConnection, SERVICE_TYPE};
 use crate::identity;
+use crate::network;
 use crate::skill;
 use crate::state::{Machine, Role, StatePaths};
 use anyhow::{Context, Result, bail};
-use if_addrs::{IfAddr, Interface};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,7 +102,7 @@ fn handle_request(
         (&Method::Post, "/v1/join") => {
             let peer = request.remote_addr();
             validate_join_source(peer.copied())?;
-            let peer_ip = peer.map(|address| normalize_join_peer(address.ip()));
+            let peer_addr = peer.copied();
             let body = read_body(request)?;
             let signed: SignedRequest =
                 serde_json::from_slice(&body).context("decode join request")?;
@@ -119,7 +119,7 @@ fn handle_request(
             let members = skill::load_members(paths)?;
             validate_topology_conflicts(advertisement, &members, &registration.machine)?;
             validate_existing_pin(&members, &registration.machine)?;
-            if let Err(error) = verify_member(paths, &registration.machine, peer_ip) {
+            if let Err(error) = verify_member(paths, &registration.machine, peer_addr) {
                 let _ = crate::ssh_client::regenerate(paths);
                 return Err(error.context("captain could not verify passwordless SSH"));
             }
@@ -190,82 +190,11 @@ fn handle_request(
 /// or exposed interface could otherwise enroll a fresh Fleet identity. The
 /// source must be on-link with an operational, non-tunnel interface.
 fn validate_join_source(peer: Option<SocketAddr>) -> Result<()> {
-    let peer = peer
-        .context("Fleet could not identify the join source")
-        .map(|address| normalize_join_peer(address.ip()))?;
-    if !is_valid_join_peer(peer) {
-        bail!("Fleet joining is only accepted from the trusted local network");
-    }
-    let interfaces = if_addrs::get_if_addrs().context("inspect local network interfaces")?;
-    if interfaces.iter().any(|interface| {
-        eligible_join_interface(interface) && interface_is_on_link(interface, peer)
-    }) {
+    let peer = peer.context("Fleet could not identify the join source")?;
+    if network::is_directly_connected_lan_peer(peer)? {
         return Ok(());
     }
     bail!("Fleet joining is only accepted from a directly connected local network")
-}
-
-fn normalize_join_peer(peer: IpAddr) -> IpAddr {
-    match peer {
-        IpAddr::V6(address) => address
-            .to_ipv4()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(address)),
-        peer => peer,
-    }
-}
-
-fn is_valid_join_peer(peer: IpAddr) -> bool {
-    !peer.is_unspecified()
-        && !peer.is_loopback()
-        && !peer.is_multicast()
-        && !crate::tailscale::is_tailscale_ip(peer)
-}
-
-fn eligible_join_interface(interface: &Interface) -> bool {
-    if !interface.is_oper_up()
-        || interface.is_loopback()
-        || interface.is_p2p()
-        || crate::tailscale::is_tailscale_ip(interface.ip())
-    {
-        return false;
-    }
-    let name = interface.name.to_ascii_lowercase();
-    ![
-        "lo",
-        "lo0",
-        "awdl",
-        "llw",
-        "bridge",
-        "docker",
-        "br-",
-        "virbr",
-        "veth",
-        "tailscale",
-        "utun",
-        "tun",
-        "tap",
-        "wg",
-        "zt",
-    ]
-    .iter()
-    .any(|prefix| name == *prefix || name.starts_with(prefix))
-}
-
-fn interface_is_on_link(interface: &Interface, peer: IpAddr) -> bool {
-    match (&interface.addr, peer) {
-        (IfAddr::V4(local), IpAddr::V4(peer)) => same_ipv4_subnet(local.ip, peer, local.netmask),
-        (IfAddr::V6(local), IpAddr::V6(peer)) => same_ipv6_subnet(local.ip, peer, local.netmask),
-        _ => false,
-    }
-}
-
-fn same_ipv4_subnet(local: Ipv4Addr, peer: Ipv4Addr, netmask: Ipv4Addr) -> bool {
-    u32::from(local) & u32::from(netmask) == u32::from(peer) & u32::from(netmask)
-}
-
-fn same_ipv6_subnet(local: Ipv6Addr, peer: Ipv6Addr, netmask: Ipv6Addr) -> bool {
-    u128::from(local) & u128::from(netmask) == u128::from(peer) & u128::from(netmask)
 }
 
 fn read_body(request: &mut tiny_http::Request) -> Result<Vec<u8>> {
@@ -417,15 +346,22 @@ struct SshVerificationTarget {
     host_key_alias: String,
 }
 
-fn ssh_verification_target(machine: &Machine, peer_ip: Option<IpAddr>) -> SshVerificationTarget {
+fn ssh_verification_target(
+    machine: &Machine,
+    peer_addr: Option<SocketAddr>,
+) -> SshVerificationTarget {
     let host = machine.host();
     SshVerificationTarget {
-        connect_host: peer_ip.map_or_else(|| host.clone(), |address| address.to_string()),
+        connect_host: peer_addr.map_or_else(|| host.clone(), network::ssh_host_from_socket_addr),
         host_key_alias: host,
     }
 }
 
-fn verify_member(paths: &StatePaths, machine: &Machine, peer_ip: Option<IpAddr>) -> Result<()> {
+fn verify_member(
+    paths: &StatePaths,
+    machine: &Machine,
+    peer_addr: Option<SocketAddr>,
+) -> Result<()> {
     let host_key = machine
         .ssh_host_key
         .as_deref()
@@ -447,7 +383,7 @@ fn verify_member(paths: &StatePaths, machine: &Machine, peer_ip: Option<IpAddr>)
     crate::state::atomic_write(&paths.known_hosts(), next.as_bytes(), 0o600)?;
 
     let identity = identity::ensure(paths)?;
-    let target = ssh_verification_target(machine, peer_ip);
+    let target = ssh_verification_target(machine, peer_addr);
     let destination = format!("{}@{host}", machine.ssh_user);
     let mut command = Command::new("ssh");
     command
@@ -712,6 +648,7 @@ fn post_for_json<T: Serialize, R: for<'de> Deserialize<'de>>(
 mod tests {
     use super::*;
     use crate::cli::Color;
+    use std::net::IpAddr;
     use std::sync::atomic::AtomicUsize;
 
     const KEY_ONE: &str =
@@ -869,9 +806,18 @@ mod tests {
     #[test]
     fn ssh_verification_uses_join_peer_while_pinning_the_fleet_hostname() {
         let machine = valid_machine();
-        let target = ssh_verification_target(&machine, Some("192.168.1.69".parse().unwrap()));
+        let target = ssh_verification_target(&machine, Some("192.168.1.69:22".parse().unwrap()));
 
         assert_eq!(target.connect_host, "192.168.1.69");
+        assert_eq!(target.host_key_alias, "emerald.local");
+    }
+
+    #[test]
+    fn ssh_verification_preserves_an_ipv6_join_scope() {
+        let machine = valid_machine();
+        let target = ssh_verification_target(&machine, Some("[fe80::69%7]:22".parse().unwrap()));
+
+        assert_eq!(target.connect_host, "fe80::69%7");
         assert_eq!(target.host_key_alias, "emerald.local");
     }
 
@@ -898,38 +844,9 @@ mod tests {
     fn join_source_normalizes_mapped_ipv4_addresses() {
         let mapped: IpAddr = "::ffff:192.168.1.20".parse().unwrap();
         assert_eq!(
-            normalize_join_peer(mapped),
+            network::normalize_ipv4_mapped(mapped),
             "192.168.1.20".parse::<IpAddr>().unwrap()
         );
-    }
-
-    #[test]
-    fn join_source_accepts_only_the_same_local_subnet() {
-        let local = "192.168.1.10".parse().unwrap();
-        let netmask = "255.255.255.0".parse().unwrap();
-        assert!(same_ipv4_subnet(
-            local,
-            "192.168.1.20".parse().unwrap(),
-            netmask
-        ));
-        assert!(!same_ipv4_subnet(
-            local,
-            "192.168.2.20".parse().unwrap(),
-            netmask
-        ));
-
-        let local = "fd00::10".parse().unwrap();
-        let netmask = "ffff:ffff:ffff:ffff::".parse().unwrap();
-        assert!(same_ipv6_subnet(
-            local,
-            "fd00::20".parse().unwrap(),
-            netmask
-        ));
-        assert!(!same_ipv6_subnet(
-            local,
-            "fd00:1::20".parse().unwrap(),
-            netmask
-        ));
     }
 
     #[test]
