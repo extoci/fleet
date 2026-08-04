@@ -181,6 +181,8 @@ Host emerald.local
   StrictHostKeyChecking yes
   UpdateHostKeys no
   ConnectTimeout 8
+  ServerAliveInterval 5
+  ServerAliveCountMax 2
   ProxyCommand '/absolute/path/to/fleet' transport connect --member <full-uuid> --via auto
 ```
 
@@ -230,17 +232,20 @@ For `ssh emerald.local`:
 3. Accept a resolved LAN address only when OS route/interface evidence says it is directly connected/on-link with no gateway on an eligible UP, non-loopback, non-Tailscale interface. Reject loopback, unspecified, multicast, Tailscale ranges, and routed candidates. Preserve IPv6 scope/interface IDs.
 4. If LAN TCP has not connected at `t=150 ms`, resolve the mapped peer through the local Tailscale adapter and begin Tailnet IP dials.
 5. Once Tailnet attempts begin, the first TCP connection to succeed wins. LAN has a head start, not an absolute preference.
-6. Bound all resolver, dial, and adapter work by the helper deadline; close
-   the selected socket's losers when the helper exits.
-7. Copy stdin to the socket and the socket to stdout without interpreting data.
+6. Bound all resolver, dial, adapter, and initial server-preface work by the
+   helper deadline; close the selected socket's losers when the helper exits.
+7. Replay the selected socket's initial newline-terminated preface unchanged,
+   then copy stdin to the socket and the socket to stdout without interpreting
+   SSH data.
 8. On stdin EOF, half-close the TCP write side and continue copying server output until remote EOF.
 9. Send diagnostics only to stderr; stdout is exclusively the SSH byte stream.
 10. Respect an internal deadline shorter than the generated OpenSSH `ConnectTimeout`.
 
 The current slice bounds the OS `.local` lookup in a short-lived worker and
-keeps each dial deadline bounded. Platform qualification should replace that
-worker with a killable native DNS-SD/Avahi helper or asynchronous API before
-claiming resolver cancellation on every supported platform.
+keeps each dial and initial server-preface deadline bounded. Platform
+qualification should replace that worker with a killable native DNS-SD/Avahi
+helper or asynchronous API before claiming resolver cancellation on every
+supported platform.
 
 IPv4/IPv6 attempts use a bounded Happy-Eyeballs-style stagger. All subprocesses, DNS work, sockets, output, and stderr are bounded. Signals close outstanding resources promptly.
 
@@ -248,11 +253,14 @@ The 150 ms head start is an initial internal constant, not a user-facing tuning 
 
 ### 7.2 Honest fallback boundary
 
-The helper selects on TCP connectivity. It cannot see whether the subsequent SSH banner, key exchange, host-key check, or authentication will succeed without becoming an SSH implementation.
+The helper selects on TCP connectivity and bounds the initial server preface so
+a route that accepts a socket but never starts SSH cannot hang the caller. It
+does not parse or authenticate that preface; OpenSSH still decides whether the
+SSH banner, key exchange, host-key check, or authentication will succeed.
 
 If a stale/spoofed LAN endpoint accepts TCP first but then fails SSH, outer OpenSSH fails closed. That invocation cannot restart its SSH state over Tailscale. This applies to:
 
-- banner stalls;
+- SSH stalls after the initial preface;
 - pre-auth disconnects;
 - key-exchange failure;
 - host-key mismatch;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.2 — 2026-08-04
+
+### SSH transport liveness
+
+- Bound the initial SSH transport preface after a TCP route is selected, so a
+  half-open LAN or Tailscale socket cannot leave `ssh <member>.local` hanging.
+- Replay the prefetched bytes unchanged and leave SSH negotiation, host-key
+  checking, and authentication to OpenSSH.
+- Add SSH keepalives to generated Fleet host entries and forced `fleet connect`
+  sessions so established connections detect silent route loss.
+
 ## 0.7.1 — 2026-08-04
 
 ### Tailscale routing recovery
