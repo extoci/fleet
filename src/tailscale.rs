@@ -2,8 +2,10 @@
 
 use crate::state::{StatePaths, atomic_write};
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -31,6 +33,10 @@ fn mapping_path(paths: &StatePaths) -> std::path::PathBuf {
     paths.root.join("tailscale.toml")
 }
 
+fn mapping_lock_path(paths: &StatePaths) -> std::path::PathBuf {
+    paths.root.join("tailscale.lock")
+}
+
 pub fn mapped_peer(paths: &StatePaths, member: Uuid) -> Result<Option<String>> {
     let path = mapping_path(paths);
     if !path.exists() {
@@ -50,7 +56,7 @@ pub fn mapped_peer(paths: &StatePaths, member: Uuid) -> Result<Option<String>> {
 }
 
 pub fn save_mapping(paths: &StatePaths, member: Uuid, fqdn: &str) -> Result<()> {
-    with_mapping_lock(|| {
+    with_mapping_lock(paths, || {
         let mut file = load_mapping_file(paths)?;
         file.members.insert(member, normalize_fqdn(fqdn)?);
         save_mapping_file(paths, &file)
@@ -58,7 +64,7 @@ pub fn save_mapping(paths: &StatePaths, member: Uuid, fqdn: &str) -> Result<()> 
 }
 
 pub fn remove_mapping(paths: &StatePaths, member: Uuid) -> Result<()> {
-    with_mapping_lock(|| {
+    with_mapping_lock(paths, || {
         let mut file = load_mapping_file(paths)?;
         if file.members.remove(&member).is_some() {
             save_mapping_file(paths, &file)?;
@@ -67,12 +73,34 @@ pub fn remove_mapping(paths: &StatePaths, member: Uuid) -> Result<()> {
     })
 }
 
-fn with_mapping_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+fn with_mapping_lock<T>(paths: &StatePaths, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let lock = MAPPING_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock
         .lock()
         .map_err(|_| anyhow::anyhow!("Tailscale mapping lock is poisoned"))?;
-    operation()
+    std::fs::create_dir_all(&paths.root)
+        .with_context(|| format!("create mapping directory {}", paths.root.display()))?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock_file = options
+        .open(mapping_lock_path(paths))
+        .context("open Tailscale mapping lock")?;
+    lock_file
+        .lock_exclusive()
+        .context("lock Tailscale mappings")?;
+
+    let result = operation();
+    let unlock_result = lock_file.unlock().context("unlock Tailscale mappings");
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
 }
 
 fn load_mapping_file(paths: &StatePaths) -> Result<MappingFile> {
@@ -120,8 +148,12 @@ pub fn self_dns_name() -> Result<Option<String>> {
 /// Only addresses in Tailscale's documented IPv4 and IPv6 ranges are returned.
 /// Any other address makes the whole result fail closed.
 pub fn peer_ips(peer_fqdn: &str) -> Result<Vec<IpAddr>> {
+    peer_ips_with_timeout(peer_fqdn, COMMAND_TIMEOUT)
+}
+
+pub(crate) fn peer_ips_with_timeout(peer_fqdn: &str, timeout: Duration) -> Result<Vec<IpAddr>> {
     let peer_fqdn = normalize_fqdn(peer_fqdn)?;
-    let output = run_tailscale(&["ip", &peer_fqdn])?;
+    let output = run_tailscale_with_timeout(&["ip", &peer_fqdn], timeout)?;
     parse_peer_ips(&output)
 }
 
@@ -198,10 +230,17 @@ fn parse_peer_ips(output: &[u8]) -> Result<Vec<IpAddr>> {
 }
 
 fn run_tailscale(arguments: &[&str]) -> Result<Vec<u8>> {
+    run_tailscale_with_timeout(arguments, COMMAND_TIMEOUT)
+}
+
+fn run_tailscale_with_timeout(arguments: &[&str], timeout: Duration) -> Result<Vec<u8>> {
     let program = tailscale_program();
     let mut command = Command::new(&program);
     command
         .args(arguments)
+        // The macOS app-bundled CLI requires this to select its non-GUI
+        // backend. It is harmless for standalone and non-macOS clients.
+        .env("TAILSCALE_BE_CLI", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -218,7 +257,7 @@ fn run_tailscale(arguments: &[&str]) -> Result<Vec<u8>> {
         if let Some(status) = child.try_wait().context("wait for Tailscale command")? {
             break status;
         }
-        if started.elapsed() >= COMMAND_TIMEOUT {
+        if started.elapsed() >= timeout {
             terminate_process_group(&mut child);
             let _ = child.wait();
             let _ = stdout_reader.join();

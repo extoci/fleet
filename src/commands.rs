@@ -71,10 +71,16 @@ fn connect(paths: &StatePaths, args: ConnectArgs) -> Result<()> {
         .with_context(|| format!("no member named {query} is registered"))?;
     let executable = std::env::current_exe().context("locate Fleet executable")?;
     let proxy = crate::ssh_client::proxy_command(&executable, member.id, args.via)?;
+    let connect_timeout = format!(
+        "ConnectTimeout={}",
+        crate::ssh_client::PROXY_CONNECT_TIMEOUT_SECS
+    );
     let mut command = ProcessCommand::new("ssh");
     command.args([
         "-o",
         "Port=22",
+        "-o",
+        &connect_timeout,
         "-o",
         "IdentitiesOnly=yes",
         "-o",
