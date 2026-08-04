@@ -695,11 +695,12 @@ fn update_all(paths: &StatePaths) -> Result<()> {
         members.len() + 1
     );
     let failures = update_members_with(&members, update_member);
-    for member in &members {
-        if !failures.iter().any(|host| host == &member.host()) {
-            let _ = crate::ssh_client::refresh_mapping(paths, member);
-        }
-    }
+    // Mapping discovery is independent of updating the member binary. In
+    // particular, a member can be reachable through ordinary OpenSSH while
+    // the Fleet transport probe is temporarily unavailable. Always attempt
+    // the authenticated metadata pull and report failures instead of silently
+    // leaving the member LAN-only.
+    refresh_member_mappings(paths, &members);
 
     println!("Updating {} (captain)...", config.machine.host());
     let captain_result = update(paths);
@@ -713,6 +714,37 @@ fn update_all(paths: &StatePaths) -> Result<()> {
         );
     }
     bail!("updates failed on: {}", failures.join(", "))
+}
+
+fn refresh_member_mappings(paths: &StatePaths, members: &[Machine]) {
+    for (host, result) in refresh_member_mappings_with(members, |member| {
+        crate::ssh_client::refresh_mapping(paths, member)
+    }) {
+        match result {
+            Ok(true) => println!("  ✓ Tailscale mapping refreshed for {host}"),
+            Ok(false) => println!(
+                "  - Tailscale mapping unavailable for {}; keeping LAN-only routing",
+                host
+            ),
+            Err(error) => {
+                crate::logging::detail(paths, "tailscale-mapping", format!("{host}: {error:#}"));
+                eprintln!("  ! Tailscale mapping failed for {host}: {error:#}");
+            }
+        }
+    }
+}
+
+fn refresh_member_mappings_with<F>(
+    members: &[Machine],
+    mut refresh: F,
+) -> Vec<(String, Result<bool>)>
+where
+    F: FnMut(&Machine) -> Result<bool>,
+{
+    members
+        .iter()
+        .map(|member| (member.host(), refresh(member)))
+        .collect()
 }
 
 fn update_members_with<F>(members: &[Machine], mut run: F) -> Vec<String>
@@ -762,6 +794,15 @@ fn update(paths: &StatePaths) -> Result<()> {
     match crate::updater::update()? {
         crate::updater::UpdateOutcome::Current { version } => {
             println!("Fleet {version} is already up to date.");
+            if paths
+                .load()?
+                .is_some_and(|config| config.role == Role::Captain)
+            {
+                // An installer upgrade can replace the binary without running
+                // the updater's Updated branch. Regenerate anyway so existing
+                // captains receive the current route selector and helper path.
+                crate::ssh_client::regenerate(paths)?;
+            }
         }
         crate::updater::UpdateOutcome::Updated { version } => {
             println!("Fleet updated to {version}.");
@@ -1898,6 +1939,25 @@ mod tests {
             Ok("Fleet 0.4.0 is already up to date.".into())
         });
         assert_eq!(failures, ["emerald.local"]);
+    }
+
+    #[test]
+    fn mapping_refresh_attempts_members_even_when_one_refresh_fails() {
+        let mut ruby = status_machine();
+        ruby.name = "ruby".into();
+        let members = [status_machine(), ruby];
+        let mut attempted = Vec::new();
+        let results = refresh_member_mappings_with(&members, |member| {
+            attempted.push(member.name.clone());
+            if member.name == "emerald" {
+                bail!("network hint unavailable")
+            }
+            Ok(true)
+        });
+
+        assert_eq!(attempted, ["emerald", "ruby"]);
+        assert!(results[0].1.is_err());
+        assert_eq!(results[1].1.as_ref().unwrap(), &true);
     }
 
     #[test]

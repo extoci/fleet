@@ -340,7 +340,9 @@ fn connect_auto(
 fn connect_tailscale(paths: &StatePaths, member_id: Uuid, timeout: Duration) -> Result<TcpStream> {
     let started = std::time::Instant::now();
     let fqdn = crate::tailscale::mapped_peer(paths, member_id)?
-        .context("no Tailscale peer mapping is recorded for this member; try `--via lan`")?;
+        .context(
+            "no Tailscale peer mapping is recorded for this member; run `fleet update-all` while it is reachable",
+        )?;
     let addresses =
         crate::tailscale::peer_ips_with_timeout(&fqdn, timeout.saturating_sub(started.elapsed()))?
             .into_iter()

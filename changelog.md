@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1 — 2026-08-04
+
+### Tailscale routing recovery
+
+- Refresh Tailscale peer mappings even when a member update attempt fails,
+  allowing an existing direct OpenSSH path to bootstrap remote routing.
+- Report mapping-refresh failures instead of silently leaving members LAN-only.
+- Regenerate a captain's managed SSH configuration when Fleet is already
+  current, so existing installations receive the current route selector after
+  an installer-based upgrade.
+
 ## 0.6.9 — 2026-07-26
 
 ### Usage layout
