@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.4 — 2026-08-04
+
+### Cross-platform SSH preface deadline
+
+- Enforce the initial SSH preface deadline without mutating socket read
+  timeouts, preserving the proxy path on macOS as well as Linux.
+
 ## 0.7.3 — 2026-08-04
 
 ### SSH proxy ordering

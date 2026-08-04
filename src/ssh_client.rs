@@ -399,7 +399,7 @@ fn proxy_stdio(stream: TcpStream, timeout: Duration) -> Result<()> {
 }
 
 fn proxy_stdio_with_io<R, W>(
-    mut stream: TcpStream,
+    stream: TcpStream,
     timeout: Duration,
     mut input: R,
     mut output: W,
@@ -422,18 +422,17 @@ where
     // path can accept the socket and then never send the SSH identification
     // line. Prefetch that initial line with a short deadline, then replay it
     // unchanged so OpenSSH remains responsible for all SSH protocol handling.
-    let preface = match prefetch_transport_preface(&mut stream, timeout.min(PROXY_PREFACE_TIMEOUT))
-    {
-        Ok(preface) => preface,
-        Err(error) => {
-            // The helper is a short-lived ProxyCommand process. Dropping the
-            // upload handle lets it exit immediately rather than waiting on a
-            // terminal that may still be open after OpenSSH gives up.
-            let _ = stream.shutdown(Shutdown::Both);
-            drop(upload_thread);
-            return Err(error);
-        }
-    };
+    let (preface, mut stream) =
+        match prefetch_transport_preface(stream, timeout.min(PROXY_PREFACE_TIMEOUT)) {
+            Ok(result) => result,
+            Err(error) => {
+                // The helper is a short-lived ProxyCommand process. Dropping the
+                // upload handle lets it exit immediately rather than waiting on a
+                // terminal that may still be open after OpenSSH gives up.
+                drop(upload_thread);
+                return Err(error);
+            }
+        };
     output
         .write_all(&preface)
         .context("write SSH transport preface")?;
@@ -473,44 +472,60 @@ fn forward_socket_to_output(stream: &mut TcpStream, output: &mut impl Write) -> 
     }
 }
 
-fn prefetch_transport_preface(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>> {
-    let deadline = Instant::now() + timeout;
-    let result = (|| -> Result<Vec<u8>> {
-        let mut preface = Vec::new();
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                bail!(
-                    "SSH transport preface timed out after {} seconds",
-                    timeout.as_secs_f64()
-                );
-            }
-            stream
-                .set_read_timeout(Some(remaining))
-                .context("set SSH transport preface timeout")?;
-            let mut byte = [0u8; 1];
-            stream
-                .read_exact(&mut byte)
-                .context("read SSH transport preface")?;
-            preface.push(byte[0]);
-            if preface.len() > PROXY_PREFACE_LIMIT {
-                bail!(
-                    "SSH transport preface exceeded the {} byte limit",
-                    PROXY_PREFACE_LIMIT
-                );
-            }
-            if byte[0] == b'\n' {
-                return Ok(preface);
-            }
+fn prefetch_transport_preface(
+    stream: TcpStream,
+    timeout: Duration,
+) -> Result<(Vec<u8>, TcpStream)> {
+    // Keep the socket in its normal blocking mode. In particular, macOS
+    // rejects clearing SO_RCVTIMEO with TcpStream::set_read_timeout(None).
+    // A reader thread plus a channel deadline gives us the same bounded
+    // preface wait without changing socket options that the SSH byte stream
+    // needs after the banner.
+    let control = stream.try_clone().context("clone SSH transport socket")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut stream = stream;
+        let result = read_transport_preface(&mut stream).map(|preface| (preface, stream));
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => {
+            let _ = control.shutdown(Shutdown::Both);
+            Err(error)
         }
-    })();
-    let clear_timeout = stream
-        .set_read_timeout(None)
-        .context("clear SSH transport preface timeout");
-    match (result, clear_timeout) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(preface), Ok(())) => Ok(preface),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = control.shutdown(Shutdown::Both);
+            bail!(
+                "SSH transport preface timed out after {} seconds",
+                timeout.as_secs_f64()
+            )
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = control.shutdown(Shutdown::Both);
+            bail!("SSH transport preface reader exited unexpectedly")
+        }
+    }
+}
+
+fn read_transport_preface(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut preface = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .context("read SSH transport preface")?;
+        preface.push(byte[0]);
+        if preface.len() > PROXY_PREFACE_LIMIT {
+            bail!(
+                "SSH transport preface exceeded the {} byte limit",
+                PROXY_PREFACE_LIMIT
+            );
+        }
+        if byte[0] == b'\n' {
+            return Ok(preface);
+        }
     }
 }
 
@@ -686,9 +701,10 @@ mod tests {
             stream.write_all(b"SSH-2.0-test\r\n").unwrap();
             stream.write_all(b"encrypted bytes").unwrap();
         });
-        let mut client = TcpStream::connect(address).unwrap();
+        let client = TcpStream::connect(address).unwrap();
 
-        let preface = prefetch_transport_preface(&mut client, Duration::from_secs(1)).unwrap();
+        let (preface, mut client) =
+            prefetch_transport_preface(client, Duration::from_secs(1)).unwrap();
         assert_eq!(preface, b"SSH-2.0-test\r\n");
         let mut remainder = Vec::new();
         client.read_to_end(&mut remainder).unwrap();
@@ -777,12 +793,12 @@ mod tests {
             let (_stream, _) = listener.accept().unwrap();
             thread::sleep(Duration::from_millis(250));
         });
-        let mut client = TcpStream::connect(address).unwrap();
+        let client = TcpStream::connect(address).unwrap();
 
-        let error = prefetch_transport_preface(&mut client, Duration::from_millis(25))
+        let error = prefetch_transport_preface(client, Duration::from_millis(25))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("read SSH transport preface"));
+        assert!(error.contains("SSH transport preface timed out"));
         server.join().unwrap();
     }
 
