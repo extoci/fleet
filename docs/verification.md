@@ -10,6 +10,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+The ignored real-network Tailscale check requires a second enrolled machine
+with SSH reachable on port 22. Run it from a machine that can query the peer's
+MagicDNS name:
+
+```sh
+FLEET_TAILSCALE_TEST_PEER=member.example.ts.net \
+  cargo test --test tailscale_integration -- --ignored --nocapture
+```
+
 ## Local installer check
 
 ```sh

@@ -1,5 +1,6 @@
 use crate::cli::{
-    Cli, Color, Command, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool, UsageArgs,
+    Cli, Color, Command, ConnectArgs, InitArgs, JoinArgs, LeaveArgs, RemoveArgs, RestartArgs, Tool,
+    UsageArgs,
 };
 use crate::discovery::{CaptainAdvertisement, CaptainConnection, DEFAULT_PORT};
 use crate::identity;
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::process::Command as ProcessCommand;
 use std::sync::{
     Arc,
@@ -38,9 +39,78 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Restart(args) => restart(&paths, args),
         Command::Update => update(&paths),
         Command::UpdateAll => update_all(&paths),
+        Command::Connect(args) => connect(&paths, args),
         Command::Usage(args) => usage(&paths, args),
         Command::Daemon(args) => service::run(&paths, &args.listen),
+        Command::NetworkHint(args) => network_hint(&paths, args.json),
+        Command::Transport(args) => match args.command {
+            crate::cli::TransportCommand::Connect(args) => {
+                crate::ssh_client::transport_connect(&paths, args.member, args.via)
+            }
+        },
     }
+}
+
+fn network_hint(paths: &StatePaths, json: bool) -> Result<()> {
+    debug_assert!(json, "clap requires --json for network-hint");
+    let config = paths.require()?;
+    let report = crate::network_hint::inspect(config.machine.id)?;
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn connect(paths: &StatePaths, args: ConnectArgs) -> Result<()> {
+    let config = paths.require()?;
+    if config.role != Role::Captain {
+        bail!("only the captain can connect to Fleet members");
+    }
+    let query = args.member.trim_end_matches(".local");
+    let member = skill::load_members(paths)?
+        .into_iter()
+        .find(|member| member.name == query || member.id.to_string() == query)
+        .with_context(|| format!("no member named {query} is registered"))?;
+    let executable = std::env::current_exe().context("locate Fleet executable")?;
+    let proxy = crate::ssh_client::proxy_command(&executable, member.id, args.via)?;
+    let connect_timeout = format!(
+        "ConnectTimeout={}",
+        crate::ssh_client::PROXY_CONNECT_TIMEOUT_SECS
+    );
+    let mut command = ProcessCommand::new("ssh");
+    command.args([
+        "-o",
+        "Port=22",
+        "-o",
+        &connect_timeout,
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        &format!("User={}", member.ssh_user),
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "BatchMode=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        &format!(
+            "IdentityFile={}",
+            paths.identity_dir().join("id_ed25519").display()
+        ),
+        "-o",
+        &format!("UserKnownHostsFile={}", paths.known_hosts().display()),
+        "-o",
+        &format!("ProxyCommand={proxy}"),
+        &member.host(),
+    ]);
+    let status = command.status().context("start SSH connection")?;
+    if !status.success() {
+        bail!("SSH exited with {status}");
+    }
+    Ok(())
 }
 
 const REMOTE_USAGE_COMMAND: &str = r#"
@@ -625,6 +695,11 @@ fn update_all(paths: &StatePaths) -> Result<()> {
         members.len() + 1
     );
     let failures = update_members_with(&members, update_member);
+    for member in &members {
+        if !failures.iter().any(|host| host == &member.host()) {
+            let _ = crate::ssh_client::refresh_mapping(paths, member);
+        }
+    }
 
     println!("Updating {} (captain)...", config.machine.host());
     let captain_result = update(paths);
@@ -694,6 +769,9 @@ fn update(paths: &StatePaths) -> Result<()> {
                 .load()?
                 .is_some_and(|config| config.role == Role::Captain)
             {
+                // Keep the local ProxyCommand pointing at the installed
+                // executable when an updater changes its path.
+                crate::ssh_client::regenerate(paths)?;
                 Platform::new(false)?.restart_captain_service()?;
                 println!("Restarted the Fleet captain service.");
             }
@@ -1104,17 +1182,26 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
         return Ok(());
     }
     let config = paths.require()?;
+    let members = if config.role == Role::Captain {
+        skill::load_members(paths)?
+    } else {
+        vec![]
+    };
     if json {
-        let members = if config.role == Role::Captain {
-            skill::load_members(paths)?
-        } else {
-            vec![]
-        };
         let health = check.then(|| {
             if config.role == Role::Captain {
                 members
                     .iter()
-                    .map(|member| (member.host(), reachability(&member.host())))
+                    .map(|member| {
+                        let health = crate::ssh_client::probe_transport(
+                            paths,
+                            member.id,
+                            crate::cli::TransportRoute::Auto,
+                        )
+                        .map(|_| "reachable")
+                        .unwrap_or("unreachable");
+                        (member.host(), health)
+                    })
                     .collect::<std::collections::BTreeMap<_, _>>()
             } else {
                 config
@@ -1143,7 +1230,6 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
     }
     match config.role {
         Role::Captain => {
-            let members = skill::load_members(paths)?;
             let width = terminal_width();
             let colors = io::stdout().is_terminal();
             println!("CAPTAIN");
@@ -1159,7 +1245,15 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
                 let rows = members
                     .into_iter()
                     .map(|member| {
-                        let health = check.then(|| reachability(&member.host()));
+                        let health = check.then(|| {
+                            crate::ssh_client::probe_transport(
+                                paths,
+                                member.id,
+                                crate::cli::TransportRoute::Auto,
+                            )
+                            .map(|_| "reachable")
+                            .unwrap_or("unreachable")
+                        });
                         (member, health)
                     })
                     .collect::<Vec<_>>();
@@ -1249,6 +1343,7 @@ fn leave(paths: &StatePaths, args: LeaveArgs) -> Result<()> {
             platform.stop_captain_service()?;
             skill::uninstall(paths)?;
             crate::ssh_client::uninstall(paths)?;
+            let _ = fs::remove_file(paths.root.join("tailscale.toml"));
             if paths.inventory_dir().exists() {
                 fs::remove_dir_all(paths.inventory_dir()).context("remove captain inventory")?;
             }
@@ -1289,6 +1384,7 @@ fn remove(paths: &StatePaths, args: RemoveArgs) -> Result<()> {
         return Ok(());
     }
     skill::remove_member(paths, member.id)?;
+    crate::tailscale::remove_mapping(paths, member.id)?;
     crate::ssh_client::regenerate(paths)?;
     println!(
         "Removed {}.local from the captain inventory. The member machine was not changed; run `fleet leave` there to revoke captain access.",
@@ -1347,7 +1443,19 @@ fn doctor(paths: &StatePaths) -> Result<()> {
             let members = skill::load_members(paths)?;
             println!("  ✓ Captain inventory contains {} member(s)", members.len());
             for member in members {
-                println!("  {} {}", reachability(&member.host()), member.host());
+                let health = crate::ssh_client::probe_transport(
+                    paths,
+                    member.id,
+                    crate::cli::TransportRoute::Auto,
+                )
+                .map(|_| "online")
+                .unwrap_or("unreachable");
+                println!("  {health} {}", member.host());
+                match crate::tailscale::mapped_peer(paths, member.id) {
+                    Ok(Some(peer)) => println!("    Tailscale mapping: {peer}"),
+                    Ok(None) => println!("    Tailscale mapping: LAN-only/pending"),
+                    Err(error) => println!("    Tailscale mapping: unavailable ({error:#})"),
+                }
             }
         }
         Role::Member => {
@@ -1359,20 +1467,6 @@ fn doctor(paths: &StatePaths) -> Result<()> {
     }
     println!("Detailed diagnostics: `fleet logs`");
     Ok(())
-}
-
-fn reachability(host: &str) -> &'static str {
-    let address = format!("{host}:22");
-    let reachable = address
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addresses| {
-            addresses.find(|address| {
-                TcpStream::connect_timeout(address, Duration::from_millis(700)).is_ok()
-            })
-        })
-        .is_some();
-    if reachable { "online" } else { "unreachable" }
 }
 
 fn captain_health(captain: &crate::state::CaptainRef) -> &'static str {
