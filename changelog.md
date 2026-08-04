@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.3 — 2026-08-04
+
+### SSH proxy ordering
+
+- Forward OpenSSH client bytes before waiting for the member's initial SSH
+  preface, preventing a client/server identification deadlock.
+- Flush binary SSH packet chunks immediately through the ProxyCommand pipe, so
+  encrypted negotiation data cannot remain buffered behind the initial banner.
+- Exit a stalled ProxyCommand without waiting for an open terminal stdin.
+
 ## 0.7.2 — 2026-08-04
 
 ### SSH transport liveness

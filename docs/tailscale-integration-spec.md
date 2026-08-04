@@ -232,11 +232,12 @@ For `ssh emerald.local`:
 3. Accept a resolved LAN address only when OS route/interface evidence says it is directly connected/on-link with no gateway on an eligible UP, non-loopback, non-Tailscale interface. Reject loopback, unspecified, multicast, Tailscale ranges, and routed candidates. Preserve IPv6 scope/interface IDs.
 4. If LAN TCP has not connected at `t=150 ms`, resolve the mapped peer through the local Tailscale adapter and begin Tailnet IP dials.
 5. Once Tailnet attempts begin, the first TCP connection to succeed wins. LAN has a head start, not an absolute preference.
-6. Bound all resolver, dial, adapter, and initial server-preface work by the
-   helper deadline; close the selected socket's losers when the helper exits.
+6. Start forwarding stdin immediately; bound all resolver, dial, adapter, and
+   initial server-preface work by the helper deadline; close the selected
+   socket's losers when the helper exits.
 7. Replay the selected socket's initial newline-terminated preface unchanged,
-   then copy stdin to the socket and the socket to stdout without interpreting
-   SSH data.
+   then continue copying stdin to the socket and the socket to stdout without
+   interpreting SSH data.
 8. On stdin EOF, half-close the TCP write side and continue copying server output until remote EOF.
 9. Send diagnostics only to stderr; stdout is exclusively the SSH byte stream.
 10. Respect an internal deadline shorter than the generated OpenSSH `ConnectTimeout`.

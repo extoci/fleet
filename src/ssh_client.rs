@@ -394,34 +394,83 @@ fn connect_addresses(addresses: Vec<SocketAddr>, timeout: Duration) -> Result<Tc
     )
 }
 
-fn proxy_stdio(mut stream: TcpStream, timeout: Duration) -> Result<()> {
+fn proxy_stdio(stream: TcpStream, timeout: Duration) -> Result<()> {
+    proxy_stdio_with_io(stream, timeout, io::stdin(), io::stdout())
+}
+
+fn proxy_stdio_with_io<R, W>(
+    mut stream: TcpStream,
+    timeout: Duration,
+    mut input: R,
+    mut output: W,
+) -> Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    // Start forwarding the client's identification immediately. SSH permits
+    // the client to speak first, and waiting for the server before draining
+    // ProxyCommand stdin can deadlock with a server that waits for it.
+    let mut upload = stream.try_clone().context("clone SSH transport socket")?;
+    let upload_thread = std::thread::spawn(move || -> io::Result<()> {
+        io::copy(&mut input, &mut upload)?;
+        upload.shutdown(Shutdown::Write)
+    });
+
     // A successful TCP connect is not enough to make a usable SSH route. In
     // particular, a stale LAN endpoint or a partially reachable Tailscale
     // path can accept the socket and then never send the SSH identification
     // line. Prefetch that initial line with a short deadline, then replay it
     // unchanged so OpenSSH remains responsible for all SSH protocol handling.
-    let preface = prefetch_transport_preface(&mut stream, timeout.min(PROXY_PREFACE_TIMEOUT))?;
-    io::stdout()
+    let preface = match prefetch_transport_preface(&mut stream, timeout.min(PROXY_PREFACE_TIMEOUT))
+    {
+        Ok(preface) => preface,
+        Err(error) => {
+            // The helper is a short-lived ProxyCommand process. Dropping the
+            // upload handle lets it exit immediately rather than waiting on a
+            // terminal that may still be open after OpenSSH gives up.
+            let _ = stream.shutdown(Shutdown::Both);
+            drop(upload_thread);
+            return Err(error);
+        }
+    };
+    output
         .write_all(&preface)
         .context("write SSH transport preface")?;
-    io::stdout()
-        .flush()
-        .context("flush SSH transport preface")?;
+    output.flush().context("flush SSH transport preface")?;
 
-    let mut upload = stream.try_clone().context("clone SSH transport socket")?;
-    let upload_thread = std::thread::spawn(move || -> io::Result<()> {
-        io::copy(&mut io::stdin(), &mut upload)?;
-        upload.shutdown(Shutdown::Write)
-    });
+    if let Err(error) = forward_socket_to_output(&mut stream, &mut output) {
+        let _ = stream.shutdown(Shutdown::Both);
+        drop(upload_thread);
+        return Err(error).context("read SSH transport");
+    }
 
-    let download_result = io::copy(&mut stream, &mut io::stdout()).context("read SSH transport");
-    let upload_result = upload_thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("SSH stdin forwarding thread panicked"))?
-        .context("forward SSH stdin");
-    download_result?;
-    upload_result?;
+    // OpenSSH may keep the ProxyCommand stdin pipe open while it is shutting
+    // down. The remote EOF is authoritative here: waiting for the upload
+    // thread would reintroduce a proxy/SSH shutdown deadlock. A live helper is
+    // about to exit, so an unfinished upload thread is intentionally detached.
+    if upload_thread.is_finished() {
+        upload_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("SSH stdin forwarding thread panicked"))?
+            .context("forward SSH stdin")?;
+    }
     Ok(())
+}
+
+fn forward_socket_to_output(stream: &mut TcpStream, output: &mut impl Write) -> io::Result<()> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(());
+        }
+        output.write_all(&buffer[..count])?;
+        // ProxyCommand stdout is a pipe, but Rust's stdout handle can still
+        // line-buffer writes. SSH packets are binary and need to reach
+        // OpenSSH immediately; waiting for a newline deadlocks key exchange.
+        output.flush()?;
+    }
 }
 
 fn prefetch_transport_preface(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>> {
@@ -648,6 +697,76 @@ mod tests {
     }
 
     #[test]
+    fn proxy_forwards_client_bytes_before_waiting_for_server_preface() {
+        use std::io::Cursor;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut client_preface = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                client_preface.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            assert_eq!(client_preface, b"SSH-2.0-client\r\n");
+            stream
+                .write_all(b"SSH-2.0-server\r\nserver payload")
+                .unwrap();
+        });
+        let client = TcpStream::connect(address).unwrap();
+        let mut output = Vec::new();
+
+        proxy_stdio_with_io(
+            client,
+            Duration::from_secs(1),
+            Cursor::new(b"SSH-2.0-client\r\n".to_vec()),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"SSH-2.0-server\r\nserver payload");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn proxy_flushes_binary_transport_chunks() {
+        use std::io::Cursor;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"SSH-2.0-server\r\n\x00\x05\xff\x80binary")
+                .unwrap();
+            stream.shutdown(Shutdown::Both).unwrap();
+        });
+        let client = TcpStream::connect(address).unwrap();
+        let mut output = FlushTrackingWriter::default();
+
+        proxy_stdio_with_io(
+            client,
+            Duration::from_secs(1),
+            Cursor::new(Vec::new()),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output.flushed, b"SSH-2.0-server\r\n\x00\x05\xff\x80binary");
+        assert!(output.flushes >= 2);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn transport_preface_timeout_rejects_a_silent_socket() {
         use std::net::TcpListener;
         use std::thread;
@@ -665,5 +784,107 @@ mod tests {
             .to_string();
         assert!(error.contains("read SSH transport preface"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn proxy_timeout_does_not_wait_for_an_open_stdin() {
+        use std::net::TcpListener;
+        use std::sync::mpsc::channel;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(250));
+        });
+        let client = TcpStream::connect(address).unwrap();
+        let (release_sender, release_receiver) = channel();
+        let started = std::time::Instant::now();
+
+        let error = proxy_stdio_with_io(
+            client,
+            Duration::from_millis(25),
+            BlockingInput {
+                release: release_receiver,
+            },
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        release_sender.send(()).unwrap();
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(error.contains("SSH transport preface"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn proxy_remote_eof_does_not_wait_for_an_open_stdin() {
+        use std::net::TcpListener;
+        use std::sync::mpsc::channel;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"SSH-2.0-server\r\nserver payload")
+                .unwrap();
+            stream.shutdown(Shutdown::Both).unwrap();
+        });
+        let client = TcpStream::connect(address).unwrap();
+        let (release_sender, release_receiver) = channel();
+        let started = std::time::Instant::now();
+
+        let mut output = Vec::new();
+        proxy_stdio_with_io(
+            client,
+            Duration::from_secs(1),
+            BlockingInput {
+                release: release_receiver,
+            },
+            &mut output,
+        )
+        .unwrap();
+        release_sender.send(()).unwrap();
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(output, b"SSH-2.0-server\r\nserver payload");
+        server.join().unwrap();
+    }
+
+    struct BlockingInput {
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    #[derive(Default)]
+    struct FlushTrackingWriter {
+        pending: Vec<u8>,
+        flushed: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for FlushTrackingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.pending.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushed.append(&mut self.pending);
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    impl Read for BlockingInput {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.release
+                .recv()
+                .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "test released"))?;
+            Ok(0)
+        }
     }
 }
