@@ -47,6 +47,8 @@ that ssh connection opens or reattaches to a tmux session named `fleet`, so clos
 
 the machines get different terminal colors so you can easily tell where you're connected, at a glance.
 
+the bottom-right of the Fleet tmux status bar shows the current whole-machine CPU and memory percentages. The values refresh every few seconds and fall back quietly if the operating system cannot provide a reading.
+
 view a fleet-wide coding-agent usage summary, or include the full daily table:
 
 ```sh
@@ -75,6 +77,8 @@ interactive ssh enters the persistent tmux session by default. bypass it once wi
 ```sh
 ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'
 ```
+
+`fleet doctor --repair` refreshes Fleet-owned shell and tmux files after an interrupted update.
 
 ## trust and privacy
 

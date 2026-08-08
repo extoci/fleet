@@ -37,6 +37,11 @@ if [ -z "$INSTALL_DIR" ]; then
   esac
 fi
 
+previous_version=""
+if [ -x "$INSTALL_DIR/fleet" ]; then
+  previous_version="$("$INSTALL_DIR/fleet" --version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
+fi
+
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) target="aarch64-apple-darwin" ;;
   Darwin:x86_64) target="x86_64-apple-darwin" ;;
@@ -94,6 +99,21 @@ installing="$INSTALL_DIR/.fleet.install.$$"
 install -m 755 "$source_binary" "$installing"
 mv "$installing" "$INSTALL_DIR/fleet"
 installing=""
+
+handoff_output=""
+handoff_status=0
+handoff_output="$("$INSTALL_DIR/fleet" __complete-update --from "${previous_version:-0.0.0}" 2>&1)" || handoff_status=$?
+if [ "$handoff_status" -ne 0 ]; then
+  case "$handoff_output" in
+    *"unrecognized subcommand"*|*"unrecognized subcommand '__complete-update'"*)
+      printf 'Installed Fleet without managed-setup handoff (this release predates it).\n' >&2
+      ;;
+    *)
+      printf '%s\n' "$handoff_output" >&2
+      fail "Fleet was installed, but managed setup could not be refreshed"
+      ;;
+  esac
+fi
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

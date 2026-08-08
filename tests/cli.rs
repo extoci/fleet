@@ -2,6 +2,9 @@ use assert_cmd::Command;
 use fleet::cli::Color;
 use fleet::state::{LocalConfig, Machine, Role, STATE_VERSION, StatePaths};
 use predicates::prelude::*;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -87,6 +90,92 @@ fn network_hint_emits_a_stable_empty_schema_without_tailscale() {
         .stdout(predicate::eq(format!(
             "{{\"version\":1,\"machineId\":\"{machine_id}\",\"tailscale\":null}}\n"
         )));
+}
+
+#[test]
+fn tmux_metrics_emits_a_compact_status_segment() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .arg("tmux-metrics")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(" · CPU "))
+        .stdout(predicate::str::contains(" · MEM "))
+        .stdout(predicate::str::ends_with("%"));
+}
+
+#[test]
+fn ordinary_commands_reconcile_stale_tmux_setup() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+
+    test_command(&home).arg("status").assert().success();
+
+    let rendered = std::fs::read_to_string(paths.shell_dir().join("tmux.conf")).unwrap();
+    let helper = std::fs::read_to_string(paths.shell_dir().join("tmux-metrics")).unwrap();
+    assert!(rendered.contains("status-interval 5"));
+    assert!(rendered.contains("tmux-metrics"));
+    assert!(helper.contains("tmux-metrics"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_commands_reload_an_active_tmux_server_when_files_are_unchanged() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let log = home.path().join("tmux.log");
+    let fake_tmux = bin.join("tmux");
+    fs::write(
+        &fake_tmux,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\ncase \"$1\" in\n  list-sessions) exit 0 ;;\n  source-file) exit 0 ;;\nesac\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_tmux, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run_status = || {
+        test_command(&home)
+            .env("PATH", &bin)
+            .env("TMUX_LOG", &log)
+            .arg("status")
+            .assert()
+            .success();
+    };
+
+    run_status();
+    fs::write(&log, "").unwrap();
+    run_status();
+
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.starts_with("source-file ") && call.ends_with("tmux.conf")),
+        "Fleet did not reload the active tmux server:\n{calls}"
+    );
+}
+
+#[test]
+fn update_handoff_skips_managed_migrations_on_downgrade() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+
+    test_command(&home)
+        .args(["__complete-update", "--from", "999.0.0"])
+        .assert()
+        .success();
+    assert!(!paths.shell_dir().exists());
 }
 
 #[test]

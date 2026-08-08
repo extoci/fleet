@@ -35,7 +35,7 @@ pub enum Command {
     /// Remove a member from this captain's inventory.
     Remove(RemoveArgs),
     /// Check Fleet's local setup and network health.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Show detailed Fleet diagnostic logs.
     Logs(LogsArgs),
     /// Restart the captain background service.
@@ -52,6 +52,12 @@ pub enum Command {
     /// Run the captain registration service.
     #[command(hide = true)]
     Daemon(DaemonArgs),
+    /// Complete an update in the newly installed process.
+    #[command(name = "__complete-update", hide = true)]
+    CompleteUpdate(CompleteUpdateArgs),
+    /// Render the tmux CPU and memory status segment.
+    #[command(name = "tmux-metrics", hide = true)]
+    TmuxMetrics,
     /// Emit local network correlation metadata for another Fleet machine.
     #[command(name = "network-hint", hide = true)]
     NetworkHint(NetworkHintArgs),
@@ -151,6 +157,20 @@ pub struct RestartArgs {
     /// Print the restart command without running it.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Repair Fleet-owned generated terminal files.
+    #[arg(long)]
+    pub repair: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CompleteUpdateArgs {
+    /// Version of the binary that performed the replacement.
+    #[arg(long)]
+    pub from: String,
 }
 
 #[derive(Debug, Args)]

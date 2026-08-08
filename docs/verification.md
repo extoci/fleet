@@ -57,6 +57,11 @@ Copy the working tree or release binary into each VM. Confirm both VMs share a n
 - [x] `ssh member.local -- true` succeeds without tmux output.
 - [x] `scp` and `sftp` continue to work.
 - [x] Interactive SSH attaches to the themed `fleet` tmux session.
+- [ ] The tmux status bar shows bounded `CPU n% · MEM n%` values and refreshes
+  without blocking pane interaction.
+- [ ] A Fleet binary update runs the managed terminal reconciliation in the
+  newly installed process, and `fleet doctor --repair` recovers an interrupted
+  handoff.
 - [x] A process survives disconnect/reconnect.
 - [x] The captain inventory and `~/.agents/skills/fleet` update.
 - [x] `fleet leave` removes only Fleet trust and inventory membership.

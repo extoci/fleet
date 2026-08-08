@@ -322,6 +322,14 @@ The selected machine color MUST be visible in both the shell prompt and tmux sta
 
 The theme MUST preserve readable contrast in common light and dark terminals and SHOULD degrade safely when advanced color support is unavailable.
 
+### 12.4 Resource meters
+
+Fleet SHOULD render whole-machine CPU and physical-memory utilization in the right side of the tmux status line using the compact labels `CPU` and `MEM`.
+
+The meters MUST be derived locally on the machine hosting the tmux server, MUST refresh without blocking pane interaction, and MUST remain bounded to 0–100 percent. A missing or temporarily unavailable reading MUST degrade to a placeholder or the static clock without breaking tmux startup.
+
+Fleet-owned tmux files MUST converge idempotently after a binary update. Updating Fleet MUST run the reconciliation in the newly installed process before reporting success when the updater supports post-update handoff. Reconciliation MUST NOT change the Fleet membership-state schema.
+
 ## 13. Fleet skill
 
 ### 13.1 Location

@@ -7,10 +7,12 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tar::Archive;
 
 const DEFAULT_REPOSITORY: &str = "extoci/fleet";
+const POST_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UpdateOutcome {
@@ -53,6 +55,7 @@ pub fn update() -> Result<UpdateOutcome> {
 
     let destination = update_destination()?;
     replace_binary(&source, &destination)?;
+    complete_update(&destination, env!("CARGO_PKG_VERSION"))?;
     Ok(UpdateOutcome::Updated { version })
 }
 
@@ -175,6 +178,51 @@ fn replace_binary(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn complete_update(destination: &Path, previous_version: &str) -> Result<()> {
+    let mut child = Command::new(destination)
+        .args(["__complete-update", "--from", previous_version])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "start the newly installed Fleet binary at {}",
+                destination.display()
+            )
+        })?;
+    let deadline = Instant::now() + POST_UPDATE_TIMEOUT;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "Fleet updated, but managed setup finalization timed out; run `fleet doctor --repair`"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child
+        .wait_with_output()
+        .context("collect managed setup finalization output")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    bail!(
+        "Fleet updated, but managed setup finalization failed{}; run `fleet doctor --repair`",
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +267,25 @@ mod tests {
                 0o755
             );
         }
+    }
+
+    #[test]
+    fn post_update_hook_reports_new_binary_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("fleet");
+        fs::write(&destination, b"#!/bin/sh\necho boom >&2\nexit 7\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let error = complete_update(&destination, "0.7.4").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("managed setup finalization failed")
+        );
+        assert!(error.to_string().contains("doctor --repair"));
     }
 }

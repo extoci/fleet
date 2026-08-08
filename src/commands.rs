@@ -10,6 +10,7 @@ use crate::skill;
 use crate::state::{
     LocalConfig, Machine, Role, STATE_VERSION, StatePaths, ToolState, validate_machine_name,
 };
+use crate::system_metrics;
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
@@ -28,13 +29,24 @@ use uuid::Uuid;
 
 pub fn run(cli: Cli) -> Result<()> {
     let paths = StatePaths::discover()?;
+    let skip_startup_reconcile = matches!(
+        &cli.command,
+        Command::Init(_)
+            | Command::Join(_)
+            | Command::Doctor(_)
+            | Command::CompleteUpdate(_)
+            | Command::TmuxMetrics
+    );
+    if !skip_startup_reconcile {
+        reconcile_at_startup(&paths);
+    }
     match cli.command {
         Command::Init(args) => init(&paths, args),
         Command::Join(args) => join(&paths, args),
         Command::Status(args) => status(&paths, args.json, args.check || args.watch, args.watch),
         Command::Leave(args) => leave(&paths, args),
         Command::Remove(args) => remove(&paths, args),
-        Command::Doctor => doctor(&paths),
+        Command::Doctor(args) => doctor(&paths, args.repair),
         Command::Logs(args) => logs(&paths, args.lines),
         Command::Restart(args) => restart(&paths, args),
         Command::Update => update(&paths),
@@ -42,6 +54,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Connect(args) => connect(&paths, args),
         Command::Usage(args) => usage(&paths, args),
         Command::Daemon(args) => service::run(&paths, &args.listen),
+        Command::CompleteUpdate(args) => complete_update(&paths, &args.from),
+        Command::TmuxMetrics => {
+            print!("{}", system_metrics::render_status_segment());
+            Ok(())
+        }
         Command::NetworkHint(args) => network_hint(&paths, args.json),
         Command::Transport(args) => match args.command {
             crate::cli::TransportCommand::Connect(args) => {
@@ -49,6 +66,45 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
     }
+}
+
+fn reconcile_at_startup(paths: &StatePaths) {
+    let Some(config) = (match paths.load() {
+        Ok(config) => config,
+        Err(error) => {
+            crate::logging::detail(paths, "terminal-reconcile", format!("{error:#}"));
+            return;
+        }
+    }) else {
+        return;
+    };
+    if let Err(error) = reconcile_terminal_setup(paths, &config) {
+        crate::logging::detail(paths, "terminal-reconcile", format!("{error:#}"));
+        eprintln!(
+            "Warning: Fleet could not refresh its tmux setup; run `fleet doctor --repair` ({error:#})"
+        );
+    }
+}
+
+fn reconcile_terminal_setup(paths: &StatePaths, config: &LocalConfig) -> Result<()> {
+    Platform::new(false)?.install_tmux_theme(paths, &config.machine.name, config.machine.color)
+}
+
+fn complete_update(paths: &StatePaths, from: &str) -> Result<()> {
+    // The source version is deliberately part of the handoff interface. It
+    // lets future migrations remain ordered and prevents an older binary from
+    // rewriting a newer managed setup during an intentional downgrade.
+    let previous_version = semver::Version::parse(from)
+        .with_context(|| format!("the previous Fleet version is invalid: {from}"))?;
+    let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("parse the current Fleet version")?;
+    if previous_version > current_version {
+        return Ok(());
+    }
+    let Some(config) = paths.load()? else {
+        return Ok(());
+    };
+    reconcile_terminal_setup(paths, &config)
 }
 
 fn network_hint(paths: &StatePaths, json: bool) -> Result<()> {
@@ -798,6 +854,9 @@ fn update(paths: &StatePaths) -> Result<()> {
     match crate::updater::update()? {
         crate::updater::UpdateOutcome::Current { version } => {
             println!("Fleet {version} is already up to date.");
+            if let Some(config) = paths.load()? {
+                reconcile_terminal_setup(paths, &config)?;
+            }
             if paths
                 .load()?
                 .is_some_and(|config| config.role == Role::Captain)
@@ -1465,7 +1524,7 @@ fn logs(paths: &StatePaths, lines: usize) -> Result<()> {
     Ok(())
 }
 
-fn doctor(paths: &StatePaths) -> Result<()> {
+fn doctor(paths: &StatePaths, repair: bool) -> Result<()> {
     println!("Fleet doctor");
     let config = match paths.load() {
         Ok(Some(config)) => {
@@ -1481,6 +1540,10 @@ fn doctor(paths: &StatePaths) -> Result<()> {
             bail!("membership state is damaged. Run `fleet logs` for more information");
         }
     };
+    if repair {
+        reconcile_terminal_setup(paths, &config).context("repair Fleet-owned terminal setup")?;
+        println!("  ✓ Fleet-owned tmux setup refreshed");
+    }
     let identity_ok = paths.identity_dir().join("id_ed25519").is_file();
     println!("  {} Fleet identity", if identity_ok { "✓" } else { "!" });
     match config.role {

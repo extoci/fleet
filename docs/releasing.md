@@ -76,8 +76,10 @@ changes. A failed build therefore cannot produce a partial release.
 
 On v0.4.0 and newer, `fleet update` downloads the latest native archive,
 verifies its checksum, atomically replaces the current executable, and restarts
-the captain service when necessary. Older installations must rerun the installer
-once to gain self-update support.
+the captain service when necessary. Newer updater builds then launch the newly
+installed binary once to reconcile Fleet-owned generated files before reporting
+success. `fleet doctor --repair` retries that local reconciliation if an update
+is interrupted.
 
 From a captain, `fleet update-all` (also available as `fleet updateall`) updates
 each registered member over Fleet's pinned SSH connection, then updates the
@@ -91,6 +93,11 @@ or roll back to an exact release:
 ```sh
 curl -fsSL https://extoci.lol/fleet | FLEET_VERSION=v0.3.0 bash
 ```
+
+The installer runs the same post-install handoff when the target release
+supports it. When deliberately installing an older release, it recognizes the
+missing handoff command and leaves the existing generated terminal setup
+untouched.
 
 Releases and tags should be treated as immutable. If a release is bad, publish a
 new patch version rather than replacing its assets. GitHub's `latest` URL, and

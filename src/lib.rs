@@ -11,5 +11,6 @@ pub mod service;
 pub mod skill;
 pub mod ssh_client;
 pub mod state;
+mod system_metrics;
 pub mod tailscale;
 pub mod updater;

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.5 — 2026-08-08
+
+### tmux resource meters and managed-setup handoff
+
+- Show live whole-machine CPU and memory percentages in the bottom-right tmux
+  status bar, while preserving the existing clock and Fleet color contrast.
+- Reconcile Fleet-owned tmux files idempotently and add `fleet doctor --repair`
+  for local recovery.
+- Complete supported updates in the newly installed Fleet process so generated
+  terminal setup changes are applied before an update reports success.
+- Reload the active tmux server during reconciliation even when generated files
+  are unchanged, preventing stale machine names and colors from surviving in
+  long-lived tmux sessions.
+
 ## 0.7.4 — 2026-08-04
 
 ### Cross-platform SSH preface deadline
