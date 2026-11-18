@@ -52,6 +52,7 @@ export class Runtime {
     this.apps = new Map();
     this.closed = false;
     this.terminations = new Set();
+    this.revisionListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e) => this.log("daemon", e.message)),
       pollMs,
@@ -108,8 +109,10 @@ export class Runtime {
                       part.startsWith(".") ||
                       ["node_modules", "dist", "target"].includes(part),
                   )
-              )
+              ) {
                 state.dirty = true;
+                this.scheduleBuild(state);
+              }
             },
           );
           state.watcher.on("error", () => {
@@ -126,9 +129,33 @@ export class Runtime {
     for (const [id, app] of this.apps)
       if (!registered.some((a) => a.id === id)) {
         app.watcher?.close();
+        clearTimeout(app.rebuild);
         this.unload(app);
         this.apps.delete(id);
       }
+  }
+  // Build soon after an edit instead of waiting for the next tick. Editors
+  // emit several events per save, so wait for them to settle.
+  scheduleBuild(app) {
+    clearTimeout(app.rebuild);
+    app.rebuild = setTimeout(() => {
+      if (this.closed || !this.apps.has(app.id)) return;
+      if (app.building) {
+        app.building.then(
+          () => this.scheduleBuild(app),
+          () => this.scheduleBuild(app),
+        );
+        return;
+      }
+      this.build(app).catch((error) => {
+        app.buildError = error.message;
+      });
+    }, 50);
+    app.rebuild.unref?.();
+  }
+  onRevision(listener) {
+    this.revisionListeners.add(listener);
+    return () => this.revisionListeners.delete(listener);
   }
   find(name) {
     this.sync();
@@ -254,6 +281,7 @@ export class Runtime {
             force: true,
           });
         this.log(app.id, `Build ${stamp.slice(0, 8)} ready`);
+        for (const listener of this.revisionListeners) listener(app);
         return true;
       } catch (error) {
         if (app.revision !== stamp)
@@ -482,6 +510,7 @@ export class Runtime {
     clearInterval(this.timer);
     for (const app of this.apps.values()) {
       app.watcher?.close();
+      clearTimeout(app.rebuild);
       this.unload(app);
     }
     await Promise.allSettled(
