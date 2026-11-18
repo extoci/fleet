@@ -444,6 +444,14 @@ fn print_usage_report(report: &UsageReport, show_all: bool) {
 }
 
 fn print_usage_table(report: &UsageReport) {
+    let width = usage_table_width(
+        terminal_size::terminal_size().map(|(terminal_size::Width(width), _)| usize::from(width)),
+        std::env::var("COLUMNS").ok().as_deref(),
+    );
+    if width < 159 {
+        print!("{}", render_stacked_usage(report, width));
+        return;
+    }
     print_usage_border('┌', '┬', '┐');
     println!(
         "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
@@ -500,6 +508,87 @@ fn print_usage_table(report: &UsageReport) {
     print_usage_border('├', '┼', '┤');
     print_usage_row("TOTAL", "", "", "", &report.totals);
     print_usage_border('└', '┴', '┘');
+}
+
+fn usage_table_width(terminal: Option<usize>, columns: Option<&str>) -> usize {
+    terminal
+        .filter(|width| *width > 0)
+        .or_else(|| columns?.parse::<usize>().ok().filter(|width| *width > 0))
+        .unwrap_or(usize::MAX)
+}
+
+fn render_stacked_usage(report: &UsageReport, width: usize) -> String {
+    let mut output = String::new();
+    let mut row = |label: &str, value: String| {
+        let text = if label.is_empty() {
+            String::new()
+        } else {
+            format!("{label}: {value}")
+        };
+        let mut used = 0;
+        for character in text.chars() {
+            let size = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+            if used + size > width && used > 0 {
+                output.push('\n');
+                used = 0;
+            }
+            output.push(character);
+            used += size;
+        }
+        output.push('\n');
+    };
+    for machine in &report.machines {
+        row("Machine", format!("{}.local", machine.machine));
+        if let Some(totals) = &machine.totals {
+            if machine.daily.is_empty() {
+                row("Date", "—".into());
+                for (label, value) in usage_metric_rows(totals) {
+                    row(label, value);
+                }
+            }
+            for day in &machine.daily {
+                row("Date", day.period.clone());
+                row(
+                    "Agent",
+                    if day.agent.is_empty() {
+                        "—".into()
+                    } else {
+                        day.agent.clone()
+                    },
+                );
+                row("Models", day.models_used.join(", "));
+                for (label, value) in usage_metric_rows(&UsageTotals {
+                    input_tokens: day.input_tokens,
+                    output_tokens: day.output_tokens,
+                    cache_creation_tokens: day.cache_creation_tokens,
+                    cache_read_tokens: day.cache_read_tokens,
+                    total_tokens: day.total_tokens,
+                    total_cost: day.total_cost,
+                }) {
+                    row(label, value);
+                }
+                row("", String::new());
+            }
+        } else {
+            row("Usage", "unavailable".into());
+        }
+    }
+    row("TOTAL", String::new());
+    for (label, value) in usage_metric_rows(&report.totals) {
+        row(label, value);
+    }
+    output
+}
+
+fn usage_metric_rows(totals: &UsageTotals) -> [(&'static str, String); 6] {
+    [
+        ("Input", format_number(totals.input_tokens)),
+        ("Output", format_number(totals.output_tokens)),
+        ("Cache Create", format_number(totals.cache_creation_tokens)),
+        ("Cache Read", format_number(totals.cache_read_tokens)),
+        ("Total Tokens", format_number(totals.total_tokens)),
+        ("Cost (USD)", format!("${:.2}", totals.total_cost)),
+    ]
 }
 
 fn print_usage_summary(report: &UsageReport) {
@@ -2076,6 +2165,70 @@ mod tests {
                 .unwrap()
                 .contains("offline")
         );
+    }
+
+    #[test]
+    fn usage_table_width_prefers_terminal_then_columns_then_wide() {
+        assert_eq!(usage_table_width(Some(170), Some("80")), 170);
+        assert_eq!(usage_table_width(Some(80), Some("170")), 80);
+        assert_eq!(usage_table_width(None, Some("80")), 80);
+        assert_eq!(usage_table_width(Some(0), Some("159")), 159);
+        for columns in [None, Some("0"), Some("bad"), Some("-1")] {
+            assert_eq!(usage_table_width(None, columns), usize::MAX);
+        }
+    }
+
+    #[test]
+    fn stacked_usage_preserves_all_metrics_and_wraps_long_values() {
+        let usage: CcusageReport = serde_json::from_value(serde_json::json!({
+            "daily": [{"date":"2026-07-26", "agent":"Claude", "modelsUsed":["模型".repeat(80)],
+                "inputTokens":1234, "outputTokens":2345, "cacheCreationTokens":3456,
+                "cacheReadTokens":4567, "totalTokens":11602, "totalCost":12.34}]
+        }))
+        .unwrap();
+        let report = report_from_results(vec![("emerald".into(), Ok(usage))]);
+        for width in [24, 80, 158] {
+            let rendered = render_stacked_usage(&report, width);
+            assert!(
+                rendered
+                    .lines()
+                    .all(|line| UnicodeWidthStr::width(line) <= width)
+            );
+            for metric in [
+                "Machine: emerald.local",
+                "Date: 2026-07-26",
+                "Agent: Claude",
+                "Models:",
+                "Input: 1,234",
+                "Output: 2,345",
+                "Cache Create: 3,456",
+                "Cache Read: 4,567",
+                "Total Tokens: 11,602",
+                "Cost (USD): $12.34",
+                "TOTAL:",
+            ] {
+                assert!(rendered.contains(metric), "missing {metric}: {rendered}");
+            }
+            assert_eq!(rendered.matches('模').count(), 80);
+        }
+    }
+
+    #[test]
+    fn stacked_usage_handles_empty_daily_and_unavailable_machines() {
+        let report = report_from_results(vec![
+            ("empty".into(), Ok(CcusageReport::default())),
+            ("offline".into(), Err(anyhow::anyhow!("connection failed"))),
+        ]);
+        let rendered = render_stacked_usage(&report, 80);
+        assert!(rendered.contains("Date: —\nInput: 0"));
+        assert!(rendered.contains("Machine: offline.local\nUsage: unavailable"));
+        assert!(rendered.contains("Cost (USD): $0.00"));
+        assert!(
+            rendered
+                .lines()
+                .all(|line| UnicodeWidthStr::width(line) <= 80)
+        );
+        assert!(render_stacked_usage(&UsageReport::default(), 80).contains("TOTAL:"));
     }
 
     #[test]
