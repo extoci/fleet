@@ -407,12 +407,32 @@ fn join_dry_run_discovery_failure_does_not_write_logs() {
         .args(["join", "--captain", "http://[invalid", "--yes", "--dry-run"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("could not verify it"));
+        .stderr(predicate::str::contains("could not verify it"))
+        .stderr(predicate::str::contains(
+            "contact captain at http://[invalid",
+        ));
     assert!(
         !home.path().join(".fleet").exists(),
         "preview created Fleet state"
     );
     preview.stderr(predicate::str::contains("Run `fleet logs`").not());
+}
+
+#[test]
+fn uninitialized_dry_run_commands_do_not_write_logs() {
+    for args in [
+        vec!["leave", "--yes", "--dry-run"],
+        vec!["remove", "emerald", "--yes", "--dry-run"],
+        vec!["restart", "--dry-run"],
+    ] {
+        let home = TempDir::new().unwrap();
+        test_command(&home)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not in a fleet"));
+        assert!(!home.path().join(".fleet").exists());
+    }
 }
 
 #[test]
