@@ -344,6 +344,7 @@ export class Runtime {
         worker.on("message", (message) => {
           if (message.ready) {
             clearTimeout(timer);
+            app.lastUsed = Date.now();
             app.operations = message.operations;
             resolve();
           } else if (message.log) this.log(app.id, message.log);
@@ -465,6 +466,7 @@ export class Runtime {
         }
         if (
           app.worker &&
+          !app.warming &&
           !app.pending.size &&
           Date.now() - app.lastUsed > this.idleMs
         )

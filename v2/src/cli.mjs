@@ -224,7 +224,7 @@ async function main() {
     authority(home);
     leaf(home, "gate.fleet");
     write(path.join(home, "config.json"), config);
-    if (values.install) install(home, config);
+    if (values.install) await install(home, config);
     const dns =
       !values.local && config.mode !== "node"
         ? await ensureDNS(net.addresses.find((a) => a.includes(".")))

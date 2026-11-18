@@ -254,16 +254,21 @@ test("live builds retain the previous app on build failure and keep data across 
     adminPort: 0,
     noDns: true,
   });
-  t.after(() => restarted.close());
-  const again = await signin(restarted, ca);
-  const persisted = await request(
-    restarted,
-    ca,
-    "notes.fleet",
-    "/__fleet/api/queries/notes",
-    { ...again, method: "POST", data: "null" },
-  );
-  assert.equal(JSON.parse(persisted.text).value[0].text, "Survives edits");
+  // Close before the fixture removes its directory: Windows cannot delete an
+  // open SQLite file.
+  try {
+    const again = await signin(restarted, ca);
+    const persisted = await request(
+      restarted,
+      ca,
+      "notes.fleet",
+      "/__fleet/api/queries/notes",
+      { ...again, method: "POST", data: "null" },
+    );
+    assert.equal(JSON.parse(persisted.text).value[0].text, "Survives edits");
+  } finally {
+    await restarted.close();
+  }
 });
 
 test("scheduled work runs without a browser and an interrupted occurrence reuses its run ID", async (t) => {

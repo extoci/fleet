@@ -11,6 +11,75 @@ const cli = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 const helper = fileURLToPath(new URL("./port-helper.mjs", import.meta.url));
 const run = (exe, args, options = {}) =>
   execFileSync(exe, args, { timeout: 20_000, encoding: "utf8", ...options });
+// sudo and macOS trust changes wait for a password prompt, so allow a person
+// time to answer it.
+const sudo = (args, options = {}) =>
+  run("sudo", args, { stdio: "inherit", timeout: 600_000, ...options });
+const macHelper = "/Library/PrivilegedHelperTools/dev.fleet.v2";
+const macRootName = "Fleet private apps";
+export function nonSystemLibraries(otool) {
+  return otool
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(" (")[0])
+    .filter(
+      (library) =>
+        library &&
+        !library.startsWith("/usr/lib/") &&
+        !library.startsWith("/System/"),
+    );
+}
+export function keychainHashes(output) {
+  return [...output.matchAll(/^SHA-1 hash: ([0-9A-F]{40})$/gm)].map(
+    (match) => match[1],
+  );
+}
+const nodeHelp =
+  "Install Node.js from https://nodejs.org (or a standalone build from nvm or fnm), then run fleet setup --install with that Node.js.";
+function checkStandaloneNode() {
+  if (process.platform !== "darwin") return;
+  let libraries;
+  try {
+    libraries = nonSystemLibraries(run("otool", ["-L", process.execPath]));
+  } catch {
+    return;
+  }
+  if (libraries.length)
+    throw new Error(
+      `This Node.js (${process.execPath}) loads ${libraries.join(", ")}. Fleet's boot helper runs a private copy of Node.js and cannot use these libraries. Homebrew's Node.js is built this way. ${nodeHelp}`,
+    );
+}
+function checkInstalledNode(executable) {
+  let version;
+  try {
+    version = run(executable, ["--version"]).trim();
+  } catch (error) {
+    throw new Error(
+      `Fleet's boot helper cannot start its copy of Node.js (${executable}): ${String(error.stderr || error.message).trim()} ${nodeHelp}`,
+    );
+  }
+  if (version !== process.version)
+    throw new Error(
+      `Fleet's copy of Node.js reports ${version}, expected ${process.version}. ${nodeHelp}`,
+    );
+}
+function macResolverActive() {
+  try {
+    return /^\s*domain\s*:\s*fleet\s*$/m.test(run("scutil", ["--dns"]));
+  } catch {
+    return false;
+  }
+}
+async function refreshMacResolver() {
+  if (macResolverActive()) return;
+  // configd only notices /etc/resolver when the directory existed at its
+  // start. launchd restarts it right away.
+  try {
+    sudo(["killall", "configd"], { stdio: "ignore" });
+  } catch {}
+  for (let i = 0; i < 25 && !macResolverActive(); i++)
+    await new Promise((resolve) => setTimeout(resolve, 200));
+}
 const xml = (s) =>
   String(s).replace(
     /[<>&"']/g,
@@ -175,9 +244,7 @@ export function openBrowser(url) {
 }
 export function serviceFiles(home, config, platform = process.platform) {
   const destination =
-    platform === "darwin"
-      ? "/Library/PrivilegedHelperTools/dev.fleet.v2"
-      : "/usr/local/lib/fleet-v2";
+    platform === "darwin" ? macHelper : "/usr/local/lib/fleet-v2";
   const helperConfig = {
     uid: process.getuid?.(),
     gid: process.getgid?.(),
@@ -205,7 +272,7 @@ export function serviceFiles(home, config, platform = process.platform) {
     content: `[Unit]\nDescription=Fleet private apps\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n[Service]\nExecStart=${[executable, helperPath, configPath].map(systemd).join(" ")}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n[Install]\nWantedBy=multi-user.target\n`,
   };
 }
-export function install(home, config) {
+export async function install(home, config) {
   const pki = authority(home);
   if (config.mode === "node") {
     pki.certFile = path.join(home, "pki", "gateway-root.pem");
@@ -231,6 +298,7 @@ export function install(home, config) {
     throw new Error(
       "Run Fleet setup as your normal user. It uses sudo only to install the port helper.",
     );
+  checkStandaloneNode();
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-install-"));
   fs.chmodSync(staging, 0o700);
   try {
@@ -238,53 +306,38 @@ export function install(home, config) {
     write(path.join(staging, "service"), files.content);
     // Elevated code is copied to root-owned storage. The privileged listener
     // must not execute a Node binary or helper writable by the app owner.
-    run("sudo", ["install", "-d", "-m", "755", files.destination], {
-      stdio: "inherit",
-    });
+    sudo(["install", "-d", "-m", "755", files.destination]);
     for (const [source, destination, mode] of [
       [process.execPath, "node", "755"],
       [helper, "ports.mjs", "644"],
       [path.join(staging, "owner.json"), "owner.json", "600"],
     ])
-      run(
-        "sudo",
-        [
-          "install",
-          "-m",
-          mode,
-          source,
-          path.join(files.destination, destination),
-        ],
-        { stdio: "inherit" },
-      );
-    run(
-      "sudo",
-      ["install", "-m", "644", path.join(staging, "service"), files.file],
-      { stdio: "inherit" },
-    );
+      sudo([
+        "install",
+        "-m",
+        mode,
+        source,
+        path.join(files.destination, destination),
+      ]);
+    checkInstalledNode(path.join(files.destination, "node"));
+    sudo(["install", "-m", "644", path.join(staging, "service"), files.file]);
     if (process.platform === "darwin") {
-      run(
-        "sudo",
-        [
-          "security",
-          "add-trusted-cert",
-          "-d",
-          "-r",
-          "trustRoot",
-          "-k",
-          "/Library/Keychains/System.keychain",
-          pki.certFile,
-        ],
-        { stdio: "inherit" },
-      );
+      sudo([
+        "security",
+        "add-trusted-cert",
+        "-d",
+        "-r",
+        "trustRoot",
+        "-k",
+        "/Library/Keychains/System.keychain",
+        pki.certFile,
+      ]);
       try {
-        run("sudo", ["launchctl", "bootout", "system/dev.fleet.v2"], {
+        sudo(["launchctl", "bootout", "system/dev.fleet.v2"], {
           stdio: "ignore",
         });
       } catch {}
-      run("sudo", ["launchctl", "bootstrap", "system", files.file], {
-        stdio: "inherit",
-      });
+      sudo(["launchctl", "bootstrap", "system", files.file]);
       // macOS uses this suffix-specific file and keeps existing VPN/default DNS.
       const resolver = path.join(staging, "resolver");
       write(
@@ -298,33 +351,23 @@ export function install(home, config) {
           .startsWith("# Fleet v2\n")
       )
         throw new Error("/etc/resolver/fleet already belongs to another tool.");
-      run("sudo", ["mkdir", "-p", "/etc/resolver"], { stdio: "inherit" });
-      run("sudo", ["install", "-m", "644", resolver, "/etc/resolver/fleet"], {
-        stdio: "inherit",
-      });
+      sudo(["mkdir", "-p", "/etc/resolver"]);
+      sudo(["install", "-m", "644", resolver, "/etc/resolver/fleet"]);
+      await refreshMacResolver();
     } else {
       const rootCopy = "/usr/local/share/ca-certificates/fleet-v2.crt";
-      run("sudo", ["install", "-m", "644", pki.certFile, rootCopy], {
-        stdio: "inherit",
-      });
-      run("sudo", ["update-ca-certificates"], { stdio: "inherit" });
+      sudo(["install", "-m", "644", pki.certFile, rootCopy]);
+      sudo(["update-ca-certificates"]);
       try {
         run("certutil", ["-H"], { stdio: "ignore" });
       } catch (error) {
         if (error.code === "ENOENT")
-          run("sudo", ["apt-get", "install", "--yes", "libnss3-tools"], {
-            stdio: "inherit",
-            timeout: 120_000,
-          });
+          sudo(["apt-get", "install", "--yes", "libnss3-tools"]);
       }
       browserRoot(pki);
-      run("sudo", ["systemctl", "daemon-reload"], { stdio: "inherit" });
-      run("sudo", ["systemctl", "enable", "fleet-v2.service"], {
-        stdio: "inherit",
-      });
-      run("sudo", ["systemctl", "restart", "fleet-v2.service"], {
-        stdio: "inherit",
-      });
+      sudo(["systemctl", "daemon-reload"]);
+      sudo(["systemctl", "enable", "fleet-v2.service"]);
+      sudo(["systemctl", "restart", "fleet-v2.service"]);
       // Tailscale's tailnet split DNS supplies the suffix on Linux and Windows.
       // Do not replace resolv.conf or add a second manager for tailscale0.
     }
@@ -376,40 +419,45 @@ export function uninstall(home) {
   const files = serviceFiles(home, installedConfig);
   if (process.platform === "darwin") {
     try {
-      run("sudo", ["launchctl", "bootout", "system/dev.fleet.v2"], {
-        stdio: "inherit",
-      });
+      sudo(["launchctl", "bootout", "system/dev.fleet.v2"]);
     } catch {}
     if (
       fs.existsSync("/etc/resolver/fleet") &&
       fs.readFileSync("/etc/resolver/fleet", "utf8").startsWith("# Fleet v2\n")
     )
-      run("sudo", ["rm", "/etc/resolver/fleet"], { stdio: "inherit" });
-    run("sudo", ["security", "remove-trusted-cert", "-d", installedRoot], {
-      stdio: "inherit",
-    });
+      sudo(["rm", "/etc/resolver/fleet"]);
+    if (fs.existsSync(installedRoot))
+      try {
+        sudo(["security", "remove-trusted-cert", "-d", installedRoot]);
+      } catch {}
+    // Each setup adds a copy of the root; remove every copy Fleet created.
+    let found = "";
+    try {
+      found = run("security", [
+        "find-certificate",
+        "-a",
+        "-c",
+        macRootName,
+        "-Z",
+        "/Library/Keychains/System.keychain",
+      ]);
+    } catch {}
+    for (const hash of new Set(keychainHashes(found)))
+      sudo([
+        "security",
+        "delete-certificate",
+        "-Z",
+        hash,
+        "/Library/Keychains/System.keychain",
+      ]);
   } else {
     try {
-      run("sudo", ["systemctl", "disable", "--now", "fleet-v2.service"], {
-        stdio: "inherit",
-      });
+      sudo(["systemctl", "disable", "--now", "fleet-v2.service"]);
     } catch {}
-    run("sudo", ["rm", "-f", "/usr/local/share/ca-certificates/fleet-v2.crt"], {
-      stdio: "inherit",
-    });
-    run("sudo", ["update-ca-certificates"], { stdio: "inherit" });
+    sudo(["rm", "-f", "/usr/local/share/ca-certificates/fleet-v2.crt"]);
+    sudo(["update-ca-certificates"]);
     browserRoot({ certFile: installedRoot }, true);
   }
-  run("sudo", ["rm", "-f", files.file], { stdio: "inherit" });
-  run(
-    "sudo",
-    [
-      "rm",
-      "-f",
-      ...["node", "ports.mjs", "owner.json"].map((f) =>
-        path.join(files.destination, f),
-      ),
-    ],
-    { stdio: "inherit" },
-  );
+  sudo(["rm", "-f", files.file]);
+  sudo(["rm", "-rf", files.destination]);
 }
