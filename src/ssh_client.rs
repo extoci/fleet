@@ -1,6 +1,6 @@
 use crate::cli::TransportRoute;
 use crate::skill;
-use crate::state::{StatePaths, atomic_write};
+use crate::state::{Machine, StatePaths, atomic_write};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::fs;
@@ -153,9 +153,17 @@ pub fn probe_transport(paths: &StatePaths, member_id: Uuid, route: TransportRout
         .into_iter()
         .find(|member| member.id == member_id)
         .context("Fleet transport member is not in the captain inventory")?;
+    probe_member_transport(paths, &member, route)
+}
+
+pub(crate) fn probe_member_transport(
+    paths: &StatePaths,
+    member: &Machine,
+    route: TransportRoute,
+) -> Result<()> {
     let _stream = select_transport_with_timeout(
         paths,
-        member_id,
+        member.id,
         &member.host(),
         route,
         Duration::from_millis(700),
