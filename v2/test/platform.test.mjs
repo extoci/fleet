@@ -18,6 +18,23 @@ test("macOS setup finds Node.js libraries outside the system", () => {
 \t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.1.2)
 `;
   assert.deepEqual(nonSystemLibraries(official), []);
+  const universal = `/usr/local/bin/node (architecture x86_64):
+\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1971.0.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)
+/usr/local/bin/node (architecture arm64):
+\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1971.0.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)
+`;
+  assert.deepEqual(nonSystemLibraries(universal), []);
+  assert.deepEqual(
+    nonSystemLibraries(
+      universal.replaceAll(
+        "\t/usr/lib/libSystem",
+        "\t@rpath/libnode.137.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/libSystem",
+      ),
+    ),
+    ["@rpath/libnode.137.dylib"],
+  );
 });
 
 test("macOS uninstall reads every keychain copy of the Fleet root", () => {

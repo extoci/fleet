@@ -18,10 +18,12 @@ const prompted = (exe, args, options = {}) =>
 const sudo = (args, options = {}) => prompted("sudo", args, options);
 const macHelper = "/Library/PrivilegedHelperTools/dev.fleet.v2";
 const macRootName = "Fleet private apps";
+// otool -L prints one unindented header per architecture, each followed by
+// that slice's indented libraries.
 export function nonSystemLibraries(otool) {
-  return otool
+  const libraries = otool
     .split("\n")
-    .slice(1)
+    .filter((line) => /^\s/.test(line))
     .map((line) => line.trim().split(" (")[0])
     .filter(
       (library) =>
@@ -29,6 +31,7 @@ export function nonSystemLibraries(otool) {
         !library.startsWith("/usr/lib/") &&
         !library.startsWith("/System/"),
     );
+  return [...new Set(libraries)];
 }
 export function keychainHashes(output) {
   return [...output.matchAll(/^SHA-1 hash: ([0-9A-F]{40})$/gm)].map(
