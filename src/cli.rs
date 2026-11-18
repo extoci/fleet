@@ -66,6 +66,19 @@ pub enum Command {
     Transport(TransportArgs),
 }
 
+impl Command {
+    pub fn is_dry_run(&self) -> bool {
+        match self {
+            Self::Init(args) => args.dry_run,
+            Self::Join(args) => args.dry_run,
+            Self::Leave(args) => args.dry_run,
+            Self::Remove(args) => args.dry_run,
+            Self::Restart(args) => args.dry_run,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Real hostname to assign to this captain.

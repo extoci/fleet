@@ -37,7 +37,7 @@ pub fn run(cli: Cli) -> Result<()> {
             | Command::CompleteUpdate(_)
             | Command::TmuxMetrics
     );
-    if !skip_startup_reconcile {
+    if !skip_startup_reconcile && !cli.command.is_dry_run() {
         reconcile_at_startup(&paths);
     }
     match cli.command {
@@ -988,12 +988,12 @@ fn join(paths: &StatePaths, args: JoinArgs) -> Result<()> {
     platform.ensure_discovery()?;
     completed("Native local-network discovery");
     let captains = crate::discovery::discover(args.captain.as_deref()).map_err(|error| {
-        crate::logging::user_error(
-            paths,
-            "discovery",
-            "Fleet found a captain advertisement but could not verify it",
-            &error,
-        )
+        let summary = "Fleet found a captain advertisement but could not verify it";
+        if args.dry_run {
+            error.context(summary)
+        } else {
+            crate::logging::user_error(paths, "discovery", summary, &error)
+        }
     })?;
     if captains.is_empty() {
         bail!("no Fleet captain was discovered on this local network");
