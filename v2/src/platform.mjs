@@ -11,10 +11,11 @@ const cli = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 const helper = fileURLToPath(new URL("./port-helper.mjs", import.meta.url));
 const run = (exe, args, options = {}) =>
   execFileSync(exe, args, { timeout: 20_000, encoding: "utf8", ...options });
-// sudo and macOS trust changes wait for a password prompt, so allow a person
-// time to answer it.
-const sudo = (args, options = {}) =>
-  run("sudo", args, { stdio: "inherit", timeout: 600_000, ...options });
+// sudo, macOS trust changes and Windows root store changes wait for a person
+// to answer a prompt, so allow time for it.
+const prompted = (exe, args, options = {}) =>
+  run(exe, args, { stdio: "inherit", timeout: 600_000, ...options });
+const sudo = (args, options = {}) => prompted("sudo", args, options);
 const macHelper = "/Library/PrivilegedHelperTools/dev.fleet.v2";
 const macRootName = "Fleet private apps";
 export function nonSystemLibraries(otool) {
@@ -170,8 +171,12 @@ export function tailscale(args) {
       if (e.code !== "ENOENT") break;
     }
   }
+  if (last?.code === "ENOENT")
+    throw new Error(
+      "Tailscale is not installed. Install it from https://tailscale.com/download, sign in, then retry.",
+    );
   throw new Error(
-    `Tailscale is unavailable. Install and connect Tailscale, then retry. ${last?.stderr || last?.message || ""}`,
+    `Tailscale is unavailable. Connect Tailscale, then retry. ${String(last?.stderr || last?.message || "").trim()}`,
   );
 }
 export function tailnet() {
@@ -279,7 +284,12 @@ export async function install(home, config) {
     write(pki.certFile, config.gateway.ca);
   }
   if (process.platform === "win32") {
-    run("certutil.exe", ["-user", "-addstore", "Root", pki.certFile]);
+    process.stderr.write(
+      "Approve the Windows security warning to trust Fleet's certificate.\n",
+    );
+    prompted("certutil.exe", ["-user", "-addstore", "Root", pki.certFile], {
+      stdio: ["inherit", "ignore", "inherit"],
+    });
     const file = path.join(home, "install-windows.ps1");
     write(file, windowsInstaller(home, config));
     run(
@@ -403,12 +413,16 @@ export function uninstall(home) {
       { stdio: "inherit", timeout: 120_000 },
     );
     return import("node:crypto").then(({ createHash }) =>
-      run("certutil.exe", [
-        "-user",
-        "-delstore",
-        "Root",
-        createHash("sha1").update(Buffer.from(pem, "base64")).digest("hex"),
-      ]),
+      prompted(
+        "certutil.exe",
+        [
+          "-user",
+          "-delstore",
+          "Root",
+          createHash("sha1").update(Buffer.from(pem, "base64")).digest("hex"),
+        ],
+        { stdio: ["inherit", "ignore", "inherit"] },
+      ),
     );
   }
   const installedConfig = read(path.join(home, "config.json"), {});
