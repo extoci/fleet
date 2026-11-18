@@ -59,8 +59,7 @@ const out = (data) =>
         ? data
         : JSON.stringify(data, null, 2),
   );
-async function rpc(method, args) {
-  const config = configuration(home);
+async function rpc(method, args, config = configuration(home)) {
   const running = read(path.join(home, "running.json"), null);
   if (!config || !running)
     throw new Error(
@@ -365,7 +364,7 @@ async function main() {
   if (command === "phone") {
     if (args[0] === "off") {
       const own = read(path.join(home, "phone-serve.json"), null);
-      if (!own) throw new Error("Fleet has no phone setup route.");
+      if (!own) return out("There is no Fleet phone setup route to remove.");
       const current = JSON.parse(tailscale(["serve", "status", "--json"]));
       const handlers = current.Web?.[`${own.host}:8444`]?.Handlers;
       if (
@@ -403,38 +402,58 @@ async function main() {
     return out("App route removed. Source and data are retained.");
   }
   if (command === "doctor") {
+    let localOnly = false;
+    let daemon;
+    try {
+      const config = configuration(home);
+      localOnly =
+        !config?.dnsName &&
+        config?.addresses?.length === 1 &&
+        config.addresses[0] === "127.0.0.1";
+      daemon = {
+        ok: true,
+        apps: (await rpc("list", undefined, config)).length,
+      };
+    } catch (e) {
+      daemon = { ok: false, error: e.message };
+    }
+    const skipped = {
+      ok: null,
+      skipped: true,
+      reason: "Fleet is configured with --local.",
+    };
     const checks = [];
-    try {
-      checks.push({ check: "tailscale", ok: true, ...tailnet() });
-    } catch (e) {
-      checks.push({ check: "tailscale", ok: false, error: e.message });
+    if (localOnly) {
+      checks.push({ check: "tailscale", ...skipped });
+    } else {
+      try {
+        checks.push({ check: "tailscale", ok: true, ...tailnet() });
+      } catch (e) {
+        checks.push({ check: "tailscale", ok: false, error: e.message });
+      }
     }
-    try {
-      checks.push({
-        check: "daemon",
-        ok: true,
-        apps: (await rpc("list")).length,
-      });
-    } catch (e) {
-      checks.push({ check: "daemon", ok: false, error: e.message });
-    }
-    const { lookup } = await import("node:dns/promises");
-    try {
-      checks.push({
-        check: "system-dns",
-        ok: true,
-        addresses: await lookup("gate.fleet", { all: true }),
-      });
-    } catch (e) {
-      checks.push({
-        check: "system-dns",
-        ok: false,
-        error:
-          "gate.fleet does not resolve. Check the Tailscale restricted nameserver for fleet.",
-      });
+    checks.push({ check: "daemon", ...daemon });
+    if (localOnly) {
+      checks.push({ check: "system-dns", ...skipped });
+    } else {
+      const { lookup } = await import("node:dns/promises");
+      try {
+        checks.push({
+          check: "system-dns",
+          ok: true,
+          addresses: await lookup("gate.fleet", { all: true }),
+        });
+      } catch (e) {
+        checks.push({
+          check: "system-dns",
+          ok: false,
+          error:
+            "gate.fleet does not resolve. Check the Tailscale restricted nameserver for fleet.",
+        });
+      }
     }
     out(checks);
-    if (checks.some((c) => !c.ok)) process.exitCode = 1;
+    if (checks.some((c) => c.ok === false)) process.exitCode = 1;
     return;
   }
   if (command === "uninstall") {
