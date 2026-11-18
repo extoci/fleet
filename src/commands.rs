@@ -21,7 +21,7 @@ use std::net::TcpStream;
 use std::process::Command as ProcessCommand;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1420,6 +1420,34 @@ fn resume_join(paths: &StatePaths, args: JoinArgs, mut config: LocalConfig) -> R
     Ok(())
 }
 
+const MEMBER_PROBE_CONCURRENCY: usize = 8;
+
+fn probe_members_with(members: &[Machine], probe: impl Fn(&Machine) -> bool + Sync) -> Vec<bool> {
+    let next = AtomicUsize::new(0);
+    let results: Vec<_> = (0..members.len()).map(|_| AtomicBool::new(false)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..members.len().min(MEMBER_PROBE_CONCURRENCY) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(member) = members.get(index) else {
+                        break;
+                    };
+                    results[index].store(probe(member), Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    results.into_iter().map(AtomicBool::into_inner).collect()
+}
+
+fn probe_members(paths: &StatePaths, members: &[Machine]) -> Vec<bool> {
+    probe_members_with(members, |member| {
+        crate::ssh_client::probe_member_transport(paths, member, crate::cli::TransportRoute::Auto)
+            .is_ok()
+    })
+}
+
 fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()> {
     if watch {
         if json {
@@ -1446,19 +1474,19 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
     } else {
         vec![]
     };
+    let member_health = check.then(|| probe_members(paths, &members));
     if json {
         let health = check.then(|| {
             if config.role == Role::Captain {
                 members
                     .iter()
-                    .map(|member| {
-                        let health = crate::ssh_client::probe_transport(
-                            paths,
-                            member.id,
-                            crate::cli::TransportRoute::Auto,
-                        )
-                        .map(|_| "reachable")
-                        .unwrap_or("unreachable");
+                    .zip(member_health.as_ref().unwrap())
+                    .map(|(member, reachable)| {
+                        let health = if *reachable {
+                            "reachable"
+                        } else {
+                            "unreachable"
+                        };
                         (member.host(), health)
                     })
                     .collect::<std::collections::BTreeMap<_, _>>()
@@ -1503,15 +1531,14 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
             if !members.is_empty() {
                 let rows = members
                     .into_iter()
-                    .map(|member| {
-                        let health = check.then(|| {
-                            crate::ssh_client::probe_transport(
-                                paths,
-                                member.id,
-                                crate::cli::TransportRoute::Auto,
-                            )
-                            .map(|_| "reachable")
-                            .unwrap_or("unreachable")
+                    .enumerate()
+                    .map(|(index, member)| {
+                        let health = member_health.as_ref().map(|health| {
+                            if health[index] {
+                                "reachable"
+                            } else {
+                                "unreachable"
+                            }
                         });
                         (member, health)
                     })
@@ -1705,14 +1732,8 @@ fn doctor(paths: &StatePaths, repair: bool) -> Result<()> {
         Role::Captain => {
             let members = skill::load_members(paths)?;
             println!("  ✓ Captain inventory contains {} member(s)", members.len());
-            for member in members {
-                let health = crate::ssh_client::probe_transport(
-                    paths,
-                    member.id,
-                    crate::cli::TransportRoute::Auto,
-                )
-                .map(|_| "online")
-                .unwrap_or("unreachable");
+            for (member, reachable) in members.iter().zip(probe_members(paths, &members)) {
+                let health = if reachable { "online" } else { "unreachable" };
                 println!("  {health} {}", member.host());
                 match crate::tailscale::mapped_peer(paths, member.id) {
                     Ok(Some(peer)) => println!("    Tailscale mapping: {peer}"),
@@ -2101,6 +2122,79 @@ mod tests {
             public_identity: "ssh-ed25519 AAAATEST".into(),
             ssh_host_key: None,
         }
+    }
+
+    #[test]
+    fn member_probes_are_concurrent_bounded_and_ordered() {
+        use std::sync::{Condvar, Mutex, mpsc};
+
+        let members: Vec<_> = (0..MEMBER_PROBE_CONCURRENCY * 3)
+            .map(|index| Machine {
+                id: Uuid::from_u128(index as u128),
+                ..status_machine()
+            })
+            .collect();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let gate = (Mutex::new(false), Condvar::new());
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                probe_members_with(&members, |member| {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    sender.send(()).unwrap();
+                    let (lock, ready) = &gate;
+                    let guard = lock.lock().unwrap();
+                    let (guard, _) = ready
+                        .wait_timeout_while(guard, Duration::from_secs(5), |open| !*open)
+                        .unwrap();
+                    assert!(*guard, "concurrent probes were not released");
+                    drop(guard);
+                    std::thread::sleep(Duration::from_millis(
+                        (MEMBER_PROBE_CONCURRENCY as u64
+                            - member.id.as_u128() as u64 % MEMBER_PROBE_CONCURRENCY as u64)
+                            * 2,
+                    ));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    member.id.as_u128() % 2 == 0
+                })
+            });
+            let mut started = 0;
+            for _ in 0..MEMBER_PROBE_CONCURRENCY {
+                if receiver.recv_timeout(Duration::from_secs(2)).is_ok() {
+                    started += 1;
+                } else {
+                    break;
+                }
+            }
+            let extra = receiver.try_recv().is_ok();
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            let results = worker.join().unwrap();
+            assert_eq!(started, MEMBER_PROBE_CONCURRENCY);
+            assert!(!extra, "more probes than the cap started while blocked");
+            assert_eq!(peak.load(Ordering::SeqCst), MEMBER_PROBE_CONCURRENCY);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                results,
+                (0..members.len()).map(|i| i % 2 == 0).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn member_probes_handle_empty_and_all_unreachable_inventories() {
+        assert!(probe_members_with(&[], |_| panic!("empty inventory was probed")).is_empty());
+        let members = vec![status_machine(); MEMBER_PROBE_CONCURRENCY + 1];
+        assert_eq!(
+            probe_members_with(&members, |_| false),
+            vec![false; members.len()]
+        );
+        assert_eq!(
+            probe_members_with(&members, |_| true),
+            vec![true; members.len()]
+        );
     }
 
     #[test]
