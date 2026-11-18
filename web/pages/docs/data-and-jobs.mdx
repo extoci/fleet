@@ -1,0 +1,80 @@
+---
+title: "Persistent data and scheduled work"
+sidebarTitle: "Data and jobs"
+description: "Store JSON outside your app checkout, back up SQLite data, and schedule Fleet jobs with explicit retry and host-availability expectations."
+icon: "lucide:database"
+---
+
+App data and schedules live under `~/.fleet/v2`, outside the source checkout. Rebuilding an app or unloading its worker does not delete its data.
+
+## Persistent JSON documents
+
+Use `ctx.db.get`, `ctx.db.set`, `ctx.db.delete`, and `ctx.db.list` for persistent JSON documents. Mutations use SQLite transactions; queries cannot write.
+
+```ts
+// Inside a mutation handler:
+const settings = ctx.db.get('settings') ?? { theme: 'system' };
+ctx.db.set('settings', { ...settings, theme: 'dark' });
+```
+
+Keep in-memory state disposable. Workers unload after thirty seconds without app operations, and they restart during builds and daemon restarts.
+
+## Declare a scheduled job
+
+Add a declaration to the generated `fleet.json`, keeping its existing ID and name:
+
+```json
+{
+  "jobs": [
+    { "name": "dailyCheck", "everySeconds": 86400 }
+  ]
+}
+```
+
+This is the `jobs` field to add, not a replacement for the whole manifest. The name must match a handler in `server/index.ts`:
+
+```ts
+export default {
+  queries: {},
+  mutations: {},
+  jobs: {
+    dailyCheck(ctx) {
+      ctx.db.set('lastCheck', new Date().toISOString());
+      ctx.log('Daily check completed', ctx.runId);
+    },
+  },
+};
+```
+
+Jobs run without a browser open. **The app host still needs to be running.** On restart, an overdue job gets one catch-up occurrence, not every missed tick.
+
+An interrupted occurrence can retry with the same `ctx.runId`. Use that ID as an idempotency key when calling an external service. Do not assume exactly-once external effects. Job handlers time out after thirty seconds; failures appear in app logs and inspect output.
+
+```sh
+fleet inspect notes
+fleet logs notes
+```
+
+## Back up and restore
+
+Run backup on the computer with the app checkout:
+
+```sh
+fleet backup notes --output notes.sqlite
+```
+
+This takes a consistent SQLite snapshot while the app is running. The app must have stored data already, and the destination must not exist. Store the snapshot somewhere safe outside that computer, alongside a separate source backup.
+
+To restore, **stop Fleet using your operating system's service controls first**, then run:
+
+```sh
+fleet restore notes notes.sqlite
+```
+
+Restore refuses to overwrite live writes and preserves a copy of the data it replaces. Restart Fleet after the restore. There is no `fleet stop` command in this alpha; use the startup mechanism installed on your OS, or stop the foreground daemon if you started one.
+
+<Warning>
+A last-good build protects availability after a build failure. It does not undo data writes, migrate documents safely, or provide automatic history. A change that compiles can still corrupt your data.
+</Warning>
+
+Removing an app's route with `fleet unregister notes` retains source and data. Uninstalling Fleet also retains them. Treat backups as sensitive: they may contain your private app content.
