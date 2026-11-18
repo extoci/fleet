@@ -443,7 +443,14 @@ fn print_usage_report(report: &UsageReport, show_all: bool) {
     }
 }
 
+const USAGE_TABLE_WIDTH: usize = 159;
+
 fn print_usage_table(report: &UsageReport) {
+    let width = terminal_width().unwrap_or(usize::MAX);
+    if width < USAGE_TABLE_WIDTH {
+        print!("{}", render_stacked_usage(report, width));
+        return;
+    }
     print_usage_border('┌', '┬', '┐');
     println!(
         "│ {:<18} │ {:<10} │ {:<8} │ {:<22} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>12} │ {:>10} │",
@@ -502,8 +509,159 @@ fn print_usage_table(report: &UsageReport) {
     print_usage_border('└', '┴', '┘');
 }
 
+fn resolve_terminal_width(terminal: Option<usize>, columns: Option<&str>) -> Option<usize> {
+    terminal
+        .filter(|width| *width > 0)
+        .or_else(|| columns?.parse::<usize>().ok().filter(|width| *width > 0))
+}
+
+fn render_stacked_usage(report: &UsageReport, width: usize) -> String {
+    let mut output = String::new();
+    for machine in &report.machines {
+        let host = format!("{}.local", machine.machine);
+        if let Some(totals) = &machine.totals {
+            if machine.daily.is_empty() {
+                output.push_str(&render_usage_card(&host, &usage_metric_rows(totals), width));
+            }
+            for day in &machine.daily {
+                let mut rows = vec![
+                    (
+                        "Agent",
+                        if day.agent.is_empty() {
+                            "—".into()
+                        } else {
+                            day.agent.clone()
+                        },
+                    ),
+                    (
+                        "Models",
+                        if day.models_used.is_empty() {
+                            "—".into()
+                        } else {
+                            day.models_used.join(", ")
+                        },
+                    ),
+                ];
+                rows.extend(usage_metric_rows(&UsageTotals {
+                    input_tokens: day.input_tokens,
+                    output_tokens: day.output_tokens,
+                    cache_creation_tokens: day.cache_creation_tokens,
+                    cache_read_tokens: day.cache_read_tokens,
+                    total_tokens: day.total_tokens,
+                    total_cost: day.total_cost,
+                }));
+                output.push_str(&render_usage_card(
+                    &format!("{host} · {}", day.period),
+                    &rows,
+                    width,
+                ));
+            }
+        } else {
+            output.push_str(&render_usage_card(
+                &host,
+                &[("Usage", "unavailable".into())],
+                width,
+            ));
+        }
+    }
+    output.push_str(&render_usage_card(
+        "Total",
+        &usage_metric_rows(&report.totals),
+        width,
+    ));
+    output.pop();
+    output
+}
+
+fn usage_metric_rows(totals: &UsageTotals) -> [(&'static str, String); 6] {
+    [
+        ("Input", format_number(totals.input_tokens)),
+        ("Output", format_number(totals.output_tokens)),
+        ("Cache Create", format_number(totals.cache_creation_tokens)),
+        ("Cache Read", format_number(totals.cache_read_tokens)),
+        ("Total Tokens", format_number(totals.total_tokens)),
+        ("Cost (USD)", format!("${:.2}", totals.total_cost)),
+    ]
+}
+
+fn wrap_usage_value(value: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    let mut used = 0;
+    for word in value.split_whitespace() {
+        if used > 0 && used + 1 + UnicodeWidthStr::width(word) > width {
+            lines.push(String::new());
+            used = 0;
+        }
+        if used > 0 {
+            lines.last_mut().unwrap().push(' ');
+            used += 1;
+        }
+        for character in word.chars() {
+            let size = UnicodeWidthChar::width(character).unwrap_or(0);
+            if used > 0 && used + size > width {
+                lines.push(String::new());
+                used = 0;
+            }
+            lines.last_mut().unwrap().push(character);
+            used += size;
+        }
+    }
+    lines
+}
+
+fn usage_panel_header(title: &str, width: usize) -> String {
+    let mut output = format!("╭{}╮\n", "─".repeat(width - 2));
+    for line in wrap_usage_value(title, width - 4) {
+        output.push_str(&format!("│ {} │\n", pad_right(&line, width - 4)));
+    }
+    output.push_str(&format!("├{}┤\n", "─".repeat(width - 2)));
+    output
+}
+
+fn render_usage_card(title: &str, rows: &[(&str, String)], available_width: usize) -> String {
+    let width = available_width.clamp(4, 64);
+    if width < 6 {
+        return std::iter::once(title.to_owned())
+            .chain(
+                rows.iter()
+                    .map(|(label, value)| format!("{label}: {value}")),
+            )
+            .flat_map(|value| wrap_usage_value(&value, width))
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+            + "\n";
+    }
+    let content_width = width - 4;
+    let mut output = usage_panel_header(title, width);
+    for (label, value) in rows {
+        let label_width = 14;
+        if content_width >= 32 {
+            let value_width = content_width - label_width - 1;
+            for (index, line) in wrap_usage_value(value, value_width).iter().enumerate() {
+                output.push_str(&format!(
+                    "│ {} {} │\n",
+                    pad_right(if index == 0 { label } else { "" }, label_width),
+                    pad_left(line, value_width)
+                ));
+            }
+        } else {
+            for line in wrap_usage_value(label, content_width) {
+                output.push_str(&format!("│ {} │\n", pad_right(&line, content_width)));
+            }
+            for line in wrap_usage_value(value, content_width) {
+                output.push_str(&format!("│ {} │\n", pad_left(&line, content_width)));
+            }
+        }
+    }
+    output.push_str(&format!("╰{}╯\n\n", "─".repeat(width - 2)));
+    output
+}
+
 fn print_usage_summary(report: &UsageReport) {
-    print!("{}", render_usage_summary(report, terminal_width()));
+    print!(
+        "{}",
+        render_usage_summary(report, terminal_width().unwrap_or(80))
+    );
 }
 
 fn render_usage_summary(report: &UsageReport, available_width: usize) -> String {
@@ -534,13 +692,10 @@ fn render_usage_summary(report: &UsageReport, available_width: usize) -> String 
     let panel_width = available_width.clamp(4, 64);
     let inner_width = panel_width - 2;
     let content_width = inner_width - 2;
-    let mut output = String::new();
-    output.push_str(&format!("╭{}╮\n", "─".repeat(inner_width)));
-    output.push_str(&format!(
-        "│ {} │\n",
-        pad_right("Fleet Usage Summary", content_width)
-    ));
-    output.push_str(&format!("├{}┤\n", "─".repeat(inner_width)));
+    let mut output = usage_panel_header(
+        &pad_right("Fleet Usage Summary", content_width),
+        panel_width,
+    );
     for (label, value) in rows {
         if content_width >= 42 {
             let label_width = 22;
@@ -1334,7 +1489,7 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
     }
     match config.role {
         Role::Captain => {
-            let width = terminal_width();
+            let width = terminal_width().unwrap_or(80);
             let colors = io::stdout().is_terminal();
             println!("CAPTAIN");
             print!(
@@ -1365,7 +1520,7 @@ fn status(paths: &StatePaths, json: bool, check: bool, watch: bool) -> Result<()
             }
         }
         Role::Member => {
-            let width = terminal_width();
+            let width = terminal_width().unwrap_or(80);
             let colors = io::stdout().is_terminal();
             println!("MEMBER");
             print!(
@@ -1742,11 +1897,11 @@ fn working(label: &str) {
     println!("  … {label}");
 }
 
-fn terminal_width() -> usize {
-    terminal_size::terminal_size()
-        .map(|(terminal_size::Width(width), _)| usize::from(width))
-        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
-        .unwrap_or(80)
+fn terminal_width() -> Option<usize> {
+    resolve_terminal_width(
+        terminal_size::terminal_size().map(|(terminal_size::Width(width), _)| usize::from(width)),
+        std::env::var("COLUMNS").ok().as_deref(),
+    )
 }
 
 fn render_status_rows(rows: &[(Machine, Option<&str>)], width: usize, colors: bool) -> String {
@@ -2076,6 +2231,105 @@ mod tests {
                 .unwrap()
                 .contains("offline")
         );
+    }
+
+    #[test]
+    fn usage_table_width_prefers_terminal_then_columns_then_wide() {
+        assert_eq!(resolve_terminal_width(Some(170), Some("80")), Some(170));
+        assert_eq!(resolve_terminal_width(Some(80), Some("170")), Some(80));
+        assert_eq!(resolve_terminal_width(None, Some("80")), Some(80));
+        assert_eq!(resolve_terminal_width(Some(0), Some("159")), Some(159));
+        for columns in [None, Some("0"), Some("bad"), Some("-1")] {
+            assert_eq!(resolve_terminal_width(None, columns), None);
+        }
+    }
+
+    #[test]
+    fn stacked_usage_preserves_all_metrics_and_wraps_long_values() {
+        let usage: CcusageReport = serde_json::from_value(serde_json::json!({
+            "daily": [{"date":"2026-07-26", "agent":"Claude", "modelsUsed":["模型".repeat(80)],
+                "inputTokens":1234, "outputTokens":2345, "cacheCreationTokens":3456,
+                "cacheReadTokens":4567, "totalTokens":11602, "totalCost":12.34}]
+        }))
+        .unwrap();
+        let mut usage = usage;
+        let mut second_day = usage.daily[0].clone();
+        second_day.period = "2026-07-27".into();
+        usage.daily.push(second_day);
+        let report = report_from_results(vec![
+            (
+                "emerald".into(),
+                Ok(CcusageReport {
+                    daily: usage.daily.clone(),
+                    ..CcusageReport::default()
+                }),
+            ),
+            ("sapphire".into(), Ok(usage)),
+        ]);
+        for width in [8, 24, 40, 80, 158] {
+            let rendered = render_stacked_usage(&report, width);
+            assert!(
+                rendered
+                    .lines()
+                    .all(|line| UnicodeWidthStr::width(line) <= width)
+            );
+            let content: String = rendered
+                .chars()
+                .filter(|c| !c.is_whitespace() && !"│╭╮╰╯├┤─".contains(*c))
+                .collect();
+            for metric in [
+                "emerald.local·2026-07-26",
+                "emerald.local·2026-07-27",
+                "sapphire.local·2026-07-26",
+                "sapphire.local·2026-07-27",
+                "AgentClaude",
+                "Models",
+                "Input1,234",
+                "Output2,345",
+                "CacheCreate3,456",
+                "CacheRead4,567",
+                "TotalTokens11,602",
+                "Cost(USD)$12.34",
+                "Total",
+            ] {
+                assert!(content.contains(metric), "missing {metric}: {rendered}");
+            }
+            assert_eq!(rendered.matches('模').count(), 320);
+            assert_eq!(rendered.matches('╭').count(), 5);
+            if width >= 64 {
+                assert!(
+                    rendered
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .all(|line| UnicodeWidthStr::width(line) == 64)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stacked_usage_handles_empty_daily_and_unavailable_machines() {
+        let report = report_from_results(vec![
+            ("empty".into(), Ok(CcusageReport::default())),
+            ("offline".into(), Err(anyhow::anyhow!("connection failed"))),
+        ]);
+        let rendered = render_stacked_usage(&report, 80);
+        for value in [
+            "empty.local",
+            "offline.local",
+            "unavailable",
+            "Input",
+            "Cost (USD)",
+            "$0.00",
+        ] {
+            assert!(rendered.contains(value));
+        }
+        assert!(
+            rendered
+                .lines()
+                .all(|line| UnicodeWidthStr::width(line) <= 80)
+        );
+        assert!(render_stacked_usage(&UsageReport::default(), 80).contains("Total"));
     }
 
     #[test]
