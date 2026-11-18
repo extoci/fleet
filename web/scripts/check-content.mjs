@@ -40,6 +40,12 @@ export function checkContent(root = projectRoot) {
     );
   }
 
+  function checkSourceLinks(text, source) {
+    for (const link of text.matchAll(/href="([^"]+)"|\]\((\/[^\s)]+)\)/g)) {
+      checkLink(link[1] ?? link[2], source);
+    }
+  }
+
   for (const slug of slugs) {
     const file = path.join(root, 'pages', `${slug}.mdx`);
     assert(fs.existsSync(file), `Missing page: ${slug}`);
@@ -58,10 +64,8 @@ export function checkContent(root = projectRoot) {
     const body = text.slice(match[0].length);
     const prose = body.replace(/^```[^\n]*\n[\s\S]*?^```/gm, '');
     const authoredH1s = [...prose.matchAll(/^#\s|<h1(?:\s|>)/gm)].length;
-    assert.equal(authoredH1s, slug === 'index' ? 1 : 0, `${slug}: duplicate or missing H1`);
-    for (const link of prose.matchAll(/href="([^"]+)"|\]\((\/[^\s)]+)\)/g)) {
-      checkLink(link[1] ?? link[2], slug);
-    }
+    assert(authoredH1s <= (slug === 'index' ? 1 : 0), `${slug}: duplicate H1`);
+    checkSourceLinks(prose, slug);
     pages.set(routeFor(slug), { ...metadata, body });
   }
 
@@ -76,6 +80,12 @@ export function checkContent(root = projectRoot) {
     for (const child of Object.values(value)) checkConfigLinks(child);
   }
   checkConfigLinks(config);
+  const components = path.join(root, 'components');
+  if (fs.existsSync(components)) {
+    for (const file of filesIn(components).filter(file => /\.[jt]sx?$/.test(file))) {
+      checkSourceLinks(fs.readFileSync(file, 'utf8'), path.relative(root, file));
+    }
+  }
   return { config, pages };
 }
 

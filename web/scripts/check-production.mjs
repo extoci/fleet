@@ -45,6 +45,11 @@ try {
     assert.equal(title, `${page.title} — Fleet`, `${route}: page title`);
     assert(html.includes('name="description"'), `${route}: description metadata`);
     assert(!html.includes('MDX Error') && !html.includes('Internal Server Error'), `${route}: rendering error`);
+    if (route === '/') {
+      assert(html.includes('class="fleet-button fleet-button-primary"'), 'Landing CTA styles survive rendering');
+      assert(html.includes('class="fleet-feature"'), 'Landing card styles survive rendering');
+      assert(!html.includes('href="https://notes.fleet"'), 'Illustrated app address is not a live link');
+    }
 
     const markdownRoute = route === '/' ? '/index.md' : `${route}.md`;
     const markdown = await request(markdownRoute);

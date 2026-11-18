@@ -38,7 +38,7 @@ The production Node server listens on port 3000 by default; set `PORT` in the en
 ## Content and configuration
 
 - `docs.json` owns navigation, branding, search, and footer links.
-- `pages/index.mdx` is the custom landing page; `pages/docs/` holds the guides.
+- `pages/index.mdx` imports `components/landing.tsx`; `pages/docs/` holds the guides. Keep styled landing links in TSX: Holocron's Markdown link renderer does not preserve MDX anchor classes.
 - `style.css` is auto-loaded by Holocron and uses its public theme tokens.
 - `public/` contains local SVG branding. Fonts are bundled by Holocron, not loaded from a third-party font CDN.
 

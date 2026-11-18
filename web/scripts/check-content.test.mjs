@@ -59,7 +59,7 @@ test('rejects unquoted metadata and duplicate headings', t => {
   save(page.replace('title: "Personal apps"', 'title: Personal apps'));
   assert.throws(() => checkContent(root), /quoted string/);
   save(`${page}\n# Another title`);
-  assert.throws(() => checkContent(root), /duplicate or missing H1/);
+  assert.throws(() => checkContent(root), /duplicate H1/);
 });
 
 test('rejects orphaned pages', t => {
