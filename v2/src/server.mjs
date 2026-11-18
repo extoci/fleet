@@ -38,6 +38,15 @@ function send(
   });
   response.end(data);
 }
+export function encodings(header = "") {
+  const accepted = new Set();
+  for (const part of header.split(",")) {
+    const [name, ...params] = part.trim().toLowerCase().split(";");
+    const q = params.find((p) => p.trim().startsWith("q="));
+    if (name && !(q && Number(q.trim().slice(2)) === 0)) accepted.add(name);
+  }
+  return accepted;
+}
 const json = (res, status, data) =>
   send(res, status, JSON.stringify(data), "application/json");
 const redirect = (res, target, cookie) =>
@@ -280,17 +289,42 @@ export async function start(home, options = {}) {
         }
         const file = path.join(app.buildDir, url.pathname.slice(1));
         if (!fs.existsSync(file)) return send(response, 404, "", "text/plain");
-        return send(
-          response,
-          200,
-          request.method === "HEAD" ? "" : fs.readFileSync(file),
-          url.pathname.endsWith(".css") ? "text/css" : "text/javascript",
+        // The page links assets by revision, so a matching URL never changes.
+        const tag = `"${app.revision}"`;
+        const caching = {
+          "Cache-Control":
+            url.searchParams.get("v") === app.revision
+              ? "private, max-age=31536000, immutable"
+              : "private, no-cache",
+          ETag: tag,
+          Vary: "Accept-Encoding",
+        };
+        const type = url.pathname.endsWith(".css")
+          ? "text/css"
+          : "text/javascript";
+        if (request.headers["if-none-match"] === tag)
+          return send(response, 304, undefined, type, caching);
+        const accepted = encodings(request.headers["accept-encoding"]);
+        const encoding = [
+          ["br", "br"],
+          ["gzip", "gz"],
+        ].find(
+          ([name, suffix]) =>
+            accepted.has(name) && fs.existsSync(`${file}.${suffix}`),
         );
+        const data =
+          request.method === "HEAD"
+            ? ""
+            : fs.readFileSync(encoding ? `${file}.${encoding[1]}` : file);
+        return send(response, 200, data, type, {
+          ...caching,
+          ...(encoding ? { "Content-Encoding": encoding[0] } : {}),
+        });
       }
       return send(
         response,
         200,
-        `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(app.name)}</title>${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? '<link rel="stylesheet" href="/app.css">' : ""}<div id="app"></div><script type="module" src="/app.js"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></html>`,
+        `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(app.name)}</title>${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}<div id="app"></div><script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></html>`,
       );
     } catch (error) {
       runtime.log("daemon", error.message);
