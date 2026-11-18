@@ -271,6 +271,19 @@ fn restart_dry_run_targets_the_captain_service() {
         .assert()
         .success()
         .stdout(predicate::str::contains(service_name));
+    assert_preview_did_not_reconcile(&home, &paths);
+}
+
+fn assert_preview_did_not_reconcile(home: &TempDir, paths: &StatePaths) {
+    assert!(
+        !paths.shell_dir().exists(),
+        "preview created Fleet shell files"
+    );
+    assert!(
+        !home.path().join(".tmux.conf").exists(),
+        "preview created the user's tmux config"
+    );
+    assert!(!paths.logs_dir().exists(), "preview created Fleet logs");
 }
 
 #[test]
@@ -281,6 +294,8 @@ fn status_fails_cleanly_when_uninitialized() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("not in a fleet"));
+    let log = fs::read_to_string(home.path().join(".fleet/logs/fleet.log")).unwrap();
+    assert!(log.contains("[command] this machine is not in a fleet"));
 }
 
 #[test]
@@ -360,7 +375,64 @@ fn init_dry_run_never_creates_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Would create a Fleet identity"));
-    assert!(!home.path().join(".fleet/config.toml").exists());
+    assert!(!home.path().join(".fleet").exists());
+}
+
+#[test]
+fn init_dry_run_failure_does_not_write_logs() {
+    let home = TempDir::new().unwrap();
+    test_command(&home)
+        .args([
+            "init",
+            "--name",
+            "INVALID",
+            "--color",
+            "violet",
+            "--yes",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("machine name must begin and end"));
+    assert!(
+        !home.path().join(".fleet").exists(),
+        "preview created Fleet state"
+    );
+}
+
+#[test]
+fn join_dry_run_discovery_failure_does_not_write_logs() {
+    let home = TempDir::new().unwrap();
+    let preview = test_command(&home)
+        .args(["join", "--captain", "http://[invalid", "--yes", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not verify it"))
+        .stderr(predicate::str::contains(
+            "contact captain at http://[invalid",
+        ));
+    assert!(
+        !home.path().join(".fleet").exists(),
+        "preview created Fleet state"
+    );
+    preview.stderr(predicate::str::contains("Run `fleet logs`").not());
+}
+
+#[test]
+fn uninitialized_dry_run_commands_do_not_write_logs() {
+    for args in [
+        vec!["leave", "--yes", "--dry-run"],
+        vec!["remove", "emerald", "--yes", "--dry-run"],
+        vec!["restart", "--dry-run"],
+    ] {
+        let home = TempDir::new().unwrap();
+        test_command(&home)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not in a fleet"));
+        assert!(!home.path().join(".fleet").exists());
+    }
 }
 
 #[test]
@@ -412,6 +484,27 @@ fn captain_can_force_leave_with_stale_members_in_dry_run() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Would remove Fleet membership"));
+    assert_preview_did_not_reconcile(&home, &paths);
+}
+
+#[test]
+fn remove_dry_run_does_not_reconcile_tmux() {
+    let home = TempDir::new().unwrap();
+    let paths = StatePaths {
+        root: home.path().join(".fleet"),
+    };
+    paths.save(&captain_config()).unwrap();
+    let mut member = captain_config().machine;
+    member.name = "emerald".into();
+    fleet::skill::save_member(&paths, &member).unwrap();
+
+    test_command(&home)
+        .args(["remove", "emerald", "--yes", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would remove emerald.local"));
+    assert_preview_did_not_reconcile(&home, &paths);
+    assert_eq!(fleet::skill::load_members(&paths).unwrap(), vec![member]);
 }
 
 #[test]
