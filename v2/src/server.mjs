@@ -231,16 +231,24 @@ export async function start(home, options = {}) {
           `data: ${JSON.stringify({ revision: app.revision })}\n\n`,
         );
         let revision = app.revision;
+        const update = () => {
+          if (revision === app.revision) return false;
+          revision = app.revision;
+          response.write(`data: ${JSON.stringify({ revision })}\n\n`);
+          return true;
+        };
+        // Local builds are pushed as soon as they finish; peer apps are polled.
+        const stop = runtime.onRevision((built) => {
+          if (built === app && gate.authorized(request, host)) update();
+        });
         const interval = setInterval(() => {
           if (!gate.authorized(request, host)) return response.end();
           if (app.peer) app.revision = peers.find(app.name)?.revision;
-          if (revision !== app.revision) {
-            revision = app.revision;
-            response.write(`data: ${JSON.stringify({ revision })}\n\n`);
-          } else response.write(": keepalive\n\n");
+          if (!update()) response.write(": keepalive\n\n");
         }, 1500);
         eventClients.add(response);
         response.once("close", () => {
+          stop();
           clearInterval(interval);
           eventClients.delete(response);
         });
