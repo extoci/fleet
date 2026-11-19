@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import https from "node:https";
+import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,7 @@ function request(
     data,
     cookie,
     origin = `https://${host}:${daemon.httpsPort}`,
+    headers = {},
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -46,6 +48,7 @@ function request(
           Host: `${host}:${daemon.httpsPort}`,
           Origin: origin,
           ...(cookie ? { Cookie: cookie } : {}),
+          ...headers,
           ...(data !== undefined
             ? {
                 "Content-Type": route.startsWith("/__fleet/login")
@@ -62,6 +65,7 @@ function request(
           resolve({
             status: res.statusCode,
             headers: res.headers,
+            raw: Buffer.concat(chunks),
             text: Buffer.concat(chunks).toString(),
           }),
         );
@@ -156,6 +160,30 @@ test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation 
   assert.equal(bundle.status, 200);
   assert.match(bundle.text, /function/);
   assert.ok(bundle.text.length > 1000);
+  const page = await request(daemon, ca, "notes.fleet", "/", auth);
+  const asset = /src="(\/app\.js\?v=[0-9a-f]+)"/.exec(page.text)[1];
+  const versioned = await request(daemon, ca, "notes.fleet", asset, {
+    ...auth,
+    headers: { "Accept-Encoding": "gzip, br" },
+  });
+  assert.equal(versioned.headers["content-encoding"], "br");
+  assert.match(versioned.headers["cache-control"], /immutable/);
+  assert.ok(versioned.raw.length < bundle.raw.length / 2);
+  assert.equal(
+    zlib.brotliDecompressSync(versioned.raw).toString(),
+    bundle.text,
+  );
+  const gzip = await request(daemon, ca, "notes.fleet", asset, {
+    ...auth,
+    headers: { "Accept-Encoding": "gzip, br;q=0" },
+  });
+  assert.equal(gzip.headers["content-encoding"], "gzip");
+  assert.match(bundle.headers["cache-control"], /no-cache/);
+  const unchanged = await request(daemon, ca, "notes.fleet", "/app.js", {
+    ...auth,
+    headers: { "If-None-Match": bundle.headers.etag },
+  });
+  assert.equal(unchanged.status, 304);
   const post = (op, input, origin) =>
     request(daemon, ca, "notes.fleet", `/__fleet/api/${op}`, {
       ...auth,

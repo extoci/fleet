@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
+import zlib from "node:zlib";
 import { Worker } from "node:worker_threads";
 import * as esbuild from "esbuild";
 import { parseEnv } from "node:util";
@@ -211,6 +212,17 @@ export class Runtime {
         // backend module loads. Validation runs without opening the app data.
         for (const output of [...client.outputFiles, ...server.outputFiles])
           write(path.join(dir, path.basename(output.path)), output.contents);
+        // Compress browser assets once per build instead of on every request.
+        for (const output of client.outputFiles) {
+          const file = path.join(dir, path.basename(output.path));
+          write(
+            `${file}.br`,
+            zlib.brotliCompressSync(output.contents, {
+              params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+            }),
+          );
+          write(`${file}.gz`, zlib.gzipSync(output.contents, { level: 9 }));
+        }
         await this.validate(path.join(dir, "server.mjs"));
         if (this.closed) return false;
         app.auditFiles = [
