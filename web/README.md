@@ -4,7 +4,7 @@ Fleet's landing page and v2 alpha documentation, built with [Holocron](https://g
 
 ## Develop
 
-Requires Node.js 22.16 or later. From this directory:
+Requires Node.js 22.16 or later in the 22.x line. The major version is pinned to match the Vercel function runtime. From this directory:
 
 ```sh
 npm ci
@@ -34,6 +34,26 @@ npm start
 ```
 
 The production Node server listens on port 3000 by default; set `PORT` in the environment to change it. This is a server-rendered site, **not** a static `dist/` folder for GitHub Pages. Use a Node-capable host and a reverse proxy for public TLS. No deployment, DNS changes, or hosting account is configured by this project.
+
+## Deploy to Vercel
+
+1. Open [New Project](https://vercel.com/new), import `extoci/fleet`, and use `main` as the production branch.
+2. Set **Root Directory** to `web`, **Framework Preset** to **Other**, and **Node.js Version** to **22.x**. The committed `vercel.json` supplies **Install Command** `npm ci` and **Build Command** `npm run build:vercel`. Leave **Output Directory** unset (Override off), not `dist` or `dist/client`. No application secrets or custom environment variables are required.
+3. Deploy and check the generated `*.vercel.app` address, including `/docs/quickstart`. The build enables Holocron's bundled Spiceflow Vercel adapter, which emits `.vercel/output/config.json`, CDN assets, and a streaming Node function. Vercel consumes this Build Output API directory automatically; there is no `npm start` command on Vercel.
+4. Open the project's **Settings → Domains**, add `fleet.extoci.lol`, and connect it to **Production**.
+5. At the DNS provider for `extoci.lol`, add a **CNAME** record with **Name** `fleet` and **Target** equal to the exact project-specific hostname Vercel displays for that domain. Use automatic/default TTL. Replace conflicting records for `fleet` only; do not change the apex or nameservers. If Vercel requests a verification TXT record, add the exact displayed name/value too. If using Cloudflare, start with **DNS only** (proxy off).
+6. Wait for Vercel to show **Valid Configuration** and issue HTTPS, then open `https://fleet.extoci.lol` and a deep docs URL. Later pushes to `main` redeploy automatically.
+
+The CNAME target is assigned by Vercel after the domain is added: do not guess a suffix, use a different project's target, or point DNS to the Fleet runtime. See Vercel's [domain guide](https://vercel.com/docs/domains/working-with-domains/add-a-domain) and [Build Output API](https://vercel.com/docs/build-output-api).
+
+To check the deployment bundle locally:
+
+```sh
+npm run build:vercel
+npm run test:vercel
+```
+
+The check validates the output layout and runs the packaged function's fetch handler against every docs page, markdown exports, redirects, missing routes, and agent exports. It does not deploy to Vercel or qualify the hosted function/CDN, custom DNS, or TLS.
 
 ## Content and configuration
 

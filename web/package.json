@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.16.0"
+    "node": "^22.16.0"
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "build:vercel": "VERCEL=1 vite build",
     "start": "node dist/rsc/index.js",
     "check": "node scripts/check-content.mjs",
     "test": "node --test scripts/*.test.mjs",
-    "test:production": "node scripts/check-production.mjs"
+    "test:production": "node scripts/check-production.mjs",
+    "test:vercel": "node scripts/check-vercel.mjs"
   },
   "dependencies": {
     "@holocron.so/vite": "0.39.2",
