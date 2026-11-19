@@ -105,7 +105,9 @@ Gate and the phone setup commands run on the gateway. Other computers can inspec
 
 ## Diagnostics and removal
 
-`fleet doctor` checks the daemon, Tailscale, and name resolution. `fleet gate` prints a short-lived device code for another browser. `fleet gate reset` revokes all browser sessions. `fleet open` signs in the local browser using the owner-only control endpoint. App cookies are host-specific, Secure, and HttpOnly; an app does not receive the Gate session.
+`fleet doctor` checks the daemon, Tailscale, and name resolution. After `fleet setup --local`, doctor still checks the daemon but skips Tailscale and system DNS. In JSON, skipped checks have `"skipped": true` and `"ok": null`. `fleet phone off` succeeds without contacting Tailscale if Fleet has no recorded phone setup route.
+
+`fleet gate` prints a short-lived device code for another browser. `fleet gate reset` revokes all browser sessions. `fleet open` signs in the local browser using the owner-only control endpoint. App cookies are host-specific, Secure, and HttpOnly; an app does not receive the Gate session.
 
 `fleet unregister notes` removes its route but preserves source and data. Names stay bound to their app IDs to avoid silently reusing a browser origin for a different app.
 
