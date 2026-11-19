@@ -1,5 +1,7 @@
 # fleet – make your computers feel like one computer
 
+Fleet v2 has a separate [app runtime and test guide](v2/README.md). It creates personal apps, serves `.fleet` addresses, and provides Fleet Gate login. The instructions below describe Fleet v1.
+
 [watch the video](https://www.youtube.com/watch?v=ZvUwW5hoY80)
 
 ---
@@ -108,5 +110,7 @@ fleet was used in the development of fleet.
 i wrote more on the [blog post](https://extoci.lol/blog/fleet)
 
 ## development
+
+Fleet v2 development follows [the product direction](docs/v2/README.md). See [the v0 test guide](docs/v2/test-v0.md) for installation and device testing. The earlier implementation proposal is retained as historical context.
 
 most of the build scripts here are just documentation for my agents. i would recommend you ask your agents to explore the codebase, they'll pick up on everything.
