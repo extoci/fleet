@@ -1,0 +1,86 @@
+---
+title: "Install the alpha and build your first app"
+sidebarTitle: "Quickstart"
+description: "Install Fleet v2 from its alpha source, prepare a Tailscale gateway, create a notes app, and open it through private HTTPS and Fleet Gate."
+icon: "lucide:terminal"
+---
+
+<Warning>
+This installs the v2 test build and changes your computer's startup and certificate trust settings. Use a test computer. Do not use the repository-root installer: it installs Fleet v1.
+</Warning>
+
+## Before you start
+
+You need Node.js **22.16 or later**, npm, Git, and [Tailscale](https://tailscale.com/download) installed and connected. You also need permission to configure DNS for your tailnet. Every device that opens an app must accept Tailscale DNS settings.
+
+The Linux installer currently targets Debian/Ubuntu-style systems with systemd and `update-ca-certificates`. Windows and macOS installation paths exist but still need native device qualification.
+
+## 1. Install the v2 source
+
+Until v2 is released as a package, install the alpha from the repository's `main` branch:
+
+```sh
+git clone --branch main https://github.com/extoci/fleet.git fleet
+cd fleet/v2
+npm ci
+npm install -g .
+fleet --version
+```
+
+Check that the version starts with `Fleet 2`. This installs a global `fleet` command and can replace a v1 command on your PATH. The versions keep separate state, but you should not assume both commands remain available under the same name.
+
+<Note>
+The v2 alpha is still under development. Its source lives under `v2/`; the root installer remains v1. There is no published v2 release installer in this guide.
+</Note>
+
+## 2. Prepare your gateway
+
+Choose a computer that will remain awake when you want to use your apps.
+
+```sh
+fleet setup --install
+```
+
+Fleet prepares private certificates, startup, the app gateway, and DNS service. The runtime runs as your normal user. Linux and macOS installation request administrator access. Windows requests administrator access for startup registration and tailnet firewall rules, then uses a scheduled task under your account.
+
+## 3. Add the tailnet DNS rule
+
+Use the **exact nameserver address printed by setup**. In [Tailscale DNS settings](https://login.tailscale.com/admin/dns), add it as a restricted nameserver for the domain **`fleet`**. Preserve your existing DNS settings.
+
+This is one rule per tailnet, not one per app. If you use an exit node, enable **Use with exit node** for that nameserver. Do not add a global nameserver or turn on an exit node just for Fleet.
+
+If an authorized `FLEET_TAILSCALE_TOKEN` with the `dns` scope already exists in your environment, Fleet can add the restricted mapping. It refuses to overwrite a conflicting `fleet` rule. You do not need to create an API token for manual setup.
+
+## 4. Create and open an app
+
+Move to the parent directory where you keep your app projects, outside Fleet's source checkout:
+
+```sh
+fleet init notes
+fleet open notes
+```
+
+`fleet init notes` creates a `notes` directory with a working Preact client, server operations, and agent instructions. If you are already inside an existing project directory, use `fleet init --name notes` instead. Fleet refuses to overwrite conflicting source files.
+
+`fleet open notes` signs your local browser in through Gate. The app's address is `https://notes.fleet`. Its data stays on this computer.
+
+## 5. Make a change
+
+Ask your agent to read the generated `AGENTS.md` in the app checkout, then change the notes app. It should edit the source, **not** start Vite or a second development server.
+
+Fleet builds the edit and reloads open browsers after a successful build. A failed build keeps the last working build available. Unsaved browser form state is not preserved through the reload.
+
+```sh
+fleet list --json
+fleet inspect notes
+fleet logs notes
+```
+
+## Where next?
+
+<CardGroup cols={2}>
+  <Card title="Work with your agent" icon="lucide:bot" href="/docs/agents">Inspect state, call operations, and diagnose failed builds.</Card>
+  <Card title="Connect an iPhone" icon="lucide:smartphone" href="/docs/iphone">Understand the one-time certificate and Gate setup.</Card>
+</CardGroup>
+
+If an app does not open, follow [troubleshooting](/docs/troubleshooting). To remove the installation, see [cleanup](/docs/troubleshooting#remove-fleet).

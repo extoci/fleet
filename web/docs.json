@@ -1,0 +1,43 @@
+{
+  "$schema": "https://holocron.so/docs.json",
+  "name": "Fleet",
+  "description": "Personal apps on your own computers. Built with your agent, available across your Tailscale devices.",
+  "logo": { "light": "/fleet-light.svg", "dark": "/fleet-dark.svg" },
+  "favicon": "/favicon.svg",
+  "colors": { "primary": "#426b3c", "dark": "#426b3c", "light": "#b7df9c" },
+  "appearance": { "default": "light", "strict": false },
+  "icons": { "library": "lucide" },
+  "assistant": { "enabled": false },
+  "search": { "prompt": "Search Fleet docs…" },
+  "navbar": {
+    "links": [
+      { "label": "Documentation", "href": "/docs/overview" },
+      { "type": "github", "href": "https://github.com/extoci/fleet" }
+    ],
+    "primary": { "type": "button", "label": "Get started", "href": "/docs/quickstart" }
+  },
+  "navigation": {
+    "groups": [
+      { "group": "Start here", "pages": ["index", "docs/overview", "docs/quickstart"] },
+      { "group": "Build with Fleet", "pages": ["docs/apps", "docs/agents", "docs/data-and-jobs"] },
+      { "group": "Your devices", "pages": ["docs/networking", "docs/iphone", "docs/computers"] },
+      { "group": "Reference", "pages": ["docs/cli", "docs/security", "docs/troubleshooting"] }
+    ]
+  },
+  "footer": {
+    "socials": { "github": "https://github.com/extoci/fleet" },
+    "links": [
+      { "header": "Learn", "items": [
+        { "label": "Quickstart", "href": "/docs/quickstart" },
+        { "label": "App format", "href": "/docs/apps" },
+        { "label": "iPhone setup", "href": "/docs/iphone" }
+      ] },
+      { "header": "Project", "items": [
+        { "label": "Source code", "href": "https://github.com/extoci/fleet" },
+        { "label": "Report an issue", "href": "https://github.com/extoci/fleet/issues" },
+        { "label": "Security model", "href": "/docs/security" }
+      ] }
+    ]
+  },
+  "redirects": [{ "source": "/docs", "destination": "/docs/overview" }]
+}

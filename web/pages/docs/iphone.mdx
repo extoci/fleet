@@ -1,0 +1,67 @@
+---
+title: "Connect an iPhone to your private apps"
+sidebarTitle: "iPhone setup"
+description: "Prepare Tailscale DNS, scan Fleet's setup QR code, install your gateway's public certificate profile, and sign in through Fleet Gate on iPhone."
+icon: "lucide:smartphone"
+---
+
+<Warning>
+This is the intended alpha setup flow, not a claim of completed iPhone support. Real-device Safari, profile installation, Wi-Fi, and cellular qualification are still pending. Do not use certificate bypasses as a test pass.
+</Warning>
+
+## Before scanning
+
+Finish the [gateway quickstart](/docs/quickstart), including the tailnet's restricted `fleet` DNS rule. Keep the gateway and app host awake. Connect the iPhone to the same Tailscale network and accept Tailscale DNS settings.
+
+An unmanaged iPhone requires you to install the downloaded profile and enable certificate trust manually. No Apple Developer account or native Fleet phone app is required.
+
+## 1. Open the private setup page
+
+Run this on the **gateway**, not a secondary checkout computer:
+
+```sh
+fleet phone
+```
+
+Scan the QR code and open the link in Safari. Keep the printed Gate code private.
+
+The setup page uses Tailscale Serve at a private `.ts.net` address on port **8444**. Tailscale may ask you to enable HTTPS once. Fleet refuses to replace an existing Serve route on that port. The profile link expires after fifteen minutes; rerun the command if needed.
+
+## 2. Install your certificate profile
+
+1. Download the Fleet profile from the setup page.
+2. Open **Settings** and install the downloaded profile. Follow Apple's prompts.
+3. Open **Settings → General → About → Certificate Trust Settings**.
+4. Enable full trust for **Fleet private apps**.
+
+The profile contains only your installation's **public root certificate**, not its signing key. The private key stays on the gateway. Root trust is broad system trust; install it only from your own gateway.
+
+Apple documents [profile installation](https://support.apple.com/en-us/102400) and [manually enabling certificate trust](https://support.apple.com/en-us/102390). Labels can vary by iOS version.
+
+## 3. Sign in and open an app
+
+Return to the setup page and tap **Open Fleet**. This also signs the browser in through Fleet Gate. If you need a fresh sign-in code, run `fleet gate` on the gateway and open `https://gate.fleet` on the phone.
+
+Open `https://notes.fleet` in Safari. Later apps reuse the same certificate profile and DNS rule. A trusted certificate alone does not authenticate you to Gate.
+
+## 4. Remove the temporary route
+
+After setup, run on the gateway:
+
+```sh
+fleet phone off
+```
+
+This removes Fleet's setup route, not your apps or certificate trust. It refuses to remove a route that has changed ownership.
+
+## What still needs a real-device check
+
+Verify the literal `.fleet` URL, no certificate warning, Gate sign-in, Wi-Fi and cellular with Tailscale connected, a second app without a second profile, and reconnect after sleep. If you use an exit node, verify that path too.
+
+Record the iOS and Tailscale versions and any manual prompts. A phone-size Chromium viewport is not a substitute for these checks. If Private Relay or another DNS profile is present, diagnose it rather than silently changing it.
+
+## Remove phone trust
+
+If retiring Fleet, remove the Fleet profile in **Settings → General → VPN & Device Management**. This removes the phone's trust in that installation's root. Also remove the tailnet `fleet` DNS rule if no devices use that gateway.
+
+Do not share your gateway's signing key, reuse another installation's profile, or accept browser certificate warnings. See the [security model](/docs/security).

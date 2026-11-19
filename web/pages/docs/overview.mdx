@@ -1,0 +1,45 @@
+---
+title: "A private home for personal apps"
+sidebarTitle: "What is Fleet?"
+description: "Learn how Fleet v2 runs agent-built personal apps on your computers, with private names, persistent data, and access across Tailscale devices."
+icon: "lucide:compass"
+---
+
+Fleet runs your personal apps on your own computers. A coding agent edits the source, Fleet builds it, and your devices open it at an address like `https://notes.fleet`.
+
+The app runs on the computer with its checkout. Fleet does not move your code or data to a hosted service. Tailscale provides the private network; Fleet adds app names, HTTPS, sign-in, and the app lifecycle.
+
+<CardGroup cols={2}>
+  <Card title="Build your first app" icon="lucide:terminal" href="/docs/quickstart">Install the v2 alpha and open a working notes app.</Card>
+  <Card title="Understand the app format" icon="lucide:code" href="/docs/apps">A Preact client, server operations, and persistent JSON data.</Card>
+</CardGroup>
+
+## The pieces
+
+**Your checkout** contains the app's source and generated agent instructions. An agent changes those files directly. There is no separate publish step for routine edits.
+
+**The runtime** builds source changes, serves cached frontends, starts app workers on demand, and unloads idle workers. A failed build leaves the last successful build available.
+
+**Your gateway** handles private `.fleet` names, HTTPS certificates, and Fleet Gate sign-in. It routes requests to the computer that owns each app checkout. That computer and the gateway must be awake and reachable.
+
+**Your Tailscale network** connects those computers to your devices. One restricted DNS rule routes the `fleet` suffix to the gateway. New apps reuse it.
+
+## Alpha status
+
+<Warning>
+Fleet v2 is an early test build, not a production release. The source is in the repository's [v2 directory](https://github.com/extoci/fleet/tree/main/v2). The repository-root Rust CLI and installer are Fleet v1, a different product generation.
+</Warning>
+
+The v2 source includes Linux integration tests for private TLS, DNS, Gate, builds, data persistence, idle unloading, scheduling, remote checkout routing, and profile delivery. Its Chromium fixture covers browser sign-in and live editing. These are test coverage descriptions, not a promise that every platform is qualified.
+
+Native background installation on Windows and macOS, and the Safari/profile flow on a real iPhone, still need device qualification. Read the [iPhone guide](/docs/iphone) before attempting phone setup. Use a test computer and keep independent backups.
+
+## What Fleet is not
+
+- A public hosting platform: there are no public app links or guest invitations.
+- A sandbox for untrusted code: apps run with your operating-system user's permissions.
+- Automatic app migration: an app stays with the computer that owns its checkout.
+- Automatic data history: a successful but buggy edit can still damage data.
+- A way to run jobs on a sleeping or powered-off computer.
+
+Start with the [quickstart](/docs/quickstart), then give your agent the [workflow guide](/docs/agents).

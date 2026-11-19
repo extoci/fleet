@@ -1,0 +1,51 @@
+---
+title: "Run apps on another computer"
+sidebarTitle: "Multiple computers"
+description: "Enroll a second Fleet computer with a short-lived private invitation while keeping app checkouts and data on their original hosts."
+icon: "lucide:monitor"
+---
+
+One computer remains the gateway for DNS, HTTPS, and Gate. Other computers can host app checkouts. Fleet routes private requests to them; it does not relocate code or data automatically.
+
+## Prepare both computers
+
+Install the same [v2 source build](/docs/quickstart) and connect both computers to the same Tailscale network. Keep the gateway reachable. App names must be unique across the installation.
+
+The secondary computer's private listener uses Tailscale TCP port **42174**. Existing tailnet policy must allow the gateway to reach it. Fleet does not edit your tailnet policy.
+
+## Create a private invitation
+
+On the gateway:
+
+```sh
+fleet invite --output computer-invite.json
+```
+
+Transfer this file privately to the other computer. It expires after ten minutes and can enroll **one** computer. Do not commit it, send it to a public channel, or include it in a bug report.
+
+## Join and create an app
+
+On the second computer:
+
+```sh
+fleet setup --join computer-invite.json --install
+fleet init another-app
+```
+
+Use the correct path to the transferred invitation. Fleet pins the gateway's certificate root from that file. The gateway pins the new computer's root and verifies its private listener before accepting registration.
+
+Delete transferred invitation copies after enrollment. Keep normal operating-system protections on the Fleet state directory.
+
+## Which computer runs a command?
+
+Run `fleet phone`, `fleet gate`, `fleet open`, and `fleet invite` on the **gateway**. Inspect, call, back up, and restore an app on the **computer with its checkout**.
+
+The second computer can report on its local apps:
+
+```sh
+fleet list --json
+fleet inspect another-app
+fleet logs another-app
+```
+
+If the host sleeps, its apps are unavailable even while the gateway is running. Schedules also need the checkout host awake. Joining another computer is not a replication or high-availability feature.

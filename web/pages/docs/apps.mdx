@@ -1,0 +1,103 @@
+---
+title: "The full-stack app format"
+sidebarTitle: "App format"
+description: "Build a Fleet app with a Preact client, server queries and mutations, a fleet.json manifest, and server-only secrets outside the browser bundle."
+icon: "lucide:code"
+---
+
+`fleet init` creates a working notes app. Keep its structure and let Fleet own the build and server processes.
+
+## Files in a checkout
+
+- `fleet.json` declares the app's version, identity, name, and jobs.
+- `client/index.tsx` is the Preact browser entry point.
+- `client/style.css` styles your app.
+- `server/index.ts` exports queries, mutations, and scheduled job handlers.
+- `AGENTS.md` explains the app contract to a coding agent.
+- `.env.fleet.server` holds server-only configuration and is ignored by Git.
+
+App names form private origins such as `https://notes.fleet`. Keep the generated app ID: it identifies the app's persistent data. Do not casually rename or reuse an origin for an unrelated app.
+
+## Server operations
+
+Export an object with `queries`, `mutations`, and optional `jobs`:
+
+```ts
+export default {
+  queries: {
+    notes(ctx) {
+      return ctx.db.get('notes') ?? [];
+    },
+  },
+  mutations: {
+    addNote(ctx, input) {
+      if (typeof input?.text !== 'string' || !input.text.trim()) {
+        throw new Error('Enter a note.');
+      }
+      const note = {
+        id: crypto.randomUUID(),
+        text: input.text.trim(),
+      };
+      const notes = ctx.db.get('notes') ?? [];
+      ctx.db.set('notes', [note, ...notes]);
+      return note;
+    },
+  },
+};
+```
+
+Queries are read-only. Mutations run in SQLite transactions. Fleet serializes operations per app. Validate all input on the server, even when the client already validates it.
+
+Handlers receive the owner's identity as `ctx.user.id`, persistent JSON through `ctx.db`, logging through `ctx.log`, server configuration through `ctx.env`, and an execution ID through `ctx.runId`. Do not treat the presence of Gate as input validation.
+
+Request operations time out after fifteen seconds; jobs after thirty seconds. Keep external calls short. A timed-out browser request is not automatically replayed.
+
+## Browser client
+
+Fleet provides `useQuery` and `useMutation` through `fleet/client`:
+
+```tsx
+import { render } from 'preact';
+import { useQuery, useMutation } from 'fleet/client';
+import './style.css';
+
+function App() {
+  const { data: notes, error } = useQuery('notes');
+  const addNote = useMutation('addNote');
+
+  if (error) return <p role="alert">{error.message}</p>;
+  if (notes === undefined) return <p role="status">Loading…</p>;
+
+  return <main>
+    <h1>My notes</h1>
+    <button onClick={async () => {
+      try {
+        await addNote({ text: 'Hello from my app' });
+      } catch (error) {
+        alert(error.message);
+      }
+    }}>Add a note</button>
+    {notes.map(note => <p key={note.id}>{note.text}</p>)}
+  </main>;
+}
+
+render(<App />, document.getElementById('app'));
+```
+
+`useQuery` returns `{ data, error }`. Queries refresh after mutations and while a visible page is open. Handle loading, empty, and error states. Use the generated notes starter for a fuller form with pending-state handling.
+
+## Server-only secrets
+
+Put secrets in `.env.fleet.server` and read them through `ctx.env` in a server handler. Never import that file into the client, put a key in `fleet.json`, or commit it to Git. Check the generated ignore rule before adding a value.
+
+Fleet does not inject those values into the browser bundle. Your handler can still leak them if it returns or logs them; inspect responses and logs accordingly.
+
+## Builds and worker lifecycle
+
+Fleet watches registered source files and rebuilds them. Successful builds reload open browsers. Failed builds preserve the last successful bundle and report errors in `fleet logs APP`.
+
+App workers start when needed and unload after thirty seconds without app operations. Cached frontends remain available. Persistent state belongs in `ctx.db`, not module variables. See [data and jobs](/docs/data-and-jobs).
+
+<Warning>
+App code is trusted personal code. It runs with your OS user's permissions, not inside an untrusted-code sandbox. Review agent-written code before giving it sensitive files or credentials.
+</Warning>

@@ -1,0 +1,52 @@
+---
+title: "Trust, identity, and private app access"
+sidebarTitle: "Security model"
+description: "Understand Fleet's trust boundaries: Tailscale connectivity, per-installation certificate keys, Gate sign-in, app permissions, and data recovery."
+icon: "lucide:shield-check"
+---
+
+Fleet is a personal runtime for code you trust, on computers you control. Private networking, HTTPS, sign-in, and code isolation solve different problems. None replaces the others.
+
+## Private connectivity
+
+Tailscale connects your devices. Fleet does not create guest app links or configure public Funnel. Existing tailnet policies remain your responsibility; Fleet does not rewrite them to make enrollment work.
+
+The gateway routes only registered app names. Unknown `.fleet` names are not a wildcard public hosting service.
+
+## Certificate trust
+
+Every installation creates its own private certificate authority. The signing key stays on the gateway. The iPhone profile contains only its public root certificate; Fleet must never distribute a shared signing key.
+
+Trusting that root is broad system certificate trust. Only trust a gateway you own, protect its state directory, and remove the profile when you retire it. A new or recovered CA can require re-enrollment. Do not use a browser's certificate bypass as normal operation.
+
+## Gate identity
+
+Fleet Gate authenticates the owner after HTTPS succeeds. The phone's certificate profile does not identify you. Gateway commands generate short-lived device codes and setup links; protect them like credentials.
+
+App cookies are host-specific, Secure, and HttpOnly. An app does not receive the Gate session. `fleet gate reset` revokes browser sessions across the installation.
+
+```sh
+fleet gate reset
+```
+
+## Trusted app code
+
+App code runs with your OS user's permissions. Fleet is **not** an untrusted-code sandbox. Gate does not stop a malicious server handler from reading files that your account can read or making network requests.
+
+Review agent-generated code. Use a dedicated test computer or OS account when experimenting. Do not give an app credentials or files it does not need.
+
+## Secrets and invitations
+
+Server configuration belongs in `.env.fleet.server`, which is ignored by Git. Read it through `ctx.env`; never import it into the client or return it in an operation response.
+
+Computer invitations enroll one device and expire after ten minutes. Transfer them privately and delete copies after enrollment. Do not paste invitation contents, private state, device codes, or backup data into public issues.
+
+## Data is a separate responsibility
+
+Persistent data survives worker unloading, rebuilds, and daemon restarts. That is not automatic history or a recovery guarantee. A valid edit can still make bad writes, and a host can fail.
+
+Keep [independent backups](/docs/data-and-jobs#back-up-and-restore) before schema changes or significant agent edits. A last-good build is an availability fallback, not a database rollback.
+
+## Alpha limits
+
+These are the intended boundaries of the current alpha, not an external security audit. Real iPhone and native installation qualification are still pending. Use the [source](https://github.com/extoci/fleet/pull/2) to inspect implementation details before trusting Fleet with sensitive workloads.
