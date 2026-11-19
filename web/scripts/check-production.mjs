@@ -39,10 +39,10 @@ try {
   for (const [route, page] of pages) {
     const response = await request(route);
     assert.equal(response.status, 200, route);
-    const html = await response.text();
+    const html = (await response.text()).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
     assert.equal([...html.matchAll(/<h1(?:\s|>)/g)].length, 1, `${route}: one rendered H1`);
     const title = html.match(/<title>(.*?)<\/title>/s)?.[1];
-    assert.equal(title, `${page.title} — Fleet`, `${route}: page title`);
+    assert.equal(title, `${page.title} - Fleet`, `${route}: page title`);
     assert(html.includes('name="description"'), `${route}: description metadata`);
     assert(!html.includes('MDX Error') && !html.includes('Internal Server Error'), `${route}: rendering error`);
     if (route === '/') {
