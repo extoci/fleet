@@ -15,6 +15,7 @@ const functionRoot = join(output, 'functions/index.func');
 const functionConfig = JSON.parse(await readFile(join(functionRoot, '.vc-config.json'), 'utf8'));
 assert.equal(functionConfig.runtime, 'nodejs22.x', 'Node runtime matches package engines');
 assert.equal(functionConfig.supportsResponseStreaming, true, 'Streaming enabled');
+process.chdir(functionRoot);
 const { default: handler } = await import(pathToFileURL(join(functionRoot, functionConfig.handler)).href);
 assert.equal(typeof handler.fetch, 'function', 'Vercel fetch handler');
 const request = path => handler.fetch(new Request(`https://fleet.extoci.lol${path}`));
