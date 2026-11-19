@@ -66,6 +66,6 @@ Holocron provides local search, light/dark mode, responsive documentation naviga
 
 ## Documentation source and release status
 
-The documentation describes the v2 alpha in [the owner's draft PR](https://github.com/extoci/fleet/pull/2), currently on branch `t3/b5d508c5`. It intentionally does not import files from `v2/`: the site can build independently from main before the runtime PR lands. When runtime behavior changes, update the corresponding guides and installation branch together.
+The documentation describes the alpha runtime in [`v2/`](../v2/) on `main`. It intentionally does not import runtime files, so the site can build independently. When runtime behavior changes, update the corresponding guides and installation instructions together.
 
 The root Rust CLI and `fleet.sh` are v1. Do not point v2 onboarding at that installer or claim a published v2 package. Keep the native-installation and real-iPhone qualification warnings until there is device evidence. Landing-page windows are labeled illustrations, not a connected Fleet dashboard.

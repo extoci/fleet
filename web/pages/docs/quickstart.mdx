@@ -17,10 +17,10 @@ The Linux installer currently targets Debian/Ubuntu-style systems with systemd a
 
 ## 1. Install the v2 source
 
-Until v2 is released, use the branch behind the [v2 draft PR](https://github.com/extoci/fleet/pull/2):
+Until v2 is released as a package, install the alpha from the repository's `main` branch:
 
 ```sh
-git clone --branch t3/b5d508c5 https://github.com/extoci/fleet.git fleet
+git clone --branch main https://github.com/extoci/fleet.git fleet
 cd fleet/v2
 npm ci
 npm install -g .
@@ -30,7 +30,7 @@ fleet --version
 Check that the version starts with `Fleet 2`. This installs a global `fleet` command and can replace a v1 command on your PATH. The versions keep separate state, but you should not assume both commands remain available under the same name.
 
 <Note>
-The v2 branch is still under development. Follow the draft PR if its branch changes. There is no published v2 release installer in this guide.
+The v2 alpha is still under development. Its source lives under `v2/`; the root installer remains v1. There is no published v2 release installer in this guide.
 </Note>
 
 ## 2. Prepare your gateway
