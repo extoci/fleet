@@ -10,7 +10,7 @@ fleet --version
 fleet setup --install
 ```
 
-The version must say `Fleet 2.0.0-alpha.1`. If another `fleet` command appears first on your PATH, use the npm installation's command. The `fleet` command runs the first `node` on your PATH, so with two Node.js installations, put the one you installed Fleet with first. On macOS, use Node.js from nodejs.org, nvm, or fnm: setup refuses Homebrew's Node.js because its shared libraries cannot run from Fleet's boot helper. This v0 keeps its state under `~/.fleet/v2`; it does not migrate Fleet v1 machines.
+The version must say `Fleet 2.0.0-alpha.1`. If another `fleet` command appears first on your PATH, use the npm installation's command. The `fleet` command runs the first `node` on your PATH, so with two Node.js installations, put the one you installed Fleet with first. On macOS, Homebrew Node.js works: setup copies its libraries into the boot helper. This v0 keeps its state under `~/.fleet/v2`; it does not migrate Fleet v1 machines.
 
 Approve the OS installation prompt. Setup prints the exact nameserver and `fleet` suffix to add in the Tailscale DNS page. Add that rule once, and enable **Use with exit node** if you use one. An existing API credential with DNS access can do this automatically.
 

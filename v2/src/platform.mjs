@@ -39,24 +39,171 @@ export function keychainHashes(output) {
   );
 }
 const nodeHelp =
-  "Install Node.js from https://nodejs.org (or a standalone build from nvm or fnm), then run fleet setup --install with that Node.js.";
-function checkStandaloneNode() {
-  if (process.platform !== "darwin") return;
-  let libraries;
-  try {
-    libraries = nonSystemLibraries(run("otool", ["-L", process.execPath]));
-  } catch {
-    return;
+  "Reinstall Node.js, then run fleet setup --install with that Node.js.";
+export function libraryRpaths(output) {
+  return [
+    ...new Set(
+      [
+        ...output.matchAll(
+          /\bcmd LC_RPATH\s+cmdsize \d+\s+path (.+) \(offset \d+\)/g,
+        ),
+      ].map((match) => match[1]),
+    ),
+  ];
+}
+export function libraryCandidates(reference, image, executable, rpaths) {
+  const expand = (value) => {
+    if (value === "@loader_path") return path.dirname(image);
+    if (value.startsWith("@loader_path/"))
+      return path.resolve(path.dirname(image), value.slice(13));
+    if (value === "@executable_path") return path.dirname(executable);
+    if (value.startsWith("@executable_path/"))
+      return path.resolve(path.dirname(executable), value.slice(17));
+    if (path.isAbsolute(value)) return value;
+    throw new Error(`Unsupported library path: ${value}`);
+  };
+  return reference.startsWith("@rpath/")
+    ? rpaths.map((rpath) => path.join(expand(rpath), reference.slice(7)))
+    : [expand(reference)];
+}
+function libraryIds(output) {
+  return [
+    ...output.matchAll(
+      /\bcmd LC_ID_DYLIB\s+cmdsize \d+\s+name (.+) \(offset \d+\)/g,
+    ),
+  ].map((match) => match[1]);
+}
+export function stageMacNode(directory, source = process.execPath) {
+  const executable = fs.realpathSync(source);
+  const images = new Map();
+  const visit = (file) => {
+    if (images.has(file)) return;
+    const references = new Map();
+    images.set(file, references);
+    const commands = run("otool", ["-l", file]);
+    const rpaths = libraryRpaths(commands);
+    const ids = libraryIds(commands);
+    for (const reference of nonSystemLibraries(run("otool", ["-L", file]))) {
+      if (ids.includes(reference)) continue;
+      const candidate = libraryCandidates(
+        reference,
+        file,
+        executable,
+        rpaths,
+      ).find((candidate) => fs.existsSync(candidate));
+      if (!candidate)
+        throw new Error(`Cannot resolve ${reference} from ${file}`);
+      const dependency = fs.realpathSync(candidate);
+      references.set(reference, dependency);
+      visit(dependency);
+    }
+  };
+  visit(executable);
+  const destination = path.join(directory, "node");
+  fs.copyFileSync(executable, destination);
+  fs.chmodSync(destination, 0o755);
+  if (images.size === 1 && !images.get(executable).size) return;
+  const names = new Set();
+  for (const file of images.keys()) {
+    if (file === executable) continue;
+    const name = path.basename(file);
+    if (names.has(name))
+      throw new Error(`Conflicting library basename: ${name}`);
+    names.add(name);
   }
-  if (libraries.length)
-    throw new Error(
-      `This Node.js (${process.execPath}) loads ${libraries.join(", ")}. Fleet's boot helper runs a private copy of Node.js and cannot use these libraries. Homebrew's Node.js is built this way. ${nodeHelp}`,
-    );
+  fs.mkdirSync(path.join(directory, "lib"), { mode: 0o700 });
+  for (const [file, references] of images) {
+    const target =
+      file === executable
+        ? destination
+        : path.join(directory, "lib", path.basename(file));
+    if (file !== executable) fs.copyFileSync(file, target);
+    fs.chmodSync(target, 0o755);
+    const architectures = run("lipo", ["-archs", file]).trim().split(/\s+/);
+    const slices = [];
+    for (const arch of architectures) {
+      const slice = `${target}.${arch}`;
+      if (architectures.length > 1)
+        run("lipo", [target, "-thin", arch, "-output", slice]);
+      else fs.copyFileSync(target, slice);
+      fs.chmodSync(slice, 0o755);
+      const args = [];
+      const commands = run("otool", ["-l", slice]);
+      const ids = libraryIds(commands);
+      for (const reference of nonSystemLibraries(run("otool", ["-L", slice]))) {
+        if (ids.includes(reference)) continue;
+        const dependency = references.get(reference);
+        args.push(
+          "-change",
+          reference,
+          `@rpath/${dependency === executable ? "../node" : path.basename(dependency)}`,
+        );
+      }
+      for (const rpath of libraryRpaths(commands))
+        args.push("-delete_rpath", rpath);
+      args.push(
+        "-add_rpath",
+        file === executable ? "@loader_path/lib" : "@loader_path",
+      );
+      if (file !== executable)
+        args.push("-id", `@rpath/${path.basename(file)}`);
+      run("install_name_tool", [...args, slice]);
+      slices.push(slice);
+    }
+    if (slices.length > 1)
+      run("lipo", ["-create", ...slices, "-output", target]);
+    else fs.copyFileSync(slices[0], target);
+    for (const slice of slices) fs.unlinkSync(slice);
+    run("codesign", ["--force", "--sign", "-", target]);
+  }
+  checkMacLibraries(directory);
+}
+function checkMacLibraries(directory) {
+  const libraries = path.join(directory, "lib");
+  const files = [
+    path.join(directory, "node"),
+    ...(fs.existsSync(libraries)
+      ? fs.readdirSync(libraries).map((name) => path.join(libraries, name))
+      : []),
+  ];
+  const root = fs.realpathSync(directory) + path.sep;
+  for (const file of files) {
+    const references = nonSystemLibraries(run("otool", ["-L", file]));
+    if (!references.length) continue;
+    const expected = file === files[0] ? "@loader_path/lib" : "@loader_path";
+    const rpaths = libraryRpaths(run("otool", ["-l", file]));
+    if (rpaths.some((rpath) => rpath !== expected))
+      throw new Error(`Unsafe library search path in ${file}`);
+    for (const reference of references) {
+      if (
+        !reference.startsWith("@rpath/") &&
+        !reference.startsWith("@loader_path/")
+      )
+        throw new Error(`Unsafe library reference: ${reference}`);
+      const candidates = libraryCandidates(reference, file, files[0], rpaths);
+      if (
+        !candidates.length ||
+        candidates.some(
+          (candidate) => !fs.realpathSync(candidate).startsWith(root),
+        )
+      )
+        throw new Error(`Library escapes boot helper: ${reference}`);
+    }
+  }
 }
 function checkInstalledNode(executable) {
+  if (process.platform === "darwin")
+    checkMacLibraries(path.dirname(executable));
   let version;
   try {
-    version = run(executable, ["--version"]).trim();
+    version = run(executable, [
+      ...(process.platform === "darwin"
+        ? [
+            `--openssl-config=${path.join(path.dirname(executable), "openssl.cnf")}`,
+          ]
+        : []),
+      "--version",
+    ]).trim();
   } catch (error) {
     throw new Error(
       `Fleet's boot helper cannot start its copy of Node.js (${executable}): ${String(error.stderr || error.message).trim()} ${nodeHelp}`,
@@ -266,12 +413,18 @@ export function serviceFiles(home, config, platform = process.platform) {
   const executable = path.join(destination, "node");
   const helperPath = path.join(destination, "ports.mjs");
   const configPath = path.join(destination, "owner.json");
+  const macArguments = [
+    executable,
+    `--openssl-config=${path.join(destination, "openssl.cnf")}`,
+    helperPath,
+    configPath,
+  ];
   if (platform === "darwin")
     return {
       destination,
       helperConfig,
       file: "/Library/LaunchDaemons/dev.fleet.v2.plist",
-      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>dev.fleet.v2</string><key>ProgramArguments</key><array>${[executable, helperPath, configPath].map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${xml(path.join(destination, "daemon.log"))}</string><key>StandardErrorPath</key><string>${xml(path.join(destination, "daemon.log"))}</string></dict></plist>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>dev.fleet.v2</string><key>ProgramArguments</key><array>${macArguments.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${xml(path.join(destination, "daemon.log"))}</string><key>StandardErrorPath</key><string>${xml(path.join(destination, "daemon.log"))}</string></dict></plist>`,
     };
   return {
     destination,
@@ -311,17 +464,53 @@ export async function install(home, config) {
     throw new Error(
       "Run Fleet setup as your normal user. It uses sudo only to install the port helper.",
     );
-  checkStandaloneNode();
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-install-"));
   fs.chmodSync(staging, 0o700);
   try {
     write(path.join(staging, "owner.json"), files.helperConfig);
     write(path.join(staging, "service"), files.content);
+    if (process.platform === "darwin") {
+      stageMacNode(staging);
+      fs.writeFileSync(path.join(staging, "openssl.cnf"), "", { mode: 0o600 });
+    }
     // Elevated code is copied to root-owned storage. The privileged listener
     // must not execute a Node binary or helper writable by the app owner.
     sudo(["install", "-d", "-m", "755", files.destination]);
+    if (process.platform === "darwin") {
+      sudo(["rm", "-rf", path.join(files.destination, "lib")]);
+      if (fs.existsSync(path.join(staging, "lib"))) {
+        sudo([
+          "install",
+          "-d",
+          "-m",
+          "755",
+          path.join(files.destination, "lib"),
+        ]);
+        for (const name of fs.readdirSync(path.join(staging, "lib")))
+          sudo([
+            "install",
+            "-m",
+            "755",
+            path.join(staging, "lib", name),
+            path.join(files.destination, "lib", name),
+          ]);
+      }
+      sudo([
+        "install",
+        "-m",
+        "644",
+        path.join(staging, "openssl.cnf"),
+        path.join(files.destination, "openssl.cnf"),
+      ]);
+    }
     for (const [source, destination, mode] of [
-      [process.execPath, "node", "755"],
+      [
+        process.platform === "darwin"
+          ? path.join(staging, "node")
+          : process.execPath,
+        "node",
+        "755",
+      ],
       [helper, "ports.mjs", "644"],
       [path.join(staging, "owner.json"), "owner.json", "600"],
     ])
