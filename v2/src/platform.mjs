@@ -53,17 +53,20 @@ export function libraryRpaths(output) {
 }
 export function libraryCandidates(reference, image, executable, rpaths) {
   const expand = (value) => {
-    if (value === "@loader_path") return path.dirname(image);
+    if (value === "@loader_path") return path.posix.dirname(image);
     if (value.startsWith("@loader_path/"))
-      return path.resolve(path.dirname(image), value.slice(13));
-    if (value === "@executable_path") return path.dirname(executable);
+      return path.posix.resolve(path.posix.dirname(image), value.slice(13));
+    if (value === "@executable_path") return path.posix.dirname(executable);
     if (value.startsWith("@executable_path/"))
-      return path.resolve(path.dirname(executable), value.slice(17));
-    if (path.isAbsolute(value)) return value;
+      return path.posix.resolve(
+        path.posix.dirname(executable),
+        value.slice(17),
+      );
+    if (path.posix.isAbsolute(value)) return value;
     throw new Error(`Unsupported library path: ${value}`);
   };
   return reference.startsWith("@rpath/")
-    ? rpaths.map((rpath) => path.join(expand(rpath), reference.slice(7)))
+    ? rpaths.map((rpath) => path.posix.join(expand(rpath), reference.slice(7)))
     : [expand(reference)];
 }
 function libraryIds(output) {
@@ -410,12 +413,13 @@ export function serviceFiles(home, config, platform = process.platform) {
     addresses: config.addresses,
     mode: config.mode,
   };
-  const executable = path.join(destination, "node");
-  const helperPath = path.join(destination, "ports.mjs");
-  const configPath = path.join(destination, "owner.json");
+  const servicePath = platform === "darwin" ? path.posix : path;
+  const executable = servicePath.join(destination, "node");
+  const helperPath = servicePath.join(destination, "ports.mjs");
+  const configPath = servicePath.join(destination, "owner.json");
   const macArguments = [
     executable,
-    `--openssl-config=${path.join(destination, "openssl.cnf")}`,
+    `--openssl-config=${servicePath.join(destination, "openssl.cnf")}`,
     helperPath,
     configPath,
   ];
@@ -424,7 +428,7 @@ export function serviceFiles(home, config, platform = process.platform) {
       destination,
       helperConfig,
       file: "/Library/LaunchDaemons/dev.fleet.v2.plist",
-      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>dev.fleet.v2</string><key>ProgramArguments</key><array>${macArguments.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${xml(path.join(destination, "daemon.log"))}</string><key>StandardErrorPath</key><string>${xml(path.join(destination, "daemon.log"))}</string></dict></plist>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>dev.fleet.v2</string><key>ProgramArguments</key><array>${macArguments.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${xml(servicePath.join(destination, "daemon.log"))}</string><key>StandardErrorPath</key><string>${xml(servicePath.join(destination, "daemon.log"))}</string></dict></plist>`,
     };
   return {
     destination,
