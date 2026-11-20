@@ -78,7 +78,7 @@ function request(
     req.end(data);
   });
 }
-async function fixture(t) {
+async function fixture(t, daemonOptions = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-test-"));
   const project = path.join(home, "notes");
   execFileSync(process.execPath, [cli, "init", project, "--json"], {
@@ -100,6 +100,7 @@ async function fixture(t) {
     noDns: true,
     idleMs: 100,
     pollMs: 50,
+    ...daemonOptions,
   });
   t.after(async () => {
     await daemon.close();
@@ -467,15 +468,22 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   assert.equal(fs.existsSync(path.join(home, "data", nodeApp.id)), false);
 });
 
-test("the phone setup delivers only the profile and signs the browser into Gate after trust", async (t) => {
-  const { daemon, ca } = await fixture(t);
+test("the phone setup delivers only the profile, signs in at gate.fleet/phone, and turns off setup automatically", async (t) => {
+  let phoneOffCalls = 0;
+  const { daemon, ca } = await fixture(t, {
+    disablePhoneRoute: async () => {
+      phoneOffCalls++;
+      return { removed: true };
+    },
+  });
   const setup = await fetch(
     `http://127.0.0.1:${daemon.adminPort}${daemon.setupPath}`,
   );
   assert.equal(setup.status, 200);
   const html = await setup.text();
+  assert.match(html, /VPN &amp; Device Management/);
   assert.match(html, /Certificate Trust Settings/);
-  const link = /href="([^"]+\/__fleet\/claim\?ticket=[^"]+)"/.exec(html)[1];
+  const link = /href="([^"]+\/phone\?ticket=[^"]+)"/.exec(html)[1];
   const profile = await fetch(
     `http://127.0.0.1:${daemon.adminPort}${daemon.setupPath}/fleet.mobileconfig`,
   );
@@ -493,6 +501,7 @@ test("the phone setup delivers only the profile and signs the browser into Gate 
     ).status,
     403,
   );
+  assert.equal(phoneOffCalls, 0);
   const url = new URL(link);
   const claim = await request(
     daemon,
@@ -501,7 +510,21 @@ test("the phone setup delivers only the profile and signs the browser into Gate 
     url.pathname + url.search,
   );
   assert.equal(claim.status, 303);
+  assert.equal(claim.headers.location, "/phone");
+  assert.equal(phoneOffCalls, 1);
+  assert.equal(
+    (await fetch(`http://127.0.0.1:${daemon.adminPort}${daemon.setupPath}`))
+      .status,
+    403,
+  );
   const gateCookie = claim.headers["set-cookie"][0].split(";")[0];
+  const phonePage = await request(daemon, ca, "gate.fleet", "/phone", {
+    cookie: gateCookie,
+  });
+  assert.equal(phonePage.status, 200);
+  assert.match(phonePage.text, /Phone connected/);
+  assert.match(phonePage.text, /turned off automatically/);
+  assert.match(phonePage.text, /notes/);
   const index = await request(daemon, ca, "gate.fleet", "/", {
     cookie: gateCookie,
   });
@@ -514,4 +537,5 @@ test("the phone setup delivers only the profile and signs the browser into Gate 
     url.pathname + url.search,
   );
   assert.equal(replay.headers["set-cookie"], undefined);
+  assert.equal(phoneOffCalls, 1);
 });

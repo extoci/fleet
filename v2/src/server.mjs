@@ -10,6 +10,7 @@ import { startDNS } from "./dns.mjs";
 import { Runtime } from "./runtime.mjs";
 import { Peers, peerRequest } from "./peers.mjs";
 import { page, escape, loginPage, wakePage } from "./pages.mjs";
+import { turnOffPhoneRoute } from "./platform.mjs";
 
 export async function body(request, limit = 1_048_576) {
   const chunks = [];
@@ -85,6 +86,8 @@ export async function start(home, options = {}) {
   const servers = [];
   const dnsServers = [];
   const eventClients = new Set();
+  const phoneTickets = new Set();
+  let phoneRouteClosed = true;
   let closed = false;
   let setupToken = secret();
   let setupExpires = Date.now() + 900_000;
@@ -163,6 +166,34 @@ export async function start(home, options = {}) {
         }
         return send(response, 200, loginPage(destination));
       }
+      if (isGate && url.pathname === "/phone" && request.method === "GET") {
+        const ticket = url.searchParams.get("ticket");
+        if (ticket) {
+          if (phoneTickets.has(ticket) && gate.claim(ticket, host)) {
+            phoneTickets.clear();
+            setupToken = null;
+            setupExpires = 0;
+            let routeClosed = true;
+            try {
+              const disable =
+                options.disablePhoneRoute ||
+                (() => turnOffPhoneRoute(home, { timeout: 5_000 }));
+              await disable();
+            } catch (error) {
+              routeClosed = false;
+              runtime.log(
+                "daemon",
+                `Automatic phone off failed: ${error.message}`,
+              );
+            }
+            phoneRouteClosed = routeClosed;
+            return redirect(response, "/phone", gate.session(host).cookie);
+          }
+          if (gate.authorized(request, host))
+            return redirect(response, "/phone");
+          return redirect(response, `${originFor("gate")}/__fleet/login`);
+        }
+      }
       if (url.pathname === "/__fleet/claim" && request.method === "GET") {
         if (!gate.claim(url.searchParams.get("ticket"), host))
           return redirect(
@@ -204,12 +235,29 @@ export async function start(home, options = {}) {
         if (request.method !== "GET")
           return json(response, 405, { error: "Method not allowed." });
         const apps = appList();
+        const appSections = apps.length
+          ? apps
+              .map(
+                (a) =>
+                  `<section><a href="${originFor(a.name)}">${escape(a.name)}</a><p><small>${a.running ? "Running" : "Ready on demand"}${a.error ? " · Latest edit needs attention" : ""}</small></p></section>`,
+              )
+              .join("")
+          : "<p>Run <code>fleet init</code> in a project directory to create your first app.</p>";
+        if (url.pathname === "/phone")
+          return send(
+            response,
+            200,
+            page(
+              "Phone connected",
+              `<h1>Phone connected.</h1><p>${phoneRouteClosed ? "Your phone trusts Fleet HTTPS and is signed in. The temporary setup link has been turned off automatically." : "Your phone trusts Fleet HTTPS and is signed in. Run <code>fleet phone off</code> on your computer to close the temporary setup link."}</p>${appSections}<p><a class="button" href="/">Open Fleet</a></p>`,
+            ),
+          );
         return send(
           response,
           200,
           page(
             "Your apps",
-            `<h1>Your apps.</h1><p>Private. On your computers.</p>${apps.length ? apps.map((a) => `<section><a href="${originFor(a.name)}">${escape(a.name)}</a><p><small>${a.running ? "Running" : "Ready on demand"}${a.error ? " · Latest edit needs attention" : ""}</small></p></section>`).join("") : "<p>Run <code>fleet init</code> in a project directory to create your first app.</p>"}`,
+            `<h1>Your apps.</h1><p>Private. On your computers.</p>${appSections}`,
           ),
         );
       }
@@ -358,21 +406,24 @@ export async function start(home, options = {}) {
       if (url.pathname === "/health")
         return json(response, 200, { version: 2 });
       if (
+        setupToken &&
         url.pathname === `/setup/${setupToken}` &&
         Date.now() < setupExpires &&
         request.method === "GET"
       ) {
         const ticket = gate.ticket("gate.fleet", 600_000);
+        phoneTickets.add(ticket);
         return send(
           response,
           200,
           page(
             "Connect your phone",
-            `<h1>Fleet on your phone.</h1><p>Keep Tailscale connected.</p><section><h2>1. Install your Fleet profile</h2><p>Download the profile, then open Settings and tap Profile Downloaded, Install.</p><a class="button" href="/setup/${setupToken}/fleet.mobileconfig">Download profile</a></section><section><h2>2. Enable trust</h2><p>In Settings, open General, About, Certificate Trust Settings. Enable Fleet private apps.</p><small>Your computer can then issue trusted website certificates. This profile adds its public certificate. It does not enroll the phone in device management.</small></section><section><h2>3. Open your apps</h2><p>Return here after enabling trust. This button connects your browser through Fleet Gate.</p><a class="button" href="${originFor("gate")}/__fleet/claim?ticket=${ticket}">Open Fleet</a></section>`,
+            `<h1>Fleet on your phone.</h1><p>Keep Tailscale connected and open this page in Safari.</p><section><h2>1. Install your Fleet profile</h2><p>Tap Download profile, then Allow. Open Settings &rarr; General &rarr; VPN &amp; Device Management, tap Fleet private apps, and tap Install.</p><a class="button" href="/setup/${setupToken}/fleet.mobileconfig">Download profile</a></section><section><h2>2. Enable trust</h2><p>In Settings, open General &rarr; About &rarr; Certificate Trust Settings and enable Fleet private apps.</p><small>Your computer can then issue trusted website certificates. This profile adds its public certificate. It does not enroll the phone in device management.</small></section><section><h2>3. Open your apps</h2><p>Return here after enabling trust. This button signs your phone into Fleet and turns off this temporary setup link automatically.</p><a class="button" href="${originFor("gate")}/phone?ticket=${ticket}">Open Fleet</a></section>`,
           ),
         );
       }
       if (
+        setupToken &&
         url.pathname === `/setup/${setupToken}/fleet.mobileconfig` &&
         Date.now() < setupExpires &&
         request.method === "GET"
@@ -419,6 +470,8 @@ export async function start(home, options = {}) {
         return json(response, 200, { reset: true });
       }
       if (method === "setup") {
+        phoneTickets.clear();
+        phoneRouteClosed = true;
         setupToken = secret();
         setupExpires = Date.now() + 900_000;
         return json(response, 200, {

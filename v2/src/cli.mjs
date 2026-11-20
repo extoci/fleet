@@ -22,6 +22,8 @@ import { authority, leaf, mobileProfile } from "./certificates.mjs";
 import {
   tailnet,
   tailscale,
+  tailscaleServe,
+  turnOffPhoneRoute,
   install,
   uninstall,
   openBrowser,
@@ -142,7 +144,10 @@ async function phone() {
     throw new Error(
       "Tailscale Serve port 8444 is already in use. Fleet will not replace it.",
     );
-  if (!owned) tailscale(["serve", "--bg", "--https=8444", proxy]);
+  if (!owned)
+    await tailscaleServe(["serve", "--bg", "--https=8444", proxy], {
+      retryCommand: "fleet phone",
+    });
   const url = `https://${config.dnsName}:8444${setup.path}`;
   write(path.join(home, "phone-serve.json"), {
     port: 8444,
@@ -157,7 +162,7 @@ async function phone() {
   console.log(url);
   console.log(`\nFleet Gate device code: ${pairing.code}`);
   console.log(
-    "\nInstall the Fleet profile in Settings, then enable Fleet in General > About > Certificate Trust Settings.",
+    "\nInstall the Fleet profile in Settings > General > VPN & Device Management, then enable Fleet private apps in General > About > Certificate Trust Settings.\nTap Open Fleet on the setup page to sign in at https://gate.fleet/phone — the temporary setup link closes automatically.",
   );
 }
 async function main() {
@@ -363,20 +368,9 @@ async function main() {
   }
   if (command === "phone") {
     if (args[0] === "off") {
-      const own = read(path.join(home, "phone-serve.json"), null);
-      if (!own) return out("There is no Fleet phone setup route to remove.");
-      const current = JSON.parse(tailscale(["serve", "status", "--json"]));
-      const handlers = current.Web?.[`${own.host}:8444`]?.Handlers;
-      if (
-        !handlers ||
-        Object.keys(handlers).length !== 1 ||
-        handlers["/"]?.Proxy !== own.proxy
-      )
-        throw new Error(
-          "The setup route has changed. Fleet did not remove it.",
-        );
-      tailscale(["serve", "--https=8444", "off"]);
-      fs.rmSync(path.join(home, "phone-serve.json"));
+      const result = await turnOffPhoneRoute(home);
+      if (!result.removed)
+        return out("There is no Fleet phone setup route to remove.");
       return out("Phone setup route removed.");
     }
     return phone();
