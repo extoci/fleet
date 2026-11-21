@@ -10,3 +10,6 @@ embeddedLanguageFormatting = "off"
 [[fmt.overrides]]
 files = ["*.ts", "*.tsx"]
 options = { semi = false }
+
+[lint]
+ignorePatterns = ["dist/**", ".holocron/**", ".vercel/**"]

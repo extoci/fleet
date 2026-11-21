@@ -1,74 +1,97 @@
 ---
-title: "Install the alpha and build your first app"
+title: "Install Fleet and build your first app"
 sidebarTitle: "Quickstart"
-description: "Install Fleet v2 from its alpha source, prepare a Tailscale gateway, create a notes app, and open it through private HTTPS and Fleet Gate."
+description: "Install Fleet with a single command, set up your Tailscale gateway, create a notes app, and open it over private HTTPS."
 icon: "lucide:terminal"
 ---
 
-<Warning>
-This installs the v2 test build and changes your computer's startup and certificate trust settings. Use a test computer. Do not use the repository-root installer: it installs Fleet v1.
-</Warning>
-
 ## Before you start
 
-You need Node.js **22.16 or later**, npm, Git, and [Tailscale](https://tailscale.com/download) installed and connected. You also need permission to configure DNS for your tailnet. Every device that opens an app must accept Tailscale DNS settings.
+Make sure [Tailscale](https://tailscale.com/download) is installed and connected on this computer, and that you can edit DNS settings for your tailnet. Every device that opens your apps should accept Tailscale DNS settings.
 
-The Linux installer currently targets Debian/Ubuntu-style systems with systemd and `update-ca-certificates`. Windows and macOS installation paths exist but still need native device qualification.
+Fleet runs on [Bun](https://bun.com) 1.4 or later. If Bun isn't installed yet, the Fleet installer installs it for you automatically.
 
-## 1. Install the v2 source
+<Note>
+On Linux, `fleet setup --install` targets Debian and Ubuntu systems with `systemd` and `update-ca-certificates`. macOS and Windows setup paths are included as well; see [troubleshooting](/docs/troubleshooting) if your OS uses a different service or certificate store.
+</Note>
 
-Until v2 is released as a package, install the alpha from the repository's `main` branch:
+## 1. Install Fleet
+
+**macOS and Linux:**
 
 ```sh
-git clone --branch main https://github.com/extoci/fleet.git fleet
-cd fleet/v2
-npm ci
-npm install -g .
+curl -fsSL https://fleet.extoci.lol/install | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://fleet.extoci.lol/install.ps1 | iex
+```
+
+The installer verifies the release checksum, unpacks Fleet into `~/.fleet/runtime`, adds the `fleet` command to your `PATH`, and installs Bun if needed. Re-running the same command updates Fleet in place.
+
+Check that `fleet` is on your `PATH`:
+
+```sh
 fleet --version
 ```
 
-Check that the version starts with `Fleet 2`. This installs a global `fleet` command and can replace a v1 command on your PATH. The versions keep separate state, but you should not assume both commands remain available under the same name.
+### Other ways to install
 
-<Note>
-The v2 alpha is still under development. Its source lives under `v2/`; the root installer remains v1. There is no published v2 release installer in this guide.
-</Note>
+Want to install directly from the `main` branch instead of a tagged release?
 
-## 2. Prepare your gateway
+```sh
+curl -fsSL https://fleet.extoci.lol/install | FLEET_VERSION=main bash
+```
 
-Choose a computer that will remain awake when you want to use your apps.
+Or clone the repository and link it with Bun:
+
+```sh
+git clone https://github.com/extoci/fleet.git
+cd fleet
+bun install
+bun link
+```
+
+## 2. Set up your gateway
+
+Run setup on the computer you want to keep awake as your gateway:
 
 ```sh
 fleet setup --install
 ```
 
-Fleet prepares private certificates, startup, the app gateway, and DNS service. The runtime runs as your normal user. Linux and macOS installation request administrator access. Windows requests administrator access for startup registration and tailnet firewall rules, then uses a scheduled task under your account.
+Setup creates a private certificate authority for your installation, configures local HTTPS certificate trust, and registers Fleet to start automatically in the background. On macOS and Linux, setup asks for `sudo` once to install the root-owned port helper for ports 443 and 53; the Fleet daemon and your apps always run as your normal user. On Windows, setup registers a scheduled task under your account and prompts for administrator approval to add Tailscale firewall rules.
 
 ## 3. Add the tailnet DNS rule
 
-Use the **exact nameserver address printed by setup**. In [Tailscale DNS settings](https://login.tailscale.com/admin/dns), add it as a restricted nameserver for the domain **`fleet`**. Preserve your existing DNS settings.
+Setup prints your gateway's Tailscale IP address. Open [Tailscale DNS settings](https://login.tailscale.com/admin/dns) and add it as a **restricted nameserver** for the domain **`fleet`**:
 
-This is one rule per tailnet, not one per app. If you use an exit node, enable **Use with exit node** for that nameserver. Do not add a global nameserver or turn on an exit node just for Fleet.
+- Leave your existing DNS settings alone — only restrict **`fleet`**.
+- This is a one-time rule for your entire tailnet; every future app reuses it.
+- If your devices use an exit node, enable **Use with exit node** on this nameserver.
 
-If an authorized `FLEET_TAILSCALE_TOKEN` with the `dns` scope already exists in your environment, Fleet can add the restricted mapping. It refuses to overwrite a conflicting `fleet` rule. You do not need to create an API token for manual setup.
+If `FLEET_TAILSCALE_TOKEN` (with the `dns` scope) is already set in your environment, `fleet setup` configures this rule for you automatically without overwriting any conflicting rule.
 
-## 4. Create and open an app
+## 4. Create and open your first app
 
-Move to the parent directory where you keep your app projects, outside Fleet's source checkout:
+Move to the folder where you keep your projects, then create a starter notes app:
 
 ```sh
 fleet init notes
 fleet open notes
 ```
 
-`fleet init notes` creates a `notes` directory with a working Preact client, server operations, and agent instructions. If you are already inside an existing project directory, use `fleet init --name notes` instead. Fleet refuses to overwrite conflicting source files.
+`fleet init notes` creates a `notes` folder containing a working Preact client, server operations, `fleet.json`, TypeScript definitions in `fleet.d.ts`, and agent instructions in `AGENTS.md`. To initialize inside an existing folder instead, run `fleet init --name notes` — Fleet never overwrites existing source files.
 
-`fleet open notes` signs your local browser in through Gate. The app's address is `https://notes.fleet`. Its data stays on this computer.
+`fleet open notes` signs your local browser in through Fleet Gate and opens `https://notes.fleet`.
 
-## 5. Make a change
+## 5. Let your coding agent edit it
 
-Ask your agent to read the generated `AGENTS.md` in the app checkout, then change the notes app. It should edit the source, **not** start Vite or a second development server.
+Open the `notes` folder with your coding agent and ask it to read `AGENTS.md` before making a change. Your agent edits files directly — it should **not** start Vite or another dev server.
 
-Fleet builds the edit and reloads open browsers after a successful build. A failed build keeps the last working build available. Unsaved browser form state is not preserved through the reload.
+As soon as a file is saved, Fleet rebuilds the app with Bun and reloads any open browsers. If an edit fails to build, the last working build stays online and the error shows up in `fleet logs notes`.
 
 ```sh
 fleet list --json
@@ -79,8 +102,8 @@ fleet logs notes
 ## Where next?
 
 <CardGroup cols={2}>
-  <Card title="Work with your agent" icon="lucide:bot" href="/docs/agents">Inspect state, call operations, and diagnose failed builds.</Card>
-  <Card title="Connect an iPhone" icon="lucide:smartphone" href="/docs/iphone">Understand the one-time certificate and Gate setup.</Card>
+  <Card title="Work with your agent" icon="lucide:bot" href="/docs/agents">Inspect apps, call server operations from the CLI, and verify edits cleanly.</Card>
+  <Card title="Connect your iPhone" icon="lucide:smartphone" href="/docs/iphone">Scan a QR code once to open every .fleet app in Safari.</Card>
 </CardGroup>
 
-If an app does not open, follow [troubleshooting](/docs/troubleshooting). To remove the installation, see [cleanup](/docs/troubleshooting#remove-fleet).
+If an app won't load, check [troubleshooting](/docs/troubleshooting). To remove Fleet later, see [removing Fleet](/docs/troubleshooting#remove-fleet).

@@ -1,0 +1,8 @@
+[fmt]
+singleQuote = false
+printWidth = 100
+embeddedLanguageFormatting = "off"
+ignorePatterns = ["web/**", "templates/**"]
+
+[lint]
+ignorePatterns = ["templates/**", "web/**"]

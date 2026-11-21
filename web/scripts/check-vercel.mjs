@@ -22,7 +22,14 @@ const functionRoot = join(output, 'functions/index.func');
 const functionConfig = JSON.parse(await readFile(join(functionRoot, '.vc-config.json'), 'utf8'));
 assert.equal(functionConfig.runtime, 'nodejs22.x', 'Node runtime matches package engines');
 assert.equal(functionConfig.supportsResponseStreaming, true, 'Streaming enabled');
-for (const asset of ['fleet-light.svg', 'fleet-dark.svg', 'favicon.svg']) {
+for (const asset of [
+  'fleet-light.svg',
+  'fleet-dark.svg',
+  'favicon.svg',
+  'install',
+  'install.sh',
+  'install.ps1',
+]) {
   assert((await stat(join(output, 'static', asset))).size > 0, `CDN asset ${asset}`);
 }
 

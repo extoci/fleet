@@ -41,7 +41,9 @@ try {
         ready = true;
         break;
       }
-    } catch {}
+    } catch {
+      // Server is still booting.
+    }
     await delay(200);
   }
   assert(ready, `Production server did not become ready:\n${output}`);
@@ -84,6 +86,9 @@ try {
     '/fleet-light.svg',
     '/fleet-dark.svg',
     '/favicon.svg',
+    '/install',
+    '/install.sh',
+    '/install.ps1',
     '/sitemap.xml',
     '/llms.txt',
     '/llms-full.txt',

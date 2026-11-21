@@ -1,26 +1,28 @@
 ---
 title: "The full-stack app format"
 sidebarTitle: "App format"
-description: "Build a Fleet app with a Preact client, server queries and mutations, a fleet.json manifest, and server-only secrets outside the browser bundle."
+description: "Build Fleet apps with a Preact frontend, server queries and mutations, static public assets, HTML head metadata, and server-only secrets."
 icon: "lucide:code"
 ---
 
-`fleet init` creates a working notes app. Keep its structure and let Fleet own the build and server processes.
+`fleet init` gives you a complete, working app in a handful of files. Keep this layout and let Fleet handle bundling, serving, HTTPS, and worker lifecycle for you.
 
-## Files in a checkout
+## Files in an app checkout
 
-- `fleet.json` declares the app's version, identity, name, and jobs.
-- `client/index.tsx` is the Preact browser entry point.
-- `client/style.css` styles your app.
-- `server/index.ts` exports queries, mutations, and scheduled job handlers.
-- `AGENTS.md` explains the app contract to a coding agent.
-- `.env.fleet.server` holds server-only configuration and is ignored by Git.
+- `fleet.json` — app ID, name, scheduled jobs, and optional HTML head settings (`title`, `themeColor`, `icon`, `manifest`).
+- `client/index.tsx` — Preact browser entry point.
+- `client/style.css` — stylesheet imported by the client.
+- `server/index.ts` — server `queries`, `mutations`, and `jobs`.
+- `public/` — optional static files served from the app root (for example `/icon.svg` or `/manifest.webmanifest`).
+- `fleet.d.ts` — TypeScript definitions for `fleet/client`, `FleetCtx`, and `FleetDb`.
+- `AGENTS.md` — concise instructions so any coding agent understands how Fleet works.
+- `.env.fleet.server` — server-only environment variables, automatically ignored by Git.
 
-App names form private origins such as `https://notes.fleet`. Keep the generated app ID: it identifies the app's persistent data. Do not casually rename or reuse an origin for an unrelated app.
+Your app name becomes its private origin, like `https://notes.fleet`. Keep the generated `id` in `fleet.json` — Fleet uses it to locate the app's persistent SQLite database.
 
 ## Server operations
 
-Export an object with `queries`, `mutations`, and optional `jobs`:
+Export a default object from `server/index.ts` with `queries`, `mutations`, and optional `jobs`:
 
 ```ts
 export default {
@@ -46,15 +48,16 @@ export default {
 };
 ```
 
-Queries are read-only. Mutations run in SQLite transactions. Fleet serializes operations per app. Validate all input on the server, even when the client already validates it.
+Here is how Fleet runs them:
 
-Handlers receive the owner's identity as `ctx.user.id`, persistent JSON through `ctx.db`, logging through `ctx.log`, server configuration through `ctx.env`, and an execution ID through `ctx.runId`. Do not treat the presence of Gate as input validation.
-
-Request operations time out after fifteen seconds; jobs after thirty seconds. Keep external calls short. A timed-out browser request is not automatically replayed.
+- **Queries are read-only** and can run concurrently while an async mutation is in flight, reading committed SQLite data.
+- **Mutations and jobs run in SQLite transactions**, serialized per app. If a handler throws, Fleet automatically rolls back every `ctx.db` write from that call.
+- **Every handler receives `ctx`**: `ctx.user.id` (the owner identity), `ctx.db` (`get`, `set`, `delete`, `list`), `ctx.env` (from `.env.fleet.server`), `ctx.log(...)`, and `ctx.runId` (for scheduled jobs).
+- **Keep handlers fast**: browser queries and mutations time out after 15 seconds, and jobs time out after 30 seconds. Always validate `input` on the server.
 
 ## Browser client
 
-Fleet provides `useQuery` and `useMutation` through `fleet/client`:
+Fleet bundles Preact for you (and aliases `react` / `react-dom` to `preact/compat`), so you don't need to install Preact inside each app. Import `useQuery`, `useMutation`, and `call` from `fleet/client`:
 
 ```tsx
 import { render } from 'preact';
@@ -68,36 +71,63 @@ function App() {
   if (error) return <p role="alert">{error.message}</p>;
   if (notes === undefined) return <p role="status">Loading…</p>;
 
-  return <main>
-    <h1>My notes</h1>
-    <button onClick={async () => {
-      try {
-        await addNote({ text: 'Hello from my app' });
-      } catch (error) {
-        alert(error.message);
-      }
-    }}>Add a note</button>
-    {notes.map(note => <p key={note.id}>{note.text}</p>)}
-  </main>;
+  return (
+    <main>
+      <h1>My notes</h1>
+      <button
+        onClick={async () => {
+          try {
+            await addNote({ text: 'Hello from my app' });
+          } catch (err) {
+            alert(err.message);
+          }
+        }}
+      >
+        Add a note
+      </button>
+      {notes.map((note) => (
+        <p key={note.id}>{note.text}</p>
+      ))}
+    </main>
+  );
 }
 
 render(<App />, document.getElementById('app'));
 ```
 
-`useQuery` returns `{ data, error }`. Queries refresh after mutations and while a visible page is open. Handle loading, empty, and error states. Use the generated notes starter for a fuller form with pending-state handling.
+Client helpers give you fine-grained control when you need it:
+
+- `useQuery(name, input?, { pollMs? })` returns `{ data, error }` and polls every 10 seconds while the tab is visible. Pass `{ pollMs: false }` or `{ pollMs: 0 }` to disable polling.
+- `useMutation(name, { invalidate? })` refreshes all active queries by default. Pass `{ invalidate: ['notes'] }` to refresh specific queries or `{ invalidate: false }` to skip refreshing.
+- `call(kind, name, input?, { keepalive? })` invokes an operation directly without refetching queries — handy with `{ keepalive: true }` for small writes on page unload.
+
+Uncaught browser errors and unhandled promise rejections are automatically reported back to Fleet and written to `fleet logs APP`, so your agent can spot frontend crashes without opening DevTools.
+
+## Static assets and HTML head
+
+Drop icons, manifests, fonts, or images into `public/`. Fleet snapshots `public/` alongside each build and serves those files from the site root (for example, `public/icon.svg` is served at `/icon.svg`).
+
+You can customize the HTML `<head>` in `fleet.json`:
+
+```json
+{
+  "title": "My Notes",
+  "themeColor": "#101214",
+  "icon": "/icon.svg",
+  "manifest": "/manifest.webmanifest"
+}
+```
 
 ## Server-only secrets
 
-Put secrets in `.env.fleet.server` and read them through `ctx.env` in a server handler. Never import that file into the client, put a key in `fleet.json`, or commit it to Git. Check the generated ignore rule before adding a value.
-
-Fleet does not inject those values into the browser bundle. Your handler can still leak them if it returns or logs them; inspect responses and logs accordingly.
+Store API keys and tokens in `.env.fleet.server` and read them with `ctx.env` inside server handlers. Fleet automatically adds `.env.fleet.server` to `.gitignore` and never includes it in browser bundles. Just make sure your server handlers don't return or log secret values.
 
 ## Builds and worker lifecycle
 
-Fleet watches registered source files and rebuilds them. Successful builds reload open browsers. Failed builds preserve the last successful bundle and report errors in `fleet logs APP`.
+Fleet watches your checkout and bundles both the client and server with Bun whenever files change. A successful build reloads open browsers automatically (note that unsaved form input isn't preserved across reloads). A broken build leaves the previous working bundle online and writes the compiler error to `fleet logs APP`.
 
-App workers start when needed and unload after thirty seconds without app operations. Cached frontends remain available. Persistent state belongs in `ctx.db`, not module variables. See [data and jobs](/docs/data-and-jobs).
+App workers wake on the first request and shut down after 30 seconds of inactivity while cached frontends stay ready. Put anything that needs to survive restarts in `ctx.db`, not module-level variables. See [data and jobs](/docs/data-and-jobs).
 
 <Warning>
-App code is trusted personal code. It runs with your OS user's permissions, not inside an untrusted-code sandbox. Review agent-written code before giving it sensitive files or credentials.
+App code runs with your normal operating-system user permissions, not inside an untrusted-code sandbox. Review agent-written code before giving an app sensitive credentials or access to private files.
 </Warning>

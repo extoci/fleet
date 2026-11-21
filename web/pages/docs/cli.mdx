@@ -1,26 +1,31 @@
 ---
 title: "Command-line reference"
 sidebarTitle: "CLI commands"
-description: "Reference Fleet v2 commands for setup, app creation, inspection, server operations, Gate, phone setup, backups, enrollment, and removal."
+description: "Complete reference for Fleet CLI commands: setup, creating apps, inspecting logs, calling operations, backups, Fleet Gate, phone setup, and removal."
 icon: "lucide:square-terminal"
 ---
 
-This reference describes the **v2 alpha**, not the repository-root Rust CLI. Check `fleet --version` before following it. Use `fleet --help` for the installed build's command list.
+Run `fleet --help` to see the summary in your terminal, or pass `--json` to commands like `list`, `inspect`, `logs`, `gate`, `phone`, and `doctor` for structured agent output.
 
-## Setup and runtime
+## Setup and daemon
 
 ```sh
 fleet setup --install
 fleet setup --join computer-invite.json --install
+fleet setup --local
 fleet daemon
 fleet doctor
 fleet --version
 fleet --help
 ```
 
-`setup --install` prepares the computer and background startup. Joining requires a private, unexpired invitation from the gateway. `daemon` runs Fleet in the foreground; it is not a second daemon to start alongside the installed service. `doctor` checks Tailscale, daemon access, and system DNS resolution.
+- `fleet setup --install` prepares certificates, system trust, and background startup on your gateway.
+- `fleet setup --join FILE --install` enrolls a secondary checkout computer using a gateway invitation.
+- `fleet setup --local` configures Fleet on `127.0.0.1` without Tailscale for local testing.
+- `fleet daemon` runs Fleet in the foreground (don't run it alongside the installed background service).
+- `fleet doctor` checks Tailscale, the local daemon, and `gate.fleet` DNS resolution.
 
-## Create and register
+## Creating and managing apps
 
 ```sh
 fleet init notes
@@ -29,38 +34,45 @@ fleet register /path/to/existing-app
 fleet unregister notes
 ```
 
-The first form creates a directory. The second uses the current directory and assigns its app name. `register` registers an existing Fleet checkout. `unregister` removes the route but keeps the source and data; the name stays bound to the app ID to avoid quietly reusing a browser origin.
+- `fleet init DIR` creates a new app folder with starter client, server, types, and `AGENTS.md`, then registers it.
+- `fleet init --name NAME` initializes an app in the current directory without overwriting existing source files.
+- `fleet register DIR` registers an existing Fleet app checkout.
+- `fleet unregister NAME` removes the app's route while preserving its source files and database. The name remains bound to its original app ID so a browser origin isn't silently reused by a different app.
 
-## Open and inspect
+## Opening and inspecting apps
 
 ```sh
-fleet open notes
+fleet open [NAME]
 fleet list --json
-fleet inspect notes
-fleet logs notes
+fleet inspect NAME
+fleet logs NAME
 ```
 
-`open` runs on the gateway and signs in the local browser through Gate. Without an app name, it opens Fleet. Use `list`, `inspect`, and `logs` on the app's checkout computer for local runtime information. `logs` shows recent lines, not a follow-mode stream.
+- `fleet open [NAME]` (run on the gateway) signs your local browser in through Fleet Gate and opens the app — or opens your app index at `https://gate.fleet` if no name is given.
+- `fleet list --json` returns all registered apps and their build/worker status.
+- `fleet inspect NAME` shows build revision, exported queries/mutations/jobs, and scheduled job state.
+- `fleet logs NAME` prints the last 100 lines of build output, server `ctx.log` messages, and browser client errors.
 
-## Call a server operation
+## Calling operations from the CLI
 
 ```sh
 fleet call notes queries notes
 fleet call notes mutations addNote '{"text":"Hello from the CLI"}'
+fleet call notes jobs dailyCheck
 ```
 
-The form is `fleet call APP KIND OPERATION [JSON]`. Input must be valid JSON. Operations run as the owner and mutations write real data. Run them on the checkout host.
+The syntax is `fleet call APP queries|mutations|jobs OPERATION [JSON]`. Operations run as the owner on the app's checkout computer.
 
-## Back up and restore data
+## Backups and restores
 
 ```sh
 fleet backup notes --output notes.sqlite
 fleet restore notes notes.sqlite
 ```
 
-Backup is allowed while the app runs. Restore requires Fleet to be stopped and saves the previous database. Run both commands on the checkout computer. See [data recovery](/docs/data-and-jobs#back-up-and-restore).
+`backup` takes a consistent SQLite snapshot while Fleet is running. `restore` requires Fleet to be stopped first and saves a copy of the previous database before replacing it. Run both on the checkout computer. See [data and jobs](/docs/data-and-jobs#back-up-and-restore).
 
-## Gate and phone setup
+## Fleet Gate and iPhone setup
 
 Run these on the gateway:
 
@@ -73,26 +85,24 @@ fleet phone off
 fleet profile --output fleet.mobileconfig
 ```
 
-`gate` creates a ten-minute device sign-in code; `--noopen` does not launch the browser. `gate reset` revokes all browser sessions. `phone` creates a private setup route and displays a QR code. `phone off` removes the owned setup route. `profile` exports the public certificate profile, not the signing key.
+- `fleet gate` prints a 10-minute device sign-in code and opens `https://gate.fleet` (skip the browser with `--noopen`).
+- `fleet gate reset` revokes all active browser sessions immediately.
+- `fleet phone` opens a temporary private setup link over Tailscale Serve and prints a QR code for Safari.
+- `fleet phone off` manually removes the temporary phone setup route if you didn't finish setup.
+- `fleet profile --output FILE` exports your installation's public root certificate profile (never its signing key).
 
-Profile export alone does not perform the full [phone setup](/docs/iphone): DNS, profile installation, certificate trust, and Gate sign-in are separate steps.
-
-## Add another computer
+## Enrolling another computer
 
 ```sh
 fleet invite --output computer-invite.json
 ```
 
-Run on the gateway. The file expires in ten minutes and enrolls one computer. See [multiple computers](/docs/computers).
+Run on the gateway to generate a single-use, 10-minute enrollment file for a second computer. See [multiple computers](/docs/computers).
 
-## Remove Fleet
+## Removing Fleet
 
 ```sh
 fleet uninstall
 ```
 
-Removes background startup and computer trust while retaining source and app data. Remove the tailnet DNS rule and phone profile separately when retiring the installation. See [cleanup](/docs/troubleshooting#remove-fleet).
-
-## Machine-readable output
-
-Use `--json` with commands that return structured information, such as `list`, `inspect`, `logs`, and `gate`. Treat sign-in URLs, device codes, invitation files, and any private app contents as sensitive, even when printed as JSON.
+Stops the background service and removes local startup files and computer certificate trust while keeping your app checkouts and SQLite databases intact. See [removing Fleet](/docs/troubleshooting#remove-fleet).
