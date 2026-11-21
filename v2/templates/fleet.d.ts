@@ -1,0 +1,36 @@
+interface FleetDb {
+  get<T = unknown>(key: string): T | null;
+  set<T>(key: string, value: T): T;
+  delete(key: string): boolean;
+  list<T = unknown>(prefix?: string): Array<{ key: string; value: T }>;
+}
+
+interface FleetCtx {
+  user: { id: string };
+  db: FleetDb;
+  env: Readonly<Record<string, string | undefined>>;
+  log(...values: unknown[]): void;
+  runId?: string;
+}
+
+declare module "fleet/server" {
+  export type FleetCtx = globalThis.FleetCtx;
+  export type FleetDb = globalThis.FleetDb;
+}
+
+declare module "fleet/client" {
+  export function call<T = unknown>(
+    kind: "queries" | "mutations",
+    name: string,
+    input?: unknown,
+  ): Promise<T>;
+
+  export function useQuery<T = unknown>(
+    name: string,
+    input?: unknown,
+  ): { data: T | undefined; error: Error | null };
+
+  export function useMutation<T = unknown, Input = unknown>(
+    name: string,
+  ): (input?: Input) => Promise<T>;
+}

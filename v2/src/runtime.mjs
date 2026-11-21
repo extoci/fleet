@@ -9,6 +9,23 @@ import { parseEnv } from "node:util";
 import { read, write, manifest } from "./state.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const reactAliases = {
+  react: "preact/compat",
+  "react-dom": "preact/compat",
+  "react-dom/client": "preact/compat/client",
+  "react/jsx-runtime": "preact/jsx-runtime",
+  "react/jsx-dev-runtime": "preact/jsx-dev-runtime",
+};
+const fleetPreact = {
+  name: "fleet-preact",
+  setup(build) {
+    build.onResolve({ filter: /^(preact|react|react-dom)(\/|$)/ }, ({ path }) => {
+      const target =
+        path === "preact" || path.startsWith("preact/") ? path : reactAliases[path];
+      if (target) return { path: fileURLToPath(import.meta.resolve(target)) };
+    });
+  },
+};
 function signature(directory) {
   const files = [];
   function walk(dir) {
@@ -221,6 +238,7 @@ export class Runtime {
             jsx: "automatic",
             jsxImportSource: "preact",
             alias: { "fleet/client": path.join(here, "client.mjs") },
+            plugins: [fleetPreact],
             outfile: "app.js",
             minify: true,
             target: ["safari16", "chrome110", "firefox115"],
@@ -231,6 +249,9 @@ export class Runtime {
             entryPoints: ["server/index.ts"],
             platform: "node",
             format: "esm",
+            banner: {
+              js: 'import { createRequire as __fleetCreateRequire } from "node:module"; const require = __fleetCreateRequire(import.meta.url);',
+            },
             outfile: "server.mjs",
             target: "node22",
           }),
