@@ -26,20 +26,22 @@ test("init writes public source and agent guidance while keeping Fleet state and
       dir,
     ]);
   await init(app);
-  const mode = (file) => fs.statSync(file).mode & 0o777;
-  for (const dir of ["client", "server"])
-    assert.equal(mode(path.join(app, dir)), 0o755);
-  for (const file of [
-    "client/index.tsx",
-    "client/style.css",
-    "server/index.ts",
-    "fleet.json",
-    "fleet.d.ts",
-  ])
-    assert.equal(mode(path.join(app, file)), 0o644, file);
-  assert.equal(mode(path.join(app, ".env.fleet.server")), 0o600);
-  assert.equal(mode(home), 0o700);
-  assert.equal(mode(path.join(home, "apps.json")), 0o600);
+  if (process.platform !== "win32") {
+    const mode = (file) => fs.statSync(file).mode & 0o777;
+    for (const dir of ["client", "server"])
+      assert.equal(mode(path.join(app, dir)), 0o755);
+    for (const file of [
+      "client/index.tsx",
+      "client/style.css",
+      "server/index.ts",
+      "fleet.json",
+      "fleet.d.ts",
+    ])
+      assert.equal(mode(path.join(app, file)), 0o644, file);
+    assert.equal(mode(path.join(app, ".env.fleet.server")), 0o600);
+    assert.equal(mode(home), 0o700);
+    assert.equal(mode(path.join(home, "apps.json")), 0o600);
+  }
   const types = path.join(app, "fleet.d.ts");
   assert.match(fs.readFileSync(types, "utf8"), /declare module "fleet\/client"/);
   const agents = fs.readFileSync(path.join(app, "AGENTS.md"), "utf8");
