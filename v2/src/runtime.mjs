@@ -119,7 +119,7 @@ export class Runtime {
     this.idleMs = idleMs;
     this.apps = new Map();
     this.closed = false;
-    this.terminations = new Set();
+    this.terminations = new Map();
     this.revisionListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e) => this.log("daemon", e.message)),
@@ -162,6 +162,7 @@ export class Runtime {
             ? path.join(this.home, "builds", app.id, last.revision)
             : null,
           jobs: last?.jobs || [],
+          operations: last?.operations,
           head: last?.head || {},
           hasPublic: last?.hasPublic || false,
         };
@@ -206,8 +207,10 @@ export class Runtime {
   // Build soon after an edit instead of waiting for the next tick. Editors
   // emit several events per save, so wait for them to settle.
   scheduleBuild(app) {
+    if (this.closed || this.apps.get(app.id) !== app) return;
     clearTimeout(app.rebuild);
     app.rebuild = setTimeout(() => {
+      app.rebuild = null;
       if (this.closed || !this.apps.has(app.id)) return;
       if (app.building) {
         app.building.then(
@@ -219,7 +222,7 @@ export class Runtime {
       this.build(app).catch((error) => {
         app.buildError = error.message;
       });
-    }, 50);
+    }, 250);
     app.rebuild.unref?.();
   }
   onRevision(listener) {
@@ -327,7 +330,7 @@ export class Runtime {
           );
           write(`${file}.gz`, zlib.gzipSync(output.contents, { level: 9 }));
         }
-        await this.validate(path.join(dir, "server.mjs"));
+        const operations = await this.validate(path.join(dir, "server.mjs"));
         await snapshotPublic(dir, publicRoot, publicFiles);
         if (this.closed) return false;
         const buildInputs = [
@@ -344,19 +347,16 @@ export class Runtime {
           );
         app.auditFiles = [...new Set([...buildInputs, ...publicInputs])];
         app.auditStamp = inputStamp(app.auditFiles);
-        this.unload(app);
-        app.revision = stamp;
-        app.buildDir = dir;
-        app.buildError = null;
-        app.jobs = current.jobs || [];
-        app.head = headMetadata(current);
-        app.hasPublic = publicFiles.length > 0;
-        write(path.join(this.home, "builds", app.id, "current.json"), {
+        const next = {
           revision: stamp,
-          jobs: app.jobs,
-          head: app.head,
-          hasPublic: app.hasPublic,
-        });
+          jobs: current.jobs || [],
+          operations,
+          head: headMetadata(current),
+          hasPublic: publicFiles.length > 0,
+        };
+        write(path.join(this.home, "builds", app.id, "current.json"), next);
+        this.unload(app);
+        Object.assign(app, next, { buildDir: dir, buildError: null });
         const parent = path.dirname(dir);
         const older = fs
           .readdirSync(parent, { withFileTypes: true })
@@ -394,6 +394,7 @@ export class Runtime {
               last.revision,
             );
             app.jobs = last.jobs;
+            app.operations = last.operations;
             app.head = last.head || {};
             app.hasPublic = last.hasPublic || false;
           }
@@ -408,9 +409,16 @@ export class Runtime {
   validate(module) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(
-        `import(${JSON.stringify(pathToFileURL(module).href)}).then(m=>{if(!m.default||typeof m.default!=='object')throw Error('Export a default app definition')})`,
-        { eval: true, resourceLimits: { maxOldGenerationSizeMb: 128 } },
+        new URL("./validate-worker.mjs", import.meta.url),
+        {
+          workerData: pathToFileURL(module).href,
+          resourceLimits: { maxOldGenerationSizeMb: 128 },
+        },
       );
+      let operations;
+      worker.on("message", (message) => {
+        if (message?.operations) operations = message.operations;
+      });
       const timer = setTimeout(() => {
         worker.terminate();
         reject(new Error("App module initialization exceeded five seconds."));
@@ -421,9 +429,10 @@ export class Runtime {
       });
       worker.once("exit", (code) => {
         clearTimeout(timer);
-        code === 0
-          ? resolve()
-          : reject(new Error(`App module exited with code ${code}.`));
+        if (code !== 0)
+          reject(new Error(`App module exited with code ${code}.`));
+        else if (!operations) reject(new Error("App definition did not load."));
+        else resolve(operations);
       });
     });
   }
@@ -431,12 +440,17 @@ export class Runtime {
     if (app.warming) return app.warming;
     if (app.worker) {
       app.lastUsed = Date.now();
-      return;
+      return app.worker;
     }
     app.warming = (async () => {
       if (!(await this.build(app)))
         throw new Error("App has no successful build. Run fleet logs.");
+      // Let the old worker release its SQLite connections before reopening them.
+      const stopping = this.terminations.get(app.id);
+      if (stopping) await stopping;
       if (this.closed) throw new Error("Fleet is stopping.");
+      if (this.apps.get(app.id) !== app)
+        throw new Error("App was unregistered.");
       const database = path.join(this.home, "data", app.id, "app.sqlite");
       fs.mkdirSync(path.dirname(database), { recursive: true, mode: 0o700 });
       const worker = new Worker(new URL("./app-worker.mjs", import.meta.url), {
@@ -460,13 +474,14 @@ export class Runtime {
       const ready = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error("App startup exceeded five seconds."));
-          this.unload(app);
+          if (app.worker === worker) this.unload(app);
         }, 5000);
         worker.on("message", (message) => {
+          if (app.worker !== worker) return;
           if (message.ready) {
             clearTimeout(timer);
             app.lastUsed = Date.now();
-            app.operations = message.operations;
+            app.operations ??= message.operations;
             resolve();
           } else if (message.log) this.log(app.id, message.log);
           else {
@@ -485,7 +500,7 @@ export class Runtime {
           clearTimeout(timer);
           this.log(app.id, error.message);
           reject(error);
-          this.unload(app);
+          if (app.worker === worker) this.unload(app);
         });
         worker.once("exit", () => {
           clearTimeout(timer);
@@ -494,13 +509,16 @@ export class Runtime {
         });
       });
       await ready;
+      return worker;
     })().finally(() => {
       app.warming = null;
     });
     return app.warming;
   }
   async call(app, kind, name, input, user = { id: "owner" }, runId) {
-    await this.wake(app);
+    const worker = await this.wake(app);
+    if (app.worker !== worker)
+      throw new Error("App stopped or updated. The operation was not retried.");
     if (app.pending.size >= 32)
       throw new Error("App is busy. Try again shortly.");
     return new Promise((resolve, reject) => {
@@ -516,7 +534,7 @@ export class Runtime {
         kind === "jobs" ? 30_000 : 15_000,
       );
       app.pending.set(id, { resolve, reject, timer });
-      app.worker.postMessage({ id, kind, name, input, user, runId });
+      worker.postMessage({ id, kind, name, input, user, runId });
     });
   }
   unload(app) {
@@ -531,8 +549,9 @@ export class Runtime {
     app.pending.clear();
     if (worker) {
       const ending = worker.terminate();
-      this.terminations.add(ending);
-      ending.finally(() => this.terminations.delete(ending));
+      this.terminations.set(app.id, ending);
+      const clear = () => this.terminations.delete(app.id);
+      ending.then(clear, clear);
     }
   }
   async tick() {
@@ -544,18 +563,28 @@ export class Runtime {
       const state = read(jobsFile, {});
       let dirty = false;
       for (const app of this.apps.values()) {
-        await this.build(app).catch((error) => {
-          app.buildError = error.message;
-        });
+        // Let the watcher settle a batch of edits before rebuilding.
+        if (!app.rebuild)
+          await this.build(app).catch((error) => {
+            app.buildError = error.message;
+          });
         for (const job of app.jobs || []) {
           const key = `${app.id}/${job.name}`;
           const old = state[key];
+          const now = Date.now();
+          const nextDue = now + job.everySeconds * 1000;
           if (!old) {
-            state[key] = { due: Date.now() + job.everySeconds * 1000 };
+            state[key] = { due: nextDue };
             dirty = true;
             continue;
           }
-          if (old.due > Date.now()) continue;
+          if (old.due > now) {
+            if (!old.runId && old.due > nextDue) {
+              state[key] = { ...old, due: nextDue };
+              dirty = true;
+            }
+            continue;
+          }
           const runId = old.runId || randomUUID();
           // Persist the occurrence before execution. An interrupted job retries
           // with the same runId after restart. External effects need idempotency.
@@ -609,7 +638,7 @@ export class Runtime {
     await Promise.allSettled(
       [...this.apps.values()].map((app) => app.building).filter(Boolean),
     );
-    await Promise.allSettled([...this.terminations]);
+    await Promise.allSettled(this.terminations.values());
     while (this.ticking)
       await new Promise((resolve) => setTimeout(resolve, 10));
   }

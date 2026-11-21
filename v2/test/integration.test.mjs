@@ -6,15 +6,25 @@ import path from "node:path";
 import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { authority, mobileProfile } from "../src/certificates.mjs";
 import { start } from "../src/server.mjs";
 import { write, secret, read } from "../src/state.mjs";
 
 const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
+const exec = promisify(execFile);
+async function runCli(home, ...args) {
+  const { stdout } = await exec(
+    process.execPath,
+    [cli, "--home", home, ...args, "--json"],
+    { timeout: 10_000 },
+  );
+  return JSON.parse(stdout);
+}
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, timeout = 10000) {
   const end = Date.now() + timeout;
@@ -299,6 +309,82 @@ test("queries read committed data while an async mutation waits, including on ro
   assert.deepEqual(await call("queries", "read"), expected);
 });
 
+test("inspect reports the current build operations before the worker starts", async (t) => {
+  const { daemon, home, project } = await fixture(t, { pollMs: 3_600_000 });
+  const initial = await runCli(home, "inspect", "notes");
+  assert.deepEqual(initial.operations.queries, ["notes"]);
+  assert.equal(initial.running, false);
+
+  const source = path.join(project, "server", "index.ts");
+  write(source, `
+    export default {
+      queries: { count() { return 0; }, invalid: true },
+      mutations: { reset() {} },
+      jobs: { check() {} },
+    };
+  `);
+  const app = daemon.runtime.find("notes");
+  await until(() => app.revision !== initial.revision && !app.building);
+  const expected = { queries: ["count"], mutations: ["reset"], jobs: ["check"] };
+  const updated = await runCli(home, "inspect", "notes");
+  assert.equal(updated.running, false);
+  assert.deepEqual(updated.operations, expected);
+  assert.deepEqual(
+    read(path.join(home, "builds", app.id, "current.json")).operations,
+    expected,
+  );
+
+  // Force the restarted daemon to use the cached build.
+  write(source, "export default {");
+  await daemon.close();
+  const restarted = await start(home, {
+    hosts: ["127.0.0.1"],
+    httpsPort: 0,
+    adminPort: 0,
+    noDns: true,
+    pollMs: 3_600_000,
+  });
+  try {
+    const cached = await runCli(home, "inspect", "notes");
+    assert.equal(cached.revision, updated.revision);
+    assert.equal(cached.running, false);
+    assert.ok(cached.error);
+    assert.deepEqual(cached.operations, expected);
+  } finally {
+    await restarted.close();
+  }
+});
+
+test("client error reports require Gate and a matching origin, and fit within log limits", async (t) => {
+  const { daemon, ca, home } = await fixture(t);
+  const auth = await signin(daemon, ca);
+  const report = (data, options) =>
+    request(daemon, ca, "notes.fleet", "/__fleet/client-error", {
+      method: "POST",
+      data,
+      ...options,
+    });
+  assert.equal((await report('{"message":"anonymous"}')).status, 401);
+  assert.equal((await report('{"message":"wrong origin"}', {
+    ...auth,
+    origin: "https://other.fleet",
+  })).status, 403);
+  assert.equal((await report("{}", auth)).status, 400);
+  assert.equal((await report(JSON.stringify({ message: "x".repeat(4096) }), auth)).status, 413);
+  const saved = await report(JSON.stringify({ message: "Startup failed\r\nnewline" }), auth);
+  assert.equal(saved.status, 204);
+  assert.equal(saved.text, "");
+  for (let i = 0; i < 7; i++)
+    assert.equal((await report('{"message":"repeat"}', auth)).status, 204);
+  assert.equal((await report('{"message":"rate limited"}', auth)).status, 429);
+  const { lines } = await runCli(home, "logs", "notes");
+  const reports = lines.filter((line) => line.includes("Client error: "));
+  assert.equal(reports.length, 8);
+  assert.match(reports[0], /Client error: Startup failed newline$/);
+  assert.doesNotMatch(lines.join("\n"), /anonymous|wrong origin|rate limited/);
+  assert.equal(daemon.runtime.find("notes").worker, null);
+});
+
 test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation work together", async (t) => {
   const { daemon, ca, home } = await fixture(t);
   assert.equal((await request(daemon, ca, "notes.fleet")).status, 303);
@@ -361,6 +447,7 @@ test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation 
   await until(() => !app.worker);
   assert.ok(fs.existsSync(path.join(home, "data", app.id, "app.sqlite")));
   const response = await post("queries/notes", null);
+  assert.equal(response.status, 200, response.text);
   assert.equal(
     JSON.parse(response.text).value[0].text,
     "Persistent personal data",
@@ -378,6 +465,35 @@ test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation 
     request(daemon, ca, "unknown.fleet"),
     /TLS|socket|alert|ECONNRESET|disconnected/i,
   );
+});
+
+test("waking an idle app waits for its previous worker to exit", async (t) => {
+  const { daemon } = await fixture(t, { pollMs: 3_600_000 });
+  const { runtime } = daemon;
+  const app = runtime.find("notes");
+  const saved = await runtime.call(app, "mutations", "addNote", {
+    text: "Keep this on wake",
+  });
+  const previous = app.worker;
+  const terminate = previous.terminate.bind(previous);
+  const { promise: canExit, resolve: release } = Promise.withResolvers();
+  const stopping = canExit.then(() => terminate());
+  t.mock.method(previous, "terminate", () => stopping);
+  let query;
+  let notes;
+  try {
+    app.lastUsed = 0;
+    await runtime.tick();
+    assert.equal(app.worker, null);
+    query = runtime.call(app, "queries", "notes", null);
+    await new Promise(setImmediate);
+    assert.ok(!app.worker, "A replacement started before the old worker exited.");
+  } finally {
+    release();
+    await stopping;
+    notes = await query;
+  }
+  assert.deepEqual(notes, [saved]);
 });
 
 test("live builds retain the previous app on build failure and keep data across daemon restart", async (t) => {
@@ -475,6 +591,38 @@ function readJob(home, app) {
     `${app.id}/dailyCheck`
   ];
 }
+
+test("a shorter job interval moves the next run forward but keeps retry due dates", async (t) => {
+  const { daemon, project, home } = await fixture(t, { pollMs: 3_600_000 });
+  const app = daemon.runtime.find("notes");
+  const manifest = path.join(project, "fleet.json");
+  const jobsFile = path.join(home, "jobs.json");
+  const nextKey = `${app.id}/dailyCheck`;
+  const retryKey = `${app.id}/retryCheck`;
+  const setInterval = (everySeconds) => write(manifest, {
+    ...read(manifest),
+    jobs: ["dailyCheck", "retryCheck"].map((name) => ({ name, everySeconds })),
+  });
+  setInterval(300);
+  await daemon.runtime.build(app);
+  await daemon.runtime.tick();
+  const before = read(jobsFile);
+  assert.ok(before[nextKey].due > Date.now() + 200_000);
+  before[nextKey].lastRun = "2026-01-01T00:00:00.000Z";
+  before[retryKey].runId = "interrupted-run";
+  write(jobsFile, before);
+
+  setInterval(5);
+  await daemon.runtime.build(app);
+  const started = Date.now();
+  await daemon.runtime.tick();
+  const after = read(jobsFile);
+  assert.ok(after[nextKey].due >= started + 5000);
+  assert.ok(after[nextKey].due <= Date.now() + 5000);
+  assert.equal(after[nextKey].lastRun, before[nextKey].lastRun);
+  assert.deepEqual(after[retryKey], before[retryKey]);
+  assert.equal(app.worker, null);
+});
 
 test("data snapshots are consistent and restoring requires the daemon to be stopped", async (t) => {
   const { daemon, home } = await fixture(t);
@@ -636,6 +784,17 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   const page = await request(gateway, ca, "remote-notes.fleet", "/watch/123", auth);
   assert.match(page.text, /<title>Remote notes<\/title>/);
   assert.match(page.text, /<link rel="icon" href="\/icon.png">/);
+  const inspect = await runCli(home, "inspect", "remote-notes");
+  assert.deepEqual(inspect.operations.queries, ["notes"]);
+  const report = await request(gateway, ca, "remote-notes.fleet", "/__fleet/client-error", {
+    ...auth,
+    method: "POST",
+    data: '{"message":"Remote crash"}',
+  });
+  assert.equal(report.status, 204);
+  assert.ok((await runCli(nodeHome, "logs", "remote-notes")).lines.some(
+    (line) => line.endsWith("Client error: Remote crash"),
+  ));
   const nodeApp = node.runtime.find("remote-notes");
   assert.ok(
     fs.existsSync(path.join(nodeHome, "data", nodeApp.id, "app.sqlite")),
