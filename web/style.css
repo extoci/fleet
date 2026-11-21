@@ -25,6 +25,18 @@
   --weight-heading: 400;
 }
 
+/* Holocron renders the navbar logo at --logo-height and derives every header
+   metric (row height, sticky offsets) from it, so this single override makes
+   the tightened wordmark larger without disturbing navbar alignment. */
+:root {
+  --logo-height: 36px;
+}
+@media (max-width: 560px) {
+  :root {
+    --logo-height: 32px;
+  }
+}
+
 .fleet-dither {
   display: block;
   width: 100%;
@@ -141,11 +153,11 @@
   color: var(--foreground) !important;
 }
 .fleet-arrow {
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.5;
+  stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
