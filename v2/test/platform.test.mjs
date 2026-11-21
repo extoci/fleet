@@ -1,11 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   keychainHashes,
   nonSystemLibraries,
   libraryRpaths,
   libraryCandidates,
   serviceFiles,
+  tailscaleApprovalUrl,
+  tailscaleFailureMessage,
+  tailscaleServe,
+  turnOffPhoneRoute,
 } from "../src/platform.mjs";
 
 test("macOS rpaths include all universal slices without duplicates", () => {
@@ -102,4 +109,151 @@ test("macOS uninstall reads every keychain copy of the Fleet root", () => {
   const output = `SHA-256 hash: ${"C".repeat(64)}\nSHA-1 hash: ${a}\nkeychain: "/Library/Keychains/System.keychain"\nSHA-1 hash: ${b}\n`;
   assert.deepEqual(keychainHashes(output), [a, b]);
   assert.deepEqual(keychainHashes(""), []);
+});
+
+test("Tailscale Serve error messages guide users clearly", () => {
+  const serveUrl = "https://login.tailscale.com/f/serve?node=npsfdyDTW611CNTRL";
+  assert.equal(
+    tailscaleApprovalUrl(
+      `Serve is not enabled on your tailnet.\nTo enable, visit:\n  ${serveUrl}\n`,
+    ),
+    serveUrl,
+  );
+  assert.equal(tailscaleApprovalUrl("no link here"), null);
+
+  const denied = tailscaleFailureMessage(
+    "sending serve config: Access denied: serve config denied\nTo not require root, use 'sudo tailscale set --operator=$USER' once.",
+    { retryCommand: "fleet phone", user: "exotic" },
+  );
+  assert.match(denied, /sudo tailscale set --operator=exotic/);
+  assert.match(denied, /Then run fleet phone again/);
+  assert.doesNotMatch(denied, /Tailscale is unavailable/);
+
+  const timedOut = tailscaleFailureMessage("", {
+    retryCommand: "fleet phone",
+    timedOut: true,
+    approvalUrl: serveUrl,
+  });
+  assert.match(timedOut, /Timed out waiting for Tailscale Serve approval/);
+  assert.ok(timedOut.includes(serveUrl));
+
+  const httpsNeeded = tailscaleFailureMessage(
+    "HTTPS is not enabled on your tailnet",
+    { retryCommand: "fleet phone" },
+  );
+  assert.match(httpsNeeded, /login\.tailscale\.com\/admin\/dns/);
+
+  const generic = tailscaleFailureMessage("failed to connect to local tailscaled");
+  assert.match(generic, /Tailscale is unavailable/);
+});
+
+test("tailscaleServe streams approval links live and surfaces clear errors", async () => {
+  const serveUrl = "https://login.tailscale.com/f/serve?node=test123";
+  const notices = [];
+  await tailscaleServe(
+    [
+      "-e",
+      `console.error("Serve is not enabled on your tailnet.\\nTo enable, visit:\\n  ${serveUrl}"); setTimeout(() => process.exit(0), 50);`,
+    ],
+    {
+      executable: process.execPath,
+      onNotice: (message) => notices.push(message),
+    },
+  );
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0].includes(serveUrl));
+  assert.match(notices[0], /Waiting for approval/);
+
+  await assert.rejects(
+    tailscaleServe(
+      [
+        "-e",
+        'console.error("sending serve config: Access denied: serve config denied"); process.exit(1);',
+      ],
+      { executable: process.execPath, retryCommand: "fleet phone" },
+    ),
+    (error) => {
+      assert.match(error.message, /sudo tailscale set --operator=/);
+      assert.doesNotMatch(error.message, /Tailscale is unavailable/);
+      return true;
+    },
+  );
+
+  const timeoutNotices = [];
+  await assert.rejects(
+    tailscaleServe(
+      [
+        "-e",
+        `console.error("To enable, visit: ${serveUrl}"); setTimeout(() => {}, 5000);`,
+      ],
+      {
+        executable: process.execPath,
+        timeout: 150,
+        onNotice: (message) => timeoutNotices.push(message),
+      },
+    ),
+    (error) => {
+      assert.match(error.message, /Timed out waiting for Tailscale Serve approval/);
+      assert.ok(error.message.includes(serveUrl));
+      return true;
+    },
+  );
+  assert.equal(timeoutNotices.length, 1);
+});
+
+test("turnOffPhoneRoute checks ownership before disabling Tailscale Serve", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-phone-off-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  assert.deepEqual(await turnOffPhoneRoute(home), {
+    removed: false,
+    reason: "missing",
+  });
+
+  const routeFile = path.join(home, "phone-serve.json");
+  fs.writeFileSync(
+    routeFile,
+    JSON.stringify({
+      port: 8444,
+      host: "emerald.ts.net",
+      proxy: "http://127.0.0.1:42173",
+    }),
+  );
+
+  await assert.rejects(
+    turnOffPhoneRoute(home, {
+      runTailscale: async () =>
+        JSON.stringify({
+          Web: {
+            "emerald.ts.net:8444": {
+              Handlers: { "/": { Proxy: "http://127.0.0.1:9999" } },
+            },
+          },
+        }),
+    }),
+    /The setup route has changed/,
+  );
+  assert.equal(fs.existsSync(routeFile), true);
+
+  const calls = [];
+  const result = await turnOffPhoneRoute(home, {
+    runTailscale: async (args) => {
+      calls.push(args);
+      if (args[1] === "status")
+        return JSON.stringify({
+          Web: {
+            "emerald.ts.net:8444": {
+              Handlers: { "/": { Proxy: "http://127.0.0.1:42173" } },
+            },
+          },
+        });
+      return "";
+    },
+  });
+  assert.deepEqual(result, { removed: true });
+  assert.deepEqual(calls, [
+    ["serve", "status", "--json"],
+    ["serve", "--https=8444", "off"],
+  ]);
+  assert.equal(fs.existsSync(routeFile), false);
 });

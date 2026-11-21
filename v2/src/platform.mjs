@@ -293,31 +293,65 @@ export function windowsInstaller(home, config) {
   const user = `${process.env.USERDOMAIN || os.hostname()}\\${os.userInfo().username}`;
   return `$ErrorActionPreference='Stop'\n$trigger=New-ScheduledTaskTrigger -AtStartup\n$principal=New-ScheduledTaskPrincipal -UserId ${ps(user)} -LogonType S4U -RunLevel Limited\n$settings=New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n$env:FLEET_V2_HOME=${ps(home)}\n$action=New-ScheduledTaskAction -Execute ${ps(process.execPath)} -Argument ${ps(`"${cli}" daemon --home "${home}"`)}\nStop-ScheduledTask -TaskName FleetV2 -ErrorAction SilentlyContinue\nRegister-ScheduledTask -TaskName FleetV2 -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\nGet-NetFirewallRule -DisplayName 'Fleet v2 HTTPS','Fleet v2 DNS UDP','Fleet v2 DNS TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule\nNew-NetFirewallRule -DisplayName 'Fleet v2 HTTPS' -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${config.mode === "node" ? 42174 : 443} -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nNew-NetFirewallRule -DisplayName 'Fleet v2 DNS TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 53 -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nNew-NetFirewallRule -DisplayName 'Fleet v2 DNS UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 53 -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nStart-ScheduledTask -TaskName FleetV2\n`;
 }
-export function tailscale(args) {
-  const candidates =
-    process.platform === "win32"
-      ? [
-          path.join(
-            process.env.ProgramFiles || "C:\\Program Files",
-            "Tailscale",
-            "tailscale.exe",
-          ),
+function tailscaleCandidates(platform = process.platform) {
+  return platform === "win32"
+    ? [
+        path.join(
+          process.env.ProgramFiles || "C:\\Program Files",
+          "Tailscale",
           "tailscale.exe",
+        ),
+        "tailscale.exe",
+      ]
+    : platform === "darwin"
+      ? [
+          "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+          "/usr/local/bin/tailscale",
+          "/opt/homebrew/bin/tailscale",
+          "tailscale",
         ]
-      : process.platform === "darwin"
-        ? [
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-            "/usr/local/bin/tailscale",
-            "/opt/homebrew/bin/tailscale",
-            "tailscale",
-          ]
-        : ["tailscale", "/usr/bin/tailscale"];
+      : ["tailscale", "/usr/bin/tailscale"];
+}
+export function tailscaleApprovalUrl(output) {
+  const match = String(output || "").match(
+    /https:\/\/login\.tailscale\.com\/[^\s"'<>]+/i,
+  );
+  return match ? match[0].replace(/[.,;)]+$/, "") : null;
+}
+export function tailscaleFailureMessage(
+  output,
+  {
+    retryCommand = "fleet phone",
+    timedOut = false,
+    approvalUrl = tailscaleApprovalUrl(output),
+    user = os.userInfo().username,
+  } = {},
+) {
+  const detail = String(output || "").trim();
+  if (/serve config denied|access denied|--operator=/i.test(detail))
+    return `Tailscale does not allow this user to manage Serve routes yet.\nRun once:\n  sudo tailscale set --operator=${user}\nThen run ${retryCommand} again.`;
+  if (timedOut) {
+    if (approvalUrl)
+      return `Timed out waiting for Tailscale Serve approval.\nOpen this link to enable it:\n  ${approvalUrl}\nThen run ${retryCommand} again.`;
+    return `Timed out waiting for Tailscale. Check that Tailscale is connected and Serve is enabled on your tailnet, then run ${retryCommand} again.`;
+  }
+  if (approvalUrl)
+    return `Tailscale Serve needs to be enabled once on your tailnet.\nOpen this link in your browser and click Enable:\n  ${approvalUrl}\nThen run ${retryCommand} again.`;
+  if (/https.*not enabled|enable https/i.test(detail))
+    return `Enable HTTPS certificates in https://login.tailscale.com/admin/dns, then run ${retryCommand} again.`;
+  return `Tailscale is unavailable. Connect Tailscale, then retry.${detail ? ` ${detail}` : ""}`;
+}
+export function tailscale(args, options = {}) {
+  const candidates = options.executable
+    ? [options.executable]
+    : tailscaleCandidates();
   let last;
   for (const exe of candidates) {
     try {
       return run(exe, args, {
         env: { ...process.env, TAILSCALE_BE_CLI: "1" },
         maxBuffer: 2_000_000,
+        stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
       last = e;
@@ -328,9 +362,102 @@ export function tailscale(args) {
     throw new Error(
       "Tailscale is not installed. Install it from https://tailscale.com/download, sign in, then retry.",
     );
+  const output = String(last?.stderr || last?.stdout || last?.message || "");
   throw new Error(
-    `Tailscale is unavailable. Connect Tailscale, then retry. ${String(last?.stderr || last?.message || "").trim()}`,
+    tailscaleFailureMessage(output, {
+      retryCommand: options.retryCommand,
+      timedOut: last?.code === "ETIMEDOUT",
+    }),
   );
+}
+export async function tailscaleServe(args, options = {}) {
+  const candidates = options.executable
+    ? [options.executable]
+    : tailscaleCandidates();
+  const timeout = options.timeout ?? 300_000;
+  const onNotice =
+    options.onNotice || ((message) => process.stderr.write(`${message}\n`));
+  let lastError;
+  for (const exe of candidates) {
+    try {
+      return await new Promise((resolve, reject) => {
+        const child = spawn(exe, args, {
+          env: { ...process.env, TAILSCALE_BE_CLI: "1" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let output = "";
+        let approvalUrl = null;
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+        }, timeout);
+        const onData = (chunk) => {
+          output += chunk.toString("utf8");
+          if (!approvalUrl) {
+            const url = tailscaleApprovalUrl(output);
+            if (url) {
+              approvalUrl = url;
+              onNotice(
+                `Tailscale Serve needs to be enabled once on your tailnet.\nOpen this link in your browser and click Enable:\n  ${url}\nWaiting for approval... (press Ctrl+C to cancel)`,
+              );
+            }
+          }
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onData);
+        child.on("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0 && !timedOut) return resolve(output);
+          reject(
+            new Error(
+              tailscaleFailureMessage(output, {
+                retryCommand: options.retryCommand,
+                timedOut,
+                approvalUrl,
+              }),
+            ),
+          );
+        });
+      });
+    } catch (error) {
+      lastError = error;
+      if (error.code !== "ENOENT") break;
+    }
+  }
+  if (lastError?.code === "ENOENT")
+    throw new Error(
+      "Tailscale is not installed. Install it from https://tailscale.com/download, sign in, then retry.",
+    );
+  throw lastError;
+}
+export async function turnOffPhoneRoute(home, options = {}) {
+  const file = path.join(home, "phone-serve.json");
+  const own = read(file, null);
+  if (!own) return { removed: false, reason: "missing" };
+  const runTailscale =
+    options.runTailscale ||
+    ((args) =>
+      tailscaleServe(args, {
+        retryCommand: options.retryCommand || "fleet phone off",
+        timeout: options.timeout ?? 20_000,
+        onNotice: () => {},
+      }));
+  const current = JSON.parse(await runTailscale(["serve", "status", "--json"]));
+  const handlers = current.Web?.[`${own.host}:8444`]?.Handlers;
+  if (
+    !handlers ||
+    Object.keys(handlers).length !== 1 ||
+    handlers["/"]?.Proxy !== own.proxy
+  )
+    throw new Error("The setup route has changed. Fleet did not remove it.");
+  await runTailscale(["serve", "--https=8444", "off"]);
+  fs.rmSync(file, { force: true });
+  return { removed: true };
 }
 export function tailnet() {
   const state = JSON.parse(tailscale(["status", "--json"]));
