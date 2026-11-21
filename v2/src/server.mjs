@@ -3,6 +3,8 @@ import path from "node:path";
 import http from "node:http";
 import https from "node:https";
 import tls from "node:tls";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { Gate, sameSecret } from "./gate.mjs";
 import { authority, leaf, mobileProfile } from "./certificates.mjs";
 import { hostname, read, acquire, write, secret } from "./state.mjs";
@@ -37,7 +39,90 @@ function send(
     "X-Frame-Options": "DENY",
     ...headers,
   });
+  if (data instanceof Readable) return pipeline(data, response);
   response.end(data);
+}
+const publicTypes = {
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json",
+  ".json": "application/json",
+  ".txt": "text/plain; charset=utf-8",
+  ".woff2": "font/woff2",
+  ".css": "text/css",
+  ".js": "text/javascript",
+  ".html": "text/html; charset=utf-8",
+};
+function safePublicPath(value) {
+  return (
+    typeof value === "string" &&
+    value.startsWith("/") &&
+    !/[\\\x00-\x1f\x7f]/.test(value) &&
+    !value.slice(1).split("/").some((part) =>
+      !part || part === "." || part === ".."
+    ) &&
+    !/^\/(?:__fleet(?:\/|$)|app\.(?:js|css)$)/.test(value)
+  );
+}
+function requestPublicPath(url) {
+  try {
+    const file = decodeURIComponent(url.split("?", 1)[0]);
+    if (safePublicPath(file)) return file;
+  } catch {
+    // An invalid escape cannot refer to an asset.
+  }
+}
+function publicAsset(app, name, ifNoneMatch) {
+  if (!app.hasPublic || !safePublicPath(name)) return;
+  const file = path.join(app.buildDir, "public", name.slice(1));
+  let stat;
+  try {
+    stat = fs.statSync(file, { throwIfNoEntry: false });
+  } catch (error) {
+    if (error.code === "ENOTDIR") return;
+    throw error;
+  }
+  if (!stat?.isFile()) return;
+  const etag = `"${app.revision}"`;
+  const matched =
+    typeof ifNoneMatch === "string" &&
+    ifNoneMatch.split(",").some((tag) =>
+      ["*", etag, `W/${etag}`].includes(tag.trim())
+    );
+  return {
+    file,
+    status: matched ? 304 : 200,
+    type:
+      publicTypes[path.extname(file).toLowerCase()] || "application/octet-stream",
+    etag,
+    size: stat.size,
+  };
+}
+function sendPublic(response, asset, { head, peer } = {}) {
+  const { status, type, etag, size } = asset;
+  const data =
+    status === 304 || head
+      ? undefined
+      : asset.stream || fs.createReadStream(asset.file);
+  return send(response, status, data, type, {
+    "Cache-Control": "private, no-cache",
+    ETag: etag,
+    ...(status === 200 && (!peer || !head) ? { "Content-Length": size } : {}),
+    ...(peer ? { "X-Fleet-Public-Asset": "1", "X-Fleet-Asset-Size": size } : {}),
+  });
+}
+function appHead(app) {
+  const { title = app.name, themeColor, icon, manifest } = app.head || {};
+  return (
+    `<title>${escape(title)}</title>` +
+    (themeColor ? `<meta name="theme-color" content="${escape(themeColor)}">` : "") +
+    (icon ? `<link rel="icon" href="${escape(icon)}"><link rel="apple-touch-icon" href="${escape(icon)}">` : "") +
+    (manifest ? `<link rel="manifest" href="${escape(manifest)}">` : "")
+  );
 }
 export function encodings(header = "") {
   const accepted = new Set();
@@ -377,10 +462,39 @@ export async function start(home, options = {}) {
           ...(encoding ? { "Content-Encoding": encoding[0] } : {}),
         });
       }
+      const publicPath = app.hasPublic && requestPublicPath(request.url);
+      if (publicPath) {
+        const head = request.method === "HEAD";
+        const ifNoneMatch = request.headers["if-none-match"];
+        if (app.peer) {
+          const asset = await peers.call(app, "asset", {
+            publicPath,
+            head,
+            ifNoneMatch,
+          });
+          if (asset instanceof Readable) {
+            if (head || asset.statusCode === 304) asset.resume();
+            return await sendPublic(
+              response,
+              {
+                stream: asset,
+                status: asset.statusCode,
+                type: asset.headers["content-type"],
+                etag: asset.headers.etag,
+                size: asset.headers["x-fleet-asset-size"],
+              },
+              { head },
+            );
+          }
+        } else {
+          const asset = publicAsset(app, publicPath, ifNoneMatch);
+          if (asset) return await sendPublic(response, asset, { head });
+        }
+      }
       return send(
         response,
         200,
-        `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(app.name)}</title>${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}<div id="app"></div><script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${appHead(app)}${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}</head><body><div id="app"></div><script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></body></html>`,
       );
     } catch (error) {
       runtime.log("daemon", error.message);
@@ -606,6 +720,14 @@ export async function start(home, options = {}) {
                   args.input,
                 ),
               });
+            if (method === "asset" && args.publicPath) {
+              const asset = publicAsset(app, args.publicPath, args.ifNoneMatch);
+              if (!asset) return json(response, 200, { status: 404 });
+              return await sendPublic(response, asset, {
+                head: args.head === true,
+                peer: true,
+              });
+            }
             if (
               method === "asset" &&
               ["app.js", "app.css"].includes(args.file)
@@ -626,7 +748,8 @@ export async function start(home, options = {}) {
               error: "Unknown computer operation.",
             });
           } catch (error) {
-            json(response, 500, { error: error.message });
+            if (response.headersSent) response.end();
+            else json(response, 500, { error: error.message });
           }
         },
       );

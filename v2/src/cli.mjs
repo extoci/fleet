@@ -133,6 +133,10 @@ To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs ar
 
 Import useQuery, useMutation, and call from fleet/client. Fleet provides Preact. Do not install Preact in the app. useQuery returns { data, error }. The error starts as null. Use call(kind, name, input) to write without refetching all queries.
 
+useQuery(name, input, { pollMs }) polls every 10 seconds by default. Set pollMs to false or 0 to stop interval polling. useMutation(name, { invalidate }) refreshes all active queries by default. Set invalidate to an array of query names or to false to skip the refresh. Pass { keepalive: true } as the fourth argument to call for a small write during page unload.
+
+Put static files in public/. Set title, themeColor, icon, or manifest in fleet.json to change the HTML head. Use paths from the site root, such as /icon.svg, for icon and manifest.
+
 Fleet Gate handles sign-in. Do not add a separate login system.
 
 Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.

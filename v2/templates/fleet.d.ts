@@ -23,14 +23,17 @@ declare module "fleet/client" {
     kind: "queries" | "mutations",
     name: string,
     input?: unknown,
+    options?: { keepalive?: boolean },
   ): Promise<T>;
 
   export function useQuery<T = unknown>(
     name: string,
     input?: unknown,
+    options?: { pollMs?: number | false },
   ): { data: T | undefined; error: Error | null };
 
   export function useMutation<T = unknown, Input = unknown>(
     name: string,
+    options?: { invalidate?: string[] | false },
   ): (input?: Input) => Promise<T>;
 }
