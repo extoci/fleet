@@ -31,6 +31,9 @@
   pointer-events: none;
   image-rendering: pixelated;
 }
+.fleet-plumbob {
+  pointer-events: auto;
+}
 
 .fleet-landing {
   --fleet-violet: var(--primary);
@@ -49,30 +52,37 @@
 .fleet-hero {
   position: relative;
   isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  align-items: center;
+  gap: 32px;
+  padding: 20px 0 64px;
+}
+.fleet-hero-copy {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 24px;
-  padding: 96px 0 88px;
+}
+.fleet-hero-mark {
+  position: relative;
+  width: 220px;
+  height: 260px;
+  justify-self: center;
+}
+.fleet-hero-mark::before {
+  content: '';
+  position: absolute;
+  inset: -14% -22%;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(ellipse 62% 56% at 50% 50%, var(--background) 32%, transparent 74%);
 }
 .fleet-hero-field {
   position: absolute;
   z-index: -1;
   inset: 0 -4% 0 52%;
   mask-image: linear-gradient(to right, transparent, rgb(0 0 0 / 0.5) 18%, black 40%);
-}
-.fleet-badge {
-  font-family: var(--font-code);
-  font-size: 12px;
-  color: var(--muted-foreground);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 3px 10px;
-  background: var(--background);
-  transition: color 0.15s;
-}
-.fleet-badge:hover {
-  color: var(--foreground);
 }
 .fleet-hero h1 {
   max-width: 640px;
@@ -225,8 +235,16 @@
 
 @media (max-width: 860px) {
   .fleet-hero {
-    padding: 56px 0 64px;
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 12px 0 48px;
     overflow: clip;
+  }
+  .fleet-hero-mark {
+    order: -1;
+    width: 108px;
+    height: 128px;
+    justify-self: start;
   }
   .fleet-hero-field {
     inset: auto 0 0 0;
