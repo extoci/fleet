@@ -1,52 +1,51 @@
 ---
 title: "Trust, identity, and private app access"
 sidebarTitle: "Security model"
-description: "Understand Fleet's trust boundaries: Tailscale connectivity, per-installation certificate keys, Gate sign-in, app permissions, and data recovery."
+description: "How Fleet separates private networking, per-installation HTTPS certificates, Fleet Gate sessions, app permissions, and data backups."
 icon: "lucide:shield-check"
 ---
 
-Fleet is a personal runtime for code you trust, on computers you control. Private networking, HTTPS, sign-in, and code isolation solve different problems. None replaces the others.
+Fleet is built for personal code you trust on computers you own. Each layer — private networking, HTTPS certificates, Gate sign-in, and OS permissions — solves a distinct problem.
 
-## Private connectivity
+## Private networking
 
-Tailscale connects your devices. Fleet does not create guest app links or configure public Funnel. Existing tailnet policies remain your responsibility; Fleet does not rewrite them to make enrollment work.
+Tailscale handles encrypted device-to-device transport. Fleet never exposes public links, guest access, or Tailscale Funnel, and it never rewrites your tailnet ACL policy.
 
-The gateway routes only registered app names. Unknown `.fleet` names are not a wildcard public hosting service.
+Your gateway only resolves and routes `gate.fleet` and apps you explicitly register. Unknown `.fleet` hostnames are rejected during both DNS lookup and TLS SNI negotiation.
 
-## Certificate trust
+## Per-installation certificate authority
 
-Every installation creates its own private certificate authority. The signing key stays on the gateway. The iPhone profile contains only its public root certificate; Fleet must never distribute a shared signing key.
+During `fleet setup`, your gateway creates a unique root certificate authority stored in `~/.fleet/v2/pki`. Its private signing key never leaves the gateway.
 
-Trusting that root is broad system certificate trust. Only trust a gateway you own, protect its state directory, and remove the profile when you retire it. A new or recovered CA can require re-enrollment. Do not use a browser's certificate bypass as normal operation.
+Each registered app gets a short-lived leaf certificate for its exact hostname (never a wildcard). The iPhone `.mobileconfig` profile contains **only** the public root certificate — never the signing key and never any device management payload.
 
-## Gate identity
+Because trusting a root CA is a system-wide decision, only trust a root from a gateway you own, protect `~/.fleet/v2`, and remove the profile if you retire the gateway.
 
-Fleet Gate authenticates the owner after HTTPS succeeds. The phone's certificate profile does not identify you. Gateway commands generate short-lived device codes and setup links; protect them like credentials.
+## Fleet Gate sessions
 
-App cookies are host-specific, Secure, and HttpOnly. An app does not receive the Gate session. `fleet gate reset` revokes browser sessions across the installation.
+Certificate trust proves you're talking to your own gateway; **Fleet Gate** authenticates the browser session.
+
+- Sign-in uses short-lived device codes (`fleet gate`) or owner-only local tickets (`fleet open`).
+- Sessions use `__Host-fleet` cookies (`Secure`, `HttpOnly`, `SameSite=Lax`, host-scoped per app) so an app never sees your Gate cookie or another app's cookie.
+- State-changing `POST` requests check the `Origin` header to block cross-site request forgery.
+- `fleet gate reset` revokes every browser session immediately:
 
 ```sh
 fleet gate reset
 ```
 
-## Trusted app code
+## Trusted personal code
 
-App code runs with your OS user's permissions. Fleet is **not** an untrusted-code sandbox. Gate does not stop a malicious server handler from reading files that your account can read or making network requests.
+App servers run in Bun workers under your normal operating-system user account. Fleet is **not** a sandbox for untrusted third-party code: a server handler can access files and network resources that your user account can access.
 
-Review agent-generated code. Use a dedicated test computer or OS account when experimenting. Do not give an app credentials or files it does not need.
+Review agent-written code before handing an app sensitive credentials or private files. On Linux and macOS, only a tiny root-owned port forwarder binds ports 443 and 53; the Fleet daemon and all app workers run strictly as your unprivileged user.
 
 ## Secrets and invitations
 
-Server configuration belongs in `.env.fleet.server`, which is ignored by Git. Read it through `ctx.env`; never import it into the client or return it in an operation response.
+- Store API keys in `.env.fleet.server` and read them from `ctx.env` on the server. Fleet excludes this file from Git and never bundles it into the browser client.
+- Computer invitations (`fleet invite`) are single-use and expire after 10 minutes. Transfer them privately and delete copies once enrolled.
+- Keep device codes, setup URLs, invitation files, and SQLite backups out of public issues and logs.
 
-Computer invitations enroll one device and expire after ten minutes. Transfer them privately and delete copies after enrollment. Do not paste invitation contents, private state, device codes, or backup data into public issues.
+## Data safety
 
-## Data is a separate responsibility
-
-Persistent data survives worker unloading, rebuilds, and daemon restarts. That is not automatic history or a recovery guarantee. A valid edit can still make bad writes, and a host can fail.
-
-Keep [independent backups](/docs/data-and-jobs#back-up-and-restore) before schema changes or significant agent edits. A last-good build is an availability fallback, not a database rollback.
-
-## Alpha limits
-
-These are the intended boundaries of the current alpha, not an external security audit. Real iPhone and native installation qualification are still pending. Use the [source](https://github.com/extoci/fleet/pull/2) to inspect implementation details before trusting Fleet with sensitive workloads.
+A failed build keeps your previous working bundle online, which protects availability — not data history. A valid edit that compiles can still overwrite or delete records in `ctx.db`. Use `fleet backup` before risky edits or schema changes, and keep backups off the app host. See [data and jobs](/docs/data-and-jobs#back-up-and-restore).

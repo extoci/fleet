@@ -3,38 +3,63 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  fleet:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tmux
-        if: runner.os == 'macOS'
-        run: command -v tmux || brew install tmux
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
-      - name: Verify standalone installer
+          bun-version: "1.4.5"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run format:check
+      - name: Lint with Bun
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          sh -n fleet.sh
-          cargo build --release
-          temporary_home="$(mktemp -d)"
-          mkdir -p "$temporary_home/bin"
-          export PATH="$temporary_home/bin:$PATH"
-          HOME="$temporary_home" \
-            SHELL=/bin/bash \
-            FLEET_BINARY="$PWD/target/release/fleet" \
-            bash ./fleet.sh
-          test "$(command -v fleet)" = "$temporary_home/bin/fleet"
-          fleet --version
-          rm -rf "$temporary_home"
+          if bun lint --no-script --help >/dev/null 2>&1; then
+            bun lint --no-script --max-warnings 0
+          else
+            bunx bun@canary lint --no-script --max-warnings 0
+          fi
+      - run: bun test test
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run typecheck
+      - run: bun run format:check
+      - name: Lint with Bun
+        shell: bash
+        run: |
+          if bun lint --no-script --help >/dev/null 2>&1; then
+            bun lint --no-script --max-warnings 0
+          else
+            bunx bun@canary lint --no-script --max-warnings 0
+          fi
+      - run: bun test
+      - run: bun run build
+      - run: bun run test:production
+      - run: bun run build:vercel
+      - run: bun run test:vercel

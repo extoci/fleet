@@ -1,116 +1,111 @@
-# fleet – make your computers feel like one computer
+# Fleet
 
-Fleet v2 has a separate [app runtime and test guide](v2/README.md). It creates personal apps, serves `.fleet` addresses, and provides Fleet Gate login. The instructions below describe Fleet v1.
+**Personal apps on your own computers, open from every device on your tailnet.**
 
-[watch the video](https://www.youtube.com/watch?v=ZvUwW5hoY80)
+Your coding agent writes the app. Fleet builds and updates it automatically with Bun, serves it over private HTTPS at addresses like `https://notes.fleet`, protects it behind Fleet Gate, and stops idle app workers when you're not using them.
+
+Docs and guides live at **[fleet.extoci.lol](https://fleet.extoci.lol)**.
 
 ---
 
-fleet is a local tool that magically connects your development machines for ai coding.
+## Install
 
-one machine is the **captain**. the others get real `.local` names, passwordless ssh from the captain, persistent themed tmux sessions, and ai agent integrations. 
+Make sure [Tailscale](https://tailscale.com/download) is installed and connected. The installer verifies the release checksum and installs [Bun](https://bun.com) 1.4+ automatically if it isn't already installed.
 
-fleet also gives agents a skill that tells them which machines exist and how to reach them.
-
-fleet only handles the computers. your coding tools decide what work happens on them.
-
-## installation
-
-install or update to the latest release:
+**macOS and Linux:**
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | bash
+curl -fsSL https://fleet.extoci.lol/install | bash
 ```
 
-the installer downloads the correct binary for macos or linux, verifies its checksum, and puts `fleet` in a writable user directory on your `PATH` when possible.
+**Windows (PowerShell):**
 
-## usage
+```powershell
+irm https://fleet.extoci.lol/install.ps1 | iex
+```
 
-on the computer you want to use as the captain:
+To install directly from the `main` branch instead of a tagged release:
 
 ```sh
-fleet init
+curl -fsSL https://fleet.extoci.lol/install | FLEET_VERSION=main bash
 ```
 
-on another computer on the same trusted network:
+Or from a local checkout with Bun:
 
 ```sh
-fleet join
+git clone https://github.com/extoci/fleet.git
+cd fleet
+bun install
+bun link
 ```
 
-back on the captain:
+## Quickstart
+
+1. Set up your first computer as the gateway:
+
+   ```sh
+   fleet setup --install
+   ```
+
+2. Add the restricted **`fleet`** nameserver printed by setup in [Tailscale DNS settings](https://login.tailscale.com/admin/dns) (one-time rule for your tailnet).
+
+3. Create and open your first app:
+
+   ```sh
+   fleet init notes
+   fleet open notes
+   ```
+
+4. Connect your iPhone once with a QR code:
+
+   ```sh
+   fleet phone
+   ```
+
+5. Point your coding agent at `notes/AGENTS.md` and ask it to change the app. Fleet rebuilds on save and reloads open browsers automatically — no separate dev server or deploy step.
+
+## How an app works
+
+Each checkout created by `fleet init` contains:
+
+- `fleet.json` — app ID, name, optional `jobs` schedule, and HTML head metadata (`title`, `themeColor`, `icon`, `manifest`)
+- `client/index.tsx` & `client/style.css` — Preact frontend using `useQuery`, `useMutation`, and `call` from `fleet/client`
+- `server/index.ts` — server `queries`, `mutations`, and scheduled `jobs` backed by SQLite JSON storage (`ctx.db`)
+- `public/` — optional static assets served from the app root
+- `.env.fleet.server` — server-only secrets read via `ctx.env` (ignored by Git)
+- `fleet.d.ts` & `AGENTS.md` — types and instructions for coding agents
+
+Useful commands for you and your agent:
 
 ```sh
-fleet status
-ssh machine.local
+fleet list --json
+fleet inspect notes
+fleet logs notes
+fleet call notes queries notes
+fleet call notes mutations addNote '{"text":"A note from my agent"}'
+fleet backup notes --output notes.sqlite
 ```
 
-that ssh connection opens or reattaches to a tmux session named `fleet`, so closing your laptop does not also close whatever was running on emerald.
+See the full [CLI reference](https://fleet.extoci.lol/docs/cli), [app format](https://fleet.extoci.lol/docs/apps), and [security model](https://fleet.extoci.lol/docs/security).
 
-the machines get different terminal colors so you can easily tell where you're connected, at a glance.
+## Development
 
-the bottom-right of the Fleet tmux status bar shows the current whole-machine CPU and memory percentages. The values refresh every few seconds and fall back quietly if the operating system cannot provide a reading.
-
-view a fleet-wide coding-agent usage summary, or include the full daily table:
+Fleet uses **Bun** across the entire repository — runtime, bundler, package manager, test runner, type checker (`bun check`), formatter (`bun fmt`), and linter (`bun lint`):
 
 ```sh
-fleet usage
-fleet usage --all
+bun install --frozen-lockfile
+bun run typecheck     # bun check --no-script
+bun run format:check  # bun fmt --no-script --check
+bun run lint          # bun lint --no-script (Bun 1.4.6+ / canary)
+bun test
 ```
 
-## commands
-
-run `fleet` without arguments or subcommands to view the full list of commands.
-
-## how it works
-
-fleet is mostly an opinionated setup around things your computers already know how to do:
-
-- mdns gives every machine a name like `emerald.local`
-- ssh gives the captain passwordless access to members
-- tmux keeps work alive between connections
-- shell and tmux colors make it obvious which machine you are using
-- a generated fleet skill makes the machine list readable by compatible coding agents
-
-Fleet does not terminate or relay normal work after setup. `ssh emerald.local`, scp, sftp, and ordinary remote commands remain normal OpenSSH; Fleet's tiny local ProxyCommand only chooses the LAN or an already-connected Tailscale socket before OpenSSH performs its usual key exchange.
-
-interactive ssh enters the persistent tmux session by default. bypass it once with:
+The documentation website (`fleet.extoci.lol`) lives in [`web/`](web/README.md):
 
 ```sh
-ssh -t emerald.local 'NO_TMUX=1 exec "$SHELL" -l'
+cd web
+bun install --frozen-lockfile
+bun run dev
 ```
 
-`fleet doctor --repair` refreshes Fleet-owned shell and tmux files after an interrupted update.
-
-## trust and privacy
-
-fleet has no Fleet-hosted accounts, control plane, relay, or telemetry. its state and coordination stay local. when Tailscale is already installed and connected, Fleet can use the user's Tailnet for private remote reachability; Tailscale may use its own coordination service or DERP relays. installing fleet, system packages, codex, or claude code can obviously contact their official download sources.
-
-captain discovery uses unauthenticated mdns. `fleet join` shows you the captain and its fingerprint before trusting it, which is trust-on-first-use for a trusted lan, not magic cryptographic proof that the person next to you is not doing something weird.
-
-after joining, fleet pins machine identities and ssh host keys. registration and leave requests are signed with the pinned fleet identity.
-
-fleet uses the operating system's openssh client for machine-to-machine commands. these commands are non-interactive, use the pinned fleet identity and host keys, send liveness probes, and have hard deadlines so an unreachable machine or stalled remote command cannot hang fleet indefinitely.
-
-## requirements
-
-- macos or debian/ubuntu linux with systemd and apt
-- bash or zsh
-- machines on a trusted local network for initial joining
-- one captain and one fleet per machine
-
-fleet does optional Tailscale routing for members after their normal join or the next `fleet update-all`, while preserving ordinary `ssh <name>.local`; it does not install or administer Tailscale. Fleet also does not do task orchestration or Windows. it gives tools access to machines, it does not become the tool using them.
-
-## gpt-5.6
-
-fleet was exclusively implemented by gpt-5.6 sol. it would've been impossible without it, due to its extremely impressive computer use capabilities across the network.
-
-fleet was used in the development of fleet.
-
-i wrote more on the [blog post](https://extoci.lol/blog/fleet)
-
-## development
-
-Fleet v2 development follows [the product direction](docs/v2/README.md). See [the v0 test guide](docs/v2/test-v0.md) for installation and device testing. The earlier implementation proposal is retained as historical context.
-
-most of the build scripts here are just documentation for my agents. i would recommend you ask your agents to explore the codebase, they'll pick up on everything.
+Release packaging and installer publishing are documented in [`docs/releasing.md`](docs/releasing.md).

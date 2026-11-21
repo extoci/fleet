@@ -1,104 +1,80 @@
 # Releasing Fleet
 
-GitHub Releases is Fleet's artifact origin. Each release contains native binaries
-for the four supported OS/architecture pairs, SHA-256 checksums, and a copy of
-the installer. The friendly `extoci.lol/fleet` URL should redirect to the
-installer attached to the latest GitHub release.
+GitHub Releases is Fleet's artifact origin, and `fleet.extoci.lol` serves the installer scripts directly from [`web/public/`](../web/public/).
 
-## One-time setup
+Each GitHub Release publishes:
 
-1. Keep the repository public. Standard GitHub-hosted macOS, Linux x86-64, and
-   Linux ARM64 runners are then free, so a separate runner provider is not
-   necessary.
-2. In the repository's Actions settings, allow GitHub Actions to create and
-   approve pull requests only if desired; the release workflow needs only the
-   scoped `contents: write` permission declared on its publish job.
-3. Configure an HTTP 302 redirect (for example, with a Cloudflare Redirect Rule)
-   from:
+- `fleet.tar.gz` — self-contained Fleet source, templates, and pre-installed pure-JS production dependencies (no native addons)
+- `fleet.tar.gz.sha256` — SHA-256 checksum verified by the installer
+- `install.sh` (and a copy named `fleet.sh` for legacy redirect compatibility)
+- `install.ps1` — Windows PowerShell installer
 
-       https://extoci.lol/fleet
+## Installing Fleet
 
-   to:
-
-       https://github.com/extoci/fleet/releases/latest/download/fleet.sh
-
-   Preserve the query string. Do not cache the redirect permanently: GitHub's
-   `latest` target changes after every release.
-
-Users can install or update Fleet with:
+**macOS and Linux:**
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | bash
+curl -fsSL https://fleet.extoci.lol/install | bash
 ```
 
-The installer detects the platform, downloads the matching archive and checksum
-from GitHub Releases, verifies SHA-256, and atomically installs the binary in a
-writable user directory already on `PATH` when one is available.
+**Windows (PowerShell):**
 
-## Publish a release
+```powershell
+irm https://fleet.extoci.lol/install.ps1 | iex
+```
 
-Start from a clean `main` branch whose CI is green:
+The installer ensures Bun 1.4+ is installed, downloads `fleet.tar.gz` and `fleet.tar.gz.sha256` from the latest GitHub Release, verifies the SHA-256 digest, unpacks Fleet atomically into `~/.fleet/runtime`, and installs the `fleet` command on your `PATH`.
+
+To install a specific release or roll back:
 
 ```sh
-# Choose the new version.
-cargo install cargo-edit       # once, if cargo-set-version is unavailable
-cargo set-version 0.3.0
-
-# Update changelog.md, then commit the version and lockfile.
-git add Cargo.toml Cargo.lock changelog.md
-git commit -m "release: fleet 0.3.0"
-git push origin main
-
-# The tag is the deployment trigger.
-git tag -a v0.3.0 -m "Fleet 0.3.0"
-git push origin v0.3.0
+curl -fsSL https://fleet.extoci.lol/install | FLEET_VERSION=v2.0.0 bash
 ```
 
-The release workflow first rejects a tag that does not match `Cargo.toml`, then
-runs formatting, Clippy, and tests. It builds on native GitHub-hosted runners for:
-
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `aarch64-unknown-linux-gnu`
-- `x86_64-unknown-linux-gnu`
-
-Linux assets keep the conventional `unknown-linux-gnu` archive names used by
-the installer, but the executables inside are statically linked musl builds.
-The workflow inspects each Linux executable and refuses to publish it if it has
-a dynamic interpreter. This prevents a release runner's newer glibc from making
-Fleet unusable on older supported Debian and Ubuntu installations.
-
-Only after all four builds succeed does one publish job create the GitHub
-Release and upload all artifacts. GitHub generates release notes from merged
-changes. A failed build therefore cannot produce a partial release.
-
-## Versions, updates, and rollback
-
-On v0.4.0 and newer, `fleet update` downloads the latest native archive,
-verifies its checksum, atomically replaces the current executable, and restarts
-the captain service when necessary. Newer updater builds then launch the newly
-installed binary once to reconcile Fleet-owned generated files before reporting
-success. `fleet doctor --repair` retries that local reconciliation if an update
-is interrupted.
-
-From a captain, `fleet update-all` (also available as `fleet updateall`) updates
-each registered member over Fleet's pinned SSH connection, then updates the
-captain last. Missing installations and the v0.3 placeholder updater are
-bootstrapped through `https://extoci.lol/fleet`; other member failures are
-reported after Fleet has attempted every machine.
-
-Running the installer again also updates an existing installation. To install
-or roll back to an exact release:
+To install directly from the `main` branch (for testing unreleased changes):
 
 ```sh
-curl -fsSL https://extoci.lol/fleet | FLEET_VERSION=v0.3.0 bash
+curl -fsSL https://fleet.extoci.lol/install | FLEET_VERSION=main bash
 ```
 
-The installer runs the same post-install handoff when the target release
-supports it. When deliberately installing an older release, it recognizes the
-missing handoff command and leaves the existing generated terminal setup
-untouched.
+## Publishing a release
 
-Releases and tags should be treated as immutable. If a release is bad, publish a
-new patch version rather than replacing its assets. GitHub's `latest` URL, and
-therefore `extoci.lol/fleet`, will move to the new patch automatically.
+Start from a clean `main` branch with green CI:
+
+1. Update `"version"` in [`package.json`](../package.json).
+2. If [`install.sh`](../install.sh) or [`install.ps1`](../install.ps1) changed, sync the copies in `web/public/`:
+
+   ```sh
+   cp install.sh web/public/install
+   cp install.sh web/public/install.sh
+   cp install.ps1 web/public/install.ps1
+   ```
+
+3. Run all checks locally:
+
+   ```sh
+   bun run typecheck
+   bun run format:check
+   bun test
+   ```
+
+4. Commit, tag, and push:
+
+   ```sh
+   git add package.json
+   git commit -m "release: fleet 2.0.0"
+   git push origin main
+
+   git tag -a v2.0.0 -m "Fleet 2.0.0"
+   git push origin v2.0.0
+   ```
+
+Pushing a `v*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml):
+
+1. Confirms the tag matches `package.json`'s `version`.
+2. Runs typechecking (`bun check`), formatting (`bun fmt --check`), linting (`bun lint`), and the full test suite (`bun test`).
+3. Builds `fleet.tar.gz` with production dependencies (`bun install --production --frozen-lockfile`) and generates `fleet.tar.gz.sha256`.
+4. Smoke-tests `install.sh` against the packaged archive and checksum in an isolated `HOME`.
+5. Publishes the GitHub Release with generated release notes and all assets.
+
+Treat releases and tags as immutable — if a release has a bug, cut a new patch version rather than replacing published assets.

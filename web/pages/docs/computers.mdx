@@ -1,46 +1,42 @@
 ---
 title: "Run apps on another computer"
 sidebarTitle: "Multiple computers"
-description: "Enroll a second Fleet computer with a short-lived private invitation while keeping app checkouts and data on their original hosts."
+description: "Join additional computers to your Fleet with a one-time private invitation while keeping each app's code and data on its own machine."
 icon: "lucide:monitor"
 ---
 
-One computer remains the gateway for DNS, HTTPS, and Gate. Other computers can host app checkouts. Fleet routes private requests to them; it does not relocate code or data automatically.
+One computer acts as your Fleet **gateway** for DNS, HTTPS, and Gate sign-in. You can join any number of additional computers to host app checkouts — Fleet automatically routes requests for those apps through your gateway over Tailscale.
 
-## Prepare both computers
+Apps and their SQLite databases stay on the computer where you created them.
 
-Install the same [v2 source build](/docs/quickstart) and connect both computers to the same Tailscale network. Keep the gateway reachable. App names must be unique across the installation.
+## Before you join
 
-The secondary computer's private listener uses Tailscale TCP port **42174**. Existing tailnet policy must allow the gateway to reach it. Fleet does not edit your tailnet policy.
+- [Install Fleet](/docs/quickstart) on the second computer and connect it to the same Tailscale network.
+- Keep your gateway awake and reachable.
+- Make sure your tailnet policy allows your gateway to reach the new computer on TCP port **42174** (Fleet does not modify tailnet ACLs).
+- App names must be unique across your entire Fleet.
 
-## Create a private invitation
-
-On the gateway:
+## 1. Create a one-time invitation on your gateway
 
 ```sh
 fleet invite --output computer-invite.json
 ```
 
-Transfer this file privately to the other computer. It expires after ten minutes and can enroll **one** computer. Do not commit it, send it to a public channel, or include it in a bug report.
+This file enrolls **one** computer and expires after 10 minutes. Copy it privately to the other computer (never commit it to Git or share it publicly).
 
-## Join and create an app
-
-On the second computer:
+## 2. Join and create an app on the second computer
 
 ```sh
 fleet setup --join computer-invite.json --install
 fleet init another-app
 ```
 
-Use the correct path to the transferred invitation. Fleet pins the gateway's certificate root from that file. The gateway pins the new computer's root and verifies its private listener before accepting registration.
+During enrollment, the new computer pins your gateway's root certificate, and the gateway pins the new computer's certificate and verifies its private listener on port 42174. Delete the temporary `computer-invite.json` copies once enrollment completes.
 
-Delete transferred invitation copies after enrollment. Keep normal operating-system protections on the Fleet state directory.
+## Where to run commands
 
-## Which computer runs a command?
-
-Run `fleet phone`, `fleet gate`, `fleet open`, and `fleet invite` on the **gateway**. Inspect, call, back up, and restore an app on the **computer with its checkout**.
-
-The second computer can report on its local apps:
+- **On the gateway**: `fleet open`, `fleet gate`, `fleet phone`, and `fleet invite`.
+- **On the app's checkout computer**: `fleet init`, `fleet inspect`, `fleet logs`, `fleet call`, `fleet backup`, and `fleet restore`.
 
 ```sh
 fleet list --json
@@ -48,4 +44,4 @@ fleet inspect another-app
 fleet logs another-app
 ```
 
-If the host sleeps, its apps are unavailable even while the gateway is running. Schedules also need the checkout host awake. Joining another computer is not a replication or high-availability feature.
+Keep in mind that joining a computer is for routing, not replication: if a checkout computer sleeps or disconnects, its apps and scheduled jobs pause until it wakes up.

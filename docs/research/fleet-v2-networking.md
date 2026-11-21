@@ -1,6 +1,6 @@
 # Fleet v2 private app networking
 
-Historical research. Its sharing model and client-local proxy recommendation are superseded by the [current product direction](../v2/README.md). Use the [mobile setup research](fleet-v2-mobile-setup.md) for the phone flow.
+Historical research. Its sharing model and client-local proxy recommendation are superseded by the [current Fleet README](../../README.md). Use the [mobile setup research](fleet-v2-mobile-setup.md) for the phone flow.
 
 Research date: 2026-11-04. Scope: `fleet register app` followed by private browser access at `https://app.fleet`, across machines, Fleet memberships, and Tailscale tailnets. This is research and a proposed architecture, not an implemented or qualified contract.
 

@@ -1,0 +1,38 @@
+{
+  "name": "@extoci/fleet",
+  "version": "2.0.0",
+  "description": "Personal apps on your own computers, open from every device on your tailnet",
+  "type": "module",
+  "packageManager": "bun@1.4.5",
+  "bin": {
+    "fleet": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test test",
+    "typecheck": "bun check --no-script",
+    "lint": "bun lint --no-script",
+    "lint:fix": "bun lint --no-script --fix",
+    "format": "bun fmt --no-script",
+    "format:check": "bun fmt --no-script --check",
+    "check": "bun run typecheck && bun run format:check"
+  },
+  "files": [
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "dns-packet": "5.6.1",
+    "node-forge": "1.4.3",
+    "preact": "11.2.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node-forge": "^1.3.14",
+    "@types/qrcode": "^1.5.6",
+    "playwright-core": "^1.65.1"
+  },
+  "license": "MIT"
+}

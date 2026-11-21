@@ -8,9 +8,9 @@ const guides = [
   {
     name: 'Quickstart',
     href: '/docs/quickstart',
-    text: 'Install the alpha and open your first app.',
+    text: 'Install Fleet and open your first app.',
   },
-  { name: 'Apps', href: '/docs/apps', text: 'A Preact client, server operations and JSON data.' },
+  { name: 'Apps', href: '/docs/apps', text: 'A Preact client, server operations, and JSON data.' },
   { name: 'Agents', href: '/docs/agents', text: 'Your coding agent edits. Fleet rebuilds.' },
   { name: 'Networking', href: '/docs/networking', text: 'Private .fleet names over Tailscale.' },
   { name: 'iPhone', href: '/docs/iphone', text: 'Open your apps from your phone.' },
@@ -51,8 +51,8 @@ export default function Landing() {
         <div className="fleet-hero-field" aria-hidden="true">
           <Dither focus={[0.55, 0.5]} spread={[1.1, 1.2]} gain={1.1} />
         </div>
-        <a className="fleet-badge" href="/docs/overview#alpha-status">
-          v2 alpha
+        <a className="fleet-badge" href="/docs/overview">
+          Fleet v2
         </a>
         <h1 id="fleet-title">
           Personal apps, <span>on your own computers.</span>
@@ -68,6 +68,7 @@ export default function Landing() {
         </div>
         <pre className="fleet-terminal" aria-label="Example commands">
           <code>
+            <span>$</span> curl -fsSL https://fleet.extoci.lol/install | bash{'\n'}
             <span>$</span> fleet setup --install{'\n'}
             <span>$</span> fleet init notes{'\n'}
             <span>$</span> fleet open notes

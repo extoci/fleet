@@ -1,21 +1,23 @@
 ---
 title: "Build and inspect apps with your coding agent"
 sidebarTitle: "Agent workflow"
-description: "Give your coding agent the Fleet app contract, inspect runtime state, test server operations, and diagnose builds without a separate dev server."
+description: "Give your coding agent the Fleet app contract, inspect runtime state, call server operations from the CLI, and verify edits cleanly."
 icon: "lucide:bot"
 ---
 
-Fleet works with an agent that can edit local files and run commands. It does not require a Fleet-specific coding assistant or a hosted agent subscription.
+Fleet works with any coding agent that can edit local files and run terminal commands. No Fleet-specific plugin, account, or hosted assistant is required.
 
-## Give the agent the app contract
+## Give your agent the contract
 
-Open the app checkout and ask the agent to read its generated `AGENTS.md`. A useful first request is:
+Open the app folder and point your agent at the generated `AGENTS.md`. A good first prompt looks like:
 
-> Read AGENTS.md. Add a search field to this notes app. Keep the existing data format, use Fleet's queries and mutations, and check Fleet's logs after the edit. Do not start a separate dev server.
+> Read AGENTS.md. Add a search bar to this notes app. Keep the existing data format, use Fleet queries and mutations, and check `fleet logs notes` after editing. Do not start a separate dev server.
 
-The agent edits `client/index.tsx`, `client/style.css`, and `server/index.ts`. Fleet owns build watching, app workers, HTTPS, and sign-in.
+Your agent edits `client/index.tsx`, `client/style.css`, and `server/index.ts`. Fleet takes care of bundling, reloading browsers, HTTPS, and sign-in.
 
-## Inspect before changing
+## Inspect before editing
+
+Your agent can check the live state of an app at any time:
 
 ```sh
 fleet list --json
@@ -23,40 +25,41 @@ fleet inspect notes
 fleet logs notes
 ```
 
-`list --json` gives machine-readable runtime state. `inspect` adds details for an app, including job state. `logs` shows recent build and runtime output.
+- `fleet list --json` lists every registered app and its build status in machine-readable JSON.
+- `fleet inspect notes` shows the current build revision, exported queries/mutations/jobs, and scheduled job state.
+- `fleet logs notes` prints recent build output, server `ctx.log` lines, and uncaught browser errors.
 
-Read the existing data contract before changing it. A build succeeding does not prove an old document shape still works.
+Ask your agent to inspect the current data shape before changing it — a build that compiles can still break old documents stored in `ctx.db`.
 
-## Exercise an operation
+## Test server operations from the CLI
+
+Your agent can call queries, mutations, and jobs directly from the terminal on the computer that owns the checkout:
 
 ```sh
 fleet call notes queries notes
 fleet call notes mutations addNote '{"text":"A note from my agent"}'
+fleet call notes jobs dailyCheck
 ```
 
-The mutation writes real app data as the owner. Use a disposable app or make a backup before testing destructive changes. Run these commands on the computer that owns the checkout.
+Mutations and jobs run as you and write to real app data. Back up the database first before testing risky changes.
 
-## Verify the edit
+## Verify changes cleanly
 
-1. Inspect the app state and recent logs.
-2. Confirm the new build succeeded rather than viewing the fallback build.
-3. Open the app and exercise the changed behavior.
-4. Confirm existing data still works and new data survives a restart.
+After an edit, have your agent verify four things:
 
-Fleet reloads the browser on successful updates. Unsaved form state can be lost. A failed build leaves the last successful build available, which can look like an edit was ignored.
+1. Run `fleet inspect notes` and `fleet logs notes` to confirm the build succeeded (remember: a failed build falls back to the previous working bundle, which can look like an edit didn't apply).
+2. Exercise changed queries or mutations with `fleet call`.
+3. Open the app in a browser and check `fleet logs notes` for any client errors.
+4. Confirm existing data still loads cleanly.
 
-## Protect data and credentials
+## Back up before risky edits
 
-Before a data format change:
+Before changing how an app stores data, take a consistent SQLite snapshot:
 
 ```sh
 fleet backup notes --output notes-before-change.sqlite
 ```
 
-Keep a recoverable copy outside the app host. Do not confuse source control or a last-good build with a data backup. See [backup and restore](/docs/data-and-jobs#back-up-and-restore).
+Keep backups outside the app host when the data matters. Git history and last-good builds protect your source code, not your database. See [data and jobs](/docs/data-and-jobs#back-up-and-restore).
 
-Server credentials belong in `.env.fleet.server`; read them through `ctx.env`. Never give a client component an API key. Do not log secrets while debugging.
-
-## Keep the runtime simple
-
-Do not start Vite, another application server, or a manual publish process for a Fleet app. Do not add a second login system: Fleet Gate already provides the owner identity. Use the [app format](/docs/apps) instead.
+Keep server credentials in `.env.fleet.server` (accessed via `ctx.env`), never in client code or logs. And let Fleet handle auth and serving — don't add a second login screen or start Vite inside a Fleet app.

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -12,103 +12,74 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  verify-and-package:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Verify tag matches Cargo.toml
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - name: Verify tag matches package.json
         shell: bash
         run: |
-          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          package_version="$(bun -e 'import pkg from "./package.json" with { type: "json" }; console.log(pkg.version)')"
           test "${GITHUB_REF_NAME#v}" = "$package_version" || {
-            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $package_version" >&2
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version" >&2
             exit 1
           }
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked
-
-  build:
-    needs: verify
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            build_target: aarch64-apple-darwin
-            asset_target: aarch64-apple-darwin
-          - os: macos-15-intel
-            build_target: x86_64-apple-darwin
-            asset_target: x86_64-apple-darwin
-          - os: ubuntu-24.04-arm
-            build_target: aarch64-unknown-linux-musl
-            asset_target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04
-            build_target: x86_64-unknown-linux-musl
-            asset_target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.build_target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.build_target }}
-      - name: Install musl linker
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools
-          echo "CC=musl-gcc" >>"$GITHUB_ENV"
-      - run: cargo build --locked --release --target ${{ matrix.build_target }}
-      - name: Smoke-test release binary
-        run: target/${{ matrix.build_target }}/release/fleet --version
-      - name: Verify Linux binary is static
-        if: runner.os == 'Linux'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run format:check
+      - name: Lint with Bun
         shell: bash
         run: |
-          binary="target/${{ matrix.build_target }}/release/fleet"
-          if readelf --program-headers "$binary" | grep -q 'INTERP'; then
-            echo "Linux release binary is dynamically linked and may require a newer glibc" >&2
-            exit 1
-          fi
-      - name: Package
-        shell: bash
-        run: |
-          asset="fleet-${{ matrix.asset_target }}.tar.gz"
-          tar -C "target/${{ matrix.build_target }}/release" -czf "$asset" fleet
-          if command -v sha256sum >/dev/null; then
-            sha256sum "$asset" >"$asset.sha256"
+          if bun lint --no-script --help >/dev/null 2>&1; then
+            bun lint --no-script --max-warnings 0
           else
-            shasum -a 256 "$asset" >"$asset.sha256"
+            bunx bun@canary lint --no-script --max-warnings 0
           fi
+      - run: bun test test
+      - name: Package release archive
+        shell: bash
+        run: |
+          mkdir -p dist staging
+          cp -R package.json bun.lock src templates README.md LICENSE staging/
+          (cd staging && bun install --production --frozen-lockfile)
+          tar -C staging -czf dist/fleet.tar.gz .
+          (cd dist && sha256sum fleet.tar.gz > fleet.tar.gz.sha256)
+          cp install.sh dist/install.sh
+          cp install.sh dist/fleet.sh
+          cp install.ps1 dist/install.ps1
+      - name: Smoke-test release archive with install.sh
+        shell: bash
+        run: |
+          sh -n dist/install.sh
+          temporary_home="$(mktemp -d)"
+          mkdir -p "$temporary_home/.local/bin"
+          HOME="$temporary_home" \
+            SHELL=/bin/bash \
+            PATH="$temporary_home/.local/bin:$(dirname "$(command -v bun)"):$PATH" \
+            FLEET_ARCHIVE="$PWD/dist/fleet.tar.gz" \
+            FLEET_NO_INSTALL_BUN=1 \
+            sh ./dist/install.sh
+          test "$("$temporary_home/.local/bin/fleet" --version)" = "Fleet ${GITHUB_REF_NAME#v}"
+          rm -rf "$temporary_home"
       - uses: actions/upload-artifact@v7
         with:
-          name: fleet-${{ matrix.asset_target }}
-          path: |
-            fleet-${{ matrix.asset_target }}.tar.gz
-            fleet-${{ matrix.asset_target }}.tar.gz.sha256
+          name: fleet-release
+          path: dist/*
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: verify-and-package
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          pattern: fleet-*
+          name: fleet-release
           path: dist
-          merge-multiple: true
-      - name: Add installer to release assets
-        run: cp fleet.sh dist/fleet.sh
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true

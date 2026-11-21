@@ -1,11 +1,11 @@
 ---
 title: "Diagnose connection and runtime problems"
 sidebarTitle: "Troubleshooting"
-description: "Work through Fleet DNS, private certificate trust, Gate sign-in, failed builds, sleeping hosts, phone setup conflicts, and installation cleanup."
+description: "Fix .fleet DNS issues, certificate errors, Gate sign-in prompts, failed builds, offline computers, phone setup conflicts, and clean removal."
 icon: "lucide:life-buoy"
 ---
 
-Start on the affected app's checkout computer:
+Start by checking health and logs on the app's checkout computer:
 
 ```sh
 fleet --version
@@ -15,62 +15,65 @@ fleet inspect notes
 fleet logs notes
 ```
 
-Check that the command is Fleet **2**, not the legacy Rust binary. Keep codes, private URLs, app contents, and credentials out of shared diagnostics.
+Keep device codes, private setup URLs, credentials, and app data out of shared bug reports.
 
-## The .fleet name does not resolve
+## `.fleet` addresses don't resolve
 
-Confirm that Tailscale is connected on the gateway and client, the client accepts Tailscale DNS settings, and the restricted `fleet` nameserver points to the exact address printed by setup. Preserve unrelated DNS rules.
+1. Confirm Tailscale is connected on both the gateway and the device opening the app.
+2. Check that the device accepts Tailscale DNS settings.
+3. In [Tailscale DNS settings](https://login.tailscale.com/admin/dns), confirm the restricted nameserver for **`fleet`** matches the exact IP printed by `fleet setup`.
+4. If you use an exit node, enable **Use with exit node** on that restricted nameserver.
+5. Make sure your gateway computer is awake and reachable on UDP and TCP port 53 over Tailscale.
 
-The gateway must be awake, and UDP/TCP port 53 must be reachable over your private network. An unknown app name is expected to fail. If using an exit node, check **Use with exit node** for the restricted nameserver.
+Unregistered `.fleet` names are intentionally rejected. On Linux, Fleet leaves `/etc/resolv.conf` untouched and relies on Tailscale split DNS; on macOS, `fleet setup --install` writes `/etc/resolver/fleet`.
 
-Fleet does not modify Linux `resolv.conf` or the Tailscale interface configuration. See [networking](/docs/networking) before changing system DNS manually.
+## The browser shows a certificate error
 
-## The browser reports a certificate error
+DNS resolution and certificate trust are separate steps:
 
-Name resolution and root trust are separate. On the iPhone, installing the profile is not enough: enable **Fleet private apps** in Certificate Trust Settings. Check that the profile belongs to this gateway.
-
-Do not disable verification, switch to HTTP, or accept a warning as success. Replaced gateway state can mean a different root certificate. Follow the [phone guide](/docs/iphone) deliberately rather than stacking unrelated profiles.
+- **On iPhone**, installing the profile isn't enough — you must also enable **Fleet private apps** in **Settings → General → About → Certificate Trust Settings**.
+- **After reinstalling or resetting `~/.fleet/v2`**, your gateway generates a new root CA, so previously enrolled devices need the updated root certificate.
+- Never click through certificate warnings or downgrade to HTTP. Re-run `fleet setup --install` (on computers) or `fleet phone` (on iPhone) to install the matching public root.
 
 ## Gate asks me to sign in again
 
-Run `fleet gate` on the gateway for a new ten-minute device code. Open `https://gate.fleet` on the other device. `fleet gate reset` deliberately revokes all browser sessions.
+Sessions last 30 days unless revoked with `fleet gate reset`. Run `fleet gate` on your gateway to generate a fresh 10-minute code and enter it at `https://gate.fleet`, or run `fleet open notes` on the gateway to sign in your local browser automatically.
 
-`fleet open notes` signs the local browser in through the owner-only control endpoint. Run it on the gateway, not a secondary app computer.
+## My edit doesn't show up
 
-## My edit does not appear
+1. Run `fleet logs notes` — if the new edit failed to compile, Fleet keeps the last working build live so the app stays usable.
+2. Confirm your agent edited the registered checkout shown by `fleet list --json`, not a separate copy.
+3. Make sure the agent didn't start a separate Vite or dev server.
 
-Check `fleet logs notes` for a build error. Fleet keeps the last successful build available after failure, so seeing the old UI does not mean watching has stopped.
+Once a build succeeds, open browsers reload automatically.
 
-Confirm the agent edited the registered checkout, not another clone, and did not start a separate development server. After a successful build, open browsers reload; unsaved form state may be lost.
+## An app on another computer is unavailable
 
-## A remote app is unavailable
+Both your **gateway** and the **checkout computer** must be awake and connected to Tailscale, and your tailnet policy must allow the gateway to reach TCP port **42174** on the checkout computer. Run `fleet logs` and `fleet inspect` directly on the checkout computer. See [multiple computers](/docs/computers).
 
-Keep both the gateway and checkout host awake and connected to Tailscale. The gateway must reach the node's private listener on TCP port 42174 under existing tailnet policy.
+## `fleet phone` won't start
 
-Fleet does not migrate the app to another host when a computer sleeps. Run local inspection commands on the checkout host. See [multiple computers](/docs/computers).
+- Make sure you're running `fleet phone` on your **gateway**, not a secondary computer.
+- If Tailscale reports access denied, grant your user Serve permissions once with `sudo tailscale set --operator=$USER` and rerun `fleet phone`.
+- If port **8444** is already used by another Tailscale Serve route, Fleet refuses to overwrite it — inspect `tailscale serve status` before changing anything.
+- Setup links expire after 15 minutes; rerun `fleet phone` for a fresh link, or run `fleet phone off` to remove Fleet's temporary route manually.
 
-## Phone setup cannot start
+## A scheduled job didn't run
 
-Run `fleet phone` on the gateway. If Tailscale Serve port 8444 is already used, Fleet refuses to replace the route. Inspect the existing configuration and decide what owns it; do not clear all Serve routes as a shortcut.
-
-Tailscale HTTPS may need one-time enablement. The profile link expires after fifteen minutes. Rerun `fleet phone` to get a fresh setup link and use `fleet phone off` to remove Fleet's own temporary route afterward.
-
-Real iPhone behavior is still an alpha qualification task. Record iOS and Tailscale versions, DNS/profile configuration, and exact error messages when reporting a failure.
-
-## A job did not run
-
-The checkout host must be running. An overdue schedule gets one catch-up occurrence after restart. An interrupted job may retry with its previous `ctx.runId`; external effects need idempotency handling.
-
-Check `fleet inspect notes` and `fleet logs notes`. Confirm the declaration in `fleet.json` matches the server job name. See [data and jobs](/docs/data-and-jobs).
+Jobs only run while the checkout computer is awake. Check `fleet inspect APP` and `fleet logs APP`, and confirm the job name in `fleet.json` matches an exported function under `jobs` in `server/index.ts`. Remember that overdue jobs run one catch-up execution after restart, and interrupted runs retry with the same `ctx.runId`.
 
 ## Remove Fleet
 
-On each computer being retired:
+Run this on each computer you want to clean up:
 
 ```sh
 fleet uninstall
 ```
 
-This removes background startup and computer trust, retaining app source and data. If retiring the gateway, remove the tailnet's restricted `fleet` DNS rule and the Fleet certificate profile on phones. Those are separate manual actions; they are not removed remotely by uninstall.
+This stops the background service and removes local startup entries and computer certificate trust, while leaving your app checkouts and SQLite data intact.
 
-The installer keeps v2 state separate from v1. Back up anything important before manually deleting retained state. There is no need to remove all Tailscale DNS settings, unrelated Serve routes, or other certificate roots.
+If you're retiring your gateway completely, also remove:
+
+- The restricted **`fleet`** nameserver in Tailscale DNS settings
+- The **Fleet private apps** profile on any connected iPhones (**Settings → General → VPN & Device Management**)
+- Optionally `~/.fleet/runtime` and `~/.fleet/v2` after backing up anything you want to keep
