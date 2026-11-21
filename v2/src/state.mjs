@@ -66,6 +66,13 @@ export function manifest(directory) {
   }
   return app;
 }
+export function headMetadata(value) {
+  return Object.fromEntries(
+    ["title", "themeColor", "icon", "manifest"]
+      .filter((key) => typeof value?.[key] === "string")
+      .map((key) => [key, value[key]]),
+  );
+}
 export function register(home, directory) {
   return withStateLock(home, () => registerUnlocked(home, directory));
 }
