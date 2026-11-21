@@ -260,6 +260,21 @@ async function main(): Promise<void> {
   ) {
     throw new Error("Run this command on your Fleet gateway. This computer hosts app checkouts.");
   }
+  if (command === "update") {
+    const { updateFleet } = await import("./update.ts");
+    const result = await updateFleet(home);
+    out(
+      values.json
+        ? result
+        : formatNotice(
+            "ok",
+            result.updated
+              ? `Updated Fleet from ${result.previous} to ${result.version}.`
+              : `Fleet ${result.version} is up to date.`,
+          ),
+    );
+    return;
+  }
   if (command === "setup") {
     const old = configuration(home);
     const net = values.local ? { addresses: ["127.0.0.1"], dnsName: "" } : tailnet();

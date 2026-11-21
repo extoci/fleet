@@ -171,6 +171,7 @@ if [ ! -d "$source_root/node_modules/preact" ]; then
   printf 'Installing Fleet runtime dependencies with Bun...\n'
   (cd "$source_root" && "$bun_bin" install --production --frozen-lockfile)
 fi
+printf '%s\n' "$REPOSITORY" > "$source_root/.fleet-release"
 
 mkdir -p "$(dirname "$APP_DIR")"
 staging_dir="${APP_DIR}.staging.$$"

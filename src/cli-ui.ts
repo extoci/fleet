@@ -276,6 +276,7 @@ const HELP_GROUPS: HelpGroup[] = [
   {
     title: "System",
     items: [
+      ["fleet update", "Install the latest Fleet release"],
       ["fleet doctor", "Check DNS, HTTPS, Tailscale, and the daemon"],
       ["fleet daemon", "Run the Fleet daemon in the foreground"],
       ["fleet uninstall", "Stop Fleet and remove computer trust"],

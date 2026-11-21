@@ -103,6 +103,7 @@ try {
       Pop-Location
     }
   }
+  Set-Content -Path (Join-Path $SourceRoot '.fleet-release') -Value $Repository -Encoding Ascii
 
   $AppParent = Split-Path -Parent $AppDir
   New-Item -ItemType Directory -Path $AppParent -Force | Out-Null

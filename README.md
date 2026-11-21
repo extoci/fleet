@@ -54,6 +54,8 @@ bun install
 bun link
 ```
 
+If you installed Fleet with the installer, run `fleet update` to get the latest release. Fleet restarts the background service if it is running.
+
 ## Quickstart
 
 1. Set up your first computer as the gateway:

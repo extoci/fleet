@@ -26,6 +26,9 @@ const sudo = (args: string[], options: ExecFileSyncOptions = {}): string =>
   prompted("sudo", args, options);
 
 const macHelper = "/Library/PrivilegedHelperTools/dev.fleet.v2";
+const macUnit = "/Library/LaunchDaemons/dev.fleet.v2.plist";
+const linuxHelper = "/usr/local/lib/fleet-v2";
+const linuxUnit = "/etc/systemd/system/fleet-v2.service";
 const macRootName = "Fleet private apps";
 
 // otool -L prints one unindented header per architecture, each followed by
@@ -303,6 +306,56 @@ export function windowsInstaller(
 ): string {
   const user = `${process.env.USERDOMAIN || os.hostname()}\\${os.userInfo().username}`;
   return `$ErrorActionPreference='Stop'\n$trigger=New-ScheduledTaskTrigger -AtStartup\n$principal=New-ScheduledTaskPrincipal -UserId ${ps(user)} -LogonType S4U -RunLevel Limited\n$settings=New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n$env:FLEET_V2_HOME=${ps(home)}\n$action=New-ScheduledTaskAction -Execute ${ps(process.execPath)} -Argument ${ps(`"${cli}" daemon --home "${home}"`)}\nStop-ScheduledTask -TaskName FleetV2 -ErrorAction SilentlyContinue\nRegister-ScheduledTask -TaskName FleetV2 -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\nGet-NetFirewallRule -DisplayName 'Fleet v2 HTTPS','Fleet v2 DNS UDP','Fleet v2 DNS TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule\nNew-NetFirewallRule -DisplayName 'Fleet v2 HTTPS' -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${config.mode === "node" ? 42174 : 443} -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nNew-NetFirewallRule -DisplayName 'Fleet v2 DNS TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 53 -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nNew-NetFirewallRule -DisplayName 'Fleet v2 DNS UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 53 -LocalAddress ${config.addresses.map(ps).join(",")} -RemoteAddress '100.64.0.0/10','fd7a:115c:a1e0::/48' -Program ${ps(process.execPath)} | Out-Null\nStart-ScheduledTask -TaskName FleetV2\n`;
+}
+
+function runElevatedWindows(file: string): void {
+  run(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-Command",
+      `$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ${ps(`-NoProfile -ExecutionPolicy Bypass -File "${file}"`)}; exit $p.ExitCode`,
+    ],
+    { stdio: "inherit", timeout: 120_000 },
+  );
+}
+
+export function installedService(): { home: string; active: boolean } | undefined {
+  if (process.platform === "win32") {
+    const [state, args] = run("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$task=Get-ScheduledTask -TaskPath '\\' -TaskName FleetV2 -ErrorAction SilentlyContinue; if ($task) { $task.State.ToString(); $task.Actions[0].Arguments }",
+    ])
+      .trim()
+      .split(/\r?\n/);
+    const match = /^"([^"]+)" daemon --home "([^"]+)"$/.exec(args || "");
+    if (match && path.resolve(match[1]).toLowerCase() === cli.toLowerCase()) {
+      return { home: match[2], active: state === "Running" };
+    }
+    return;
+  }
+
+  const mac = process.platform === "darwin";
+  const owner = path.join(mac ? macHelper : linuxHelper, "owner.json");
+  if (!fs.existsSync(mac ? macUnit : linuxUnit) || !fs.existsSync(owner)) return;
+  const service = JSON.parse(sudo(["cat", owner], { stdio: ["inherit", "pipe", "inherit"] })) as {
+    uid: number;
+    cli: string;
+    home: string;
+  };
+  if (service.uid !== process.getuid?.() || service.cli !== cli) return;
+  if (mac) {
+    try {
+      run("launchctl", ["print", "system/dev.fleet.v2"], { stdio: "ignore" });
+      return { home: service.home, active: true };
+    } catch {
+      return { home: service.home, active: false };
+    }
+  }
+  const state = run("systemctl", ["show", "fleet-v2.service", "-p", "ActiveState", "--value"]);
+  return { home: service.home, active: /^(active|activating|reloading)$/.test(state.trim()) };
 }
 
 function tailscaleCandidates(platform = process.platform): string[] {
@@ -589,7 +642,7 @@ export function serviceFiles(
   config: Pick<FleetConfig, "addresses" | "mode">,
   platform = process.platform,
 ) {
-  const destination = platform === "darwin" ? macHelper : "/usr/local/lib/fleet-v2";
+  const destination = platform === "darwin" ? macHelper : linuxHelper;
   const helperConfig = {
     uid: process.getuid?.(),
     gid: process.getgid?.(),
@@ -609,40 +662,61 @@ export function serviceFiles(
     return {
       destination,
       helperConfig,
-      file: "/Library/LaunchDaemons/dev.fleet.v2.plist",
+      file: macUnit,
       content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>dev.fleet.v2</string><key>ProgramArguments</key><array>${macArguments.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${xml(servicePath.join(destination, "daemon.log"))}</string><key>StandardErrorPath</key><string>${xml(servicePath.join(destination, "daemon.log"))}</string></dict></plist>`,
     };
   }
   return {
     destination,
     helperConfig,
-    file: "/etc/systemd/system/fleet-v2.service",
+    file: linuxUnit,
     content: `[Unit]\nDescription=Fleet private apps\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n[Service]\nExecStart=${[executable, helperPath, configPath].map(systemd).join(" ")}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n[Install]\nWantedBy=multi-user.target\n`,
   };
 }
 
-export async function install(home: string, config: FleetConfig): Promise<void> {
-  const pki = authority(home);
-  if (config.mode === "node" && config.gateway) {
+export async function install(
+  home: string,
+  config: FleetConfig,
+  refresh?: { active: boolean },
+): Promise<void> {
+  const pki = refresh ? undefined : authority(home);
+  if (pki && config.mode === "node" && config.gateway) {
     pki.certFile = path.join(home, "pki", "gateway-root.pem");
     write(pki.certFile, config.gateway.ca);
   }
   if (process.platform === "win32") {
-    process.stderr.write("Approve the Windows security warning to trust Fleet's certificate.\n");
-    prompted("certutil.exe", ["-user", "-addstore", "Root", pki.certFile], {
-      stdio: ["inherit", "ignore", "inherit"],
-    });
-    const file = path.join(home, "install-windows.ps1");
-    write(file, windowsInstaller(home, config));
-    run(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        `$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ${ps(`-NoProfile -ExecutionPolicy Bypass -File "${file}"`)}; exit $p.ExitCode`,
-      ],
-      { stdio: "inherit", timeout: 120_000 },
-    );
+    if (pki) {
+      process.stderr.write("Approve the Windows security warning to trust Fleet's certificate.\n");
+      prompted("certutil.exe", ["-user", "-addstore", "Root", pki.certFile], {
+        stdio: ["inherit", "ignore", "inherit"],
+      });
+      const file = path.join(home, "install-windows.ps1");
+      write(file, windowsInstaller(home, config));
+      runElevatedWindows(file);
+    } else if (refresh?.active) {
+      const staging = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-restart-"));
+      try {
+        const file = path.join(staging, "restart.ps1");
+        write(
+          file,
+          `$ErrorActionPreference='Stop'
+$task=Get-ScheduledTask -TaskPath '\\' -TaskName FleetV2
+if ($task.State -eq 'Running') {
+  Stop-ScheduledTask -InputObject $task
+  $deadline=(Get-Date).AddSeconds(15)
+  while ((Get-ScheduledTask -TaskPath '\\' -TaskName FleetV2).State -eq 'Running') {
+    if ((Get-Date) -gt $deadline) { throw 'Fleet did not stop.' }
+    Start-Sleep -Milliseconds 200
+  }
+}
+Start-ScheduledTask -InputObject $task
+`,
+        );
+        runElevatedWindows(file);
+      } finally {
+        fs.rmSync(staging, { recursive: true, force: true });
+      }
+    }
     return;
   }
   const files = serviceFiles(home, config);
@@ -687,24 +761,29 @@ export async function install(home: string, config: FleetConfig): Promise<void> 
     checkInstalledRuntime(path.join(files.destination, "bun"));
     sudo(["install", "-m", "644", path.join(staging, "service"), files.file]);
     if (process.platform === "darwin") {
-      sudo([
-        "security",
-        "add-trusted-cert",
-        "-d",
-        "-r",
-        "trustRoot",
-        "-k",
-        "/Library/Keychains/System.keychain",
-        pki.certFile,
-      ]);
-      try {
-        sudo(["launchctl", "bootout", "system/dev.fleet.v2"], {
-          stdio: "ignore",
-        });
-      } catch {
-        // Service may not be loaded on first install.
+      if (pki) {
+        sudo([
+          "security",
+          "add-trusted-cert",
+          "-d",
+          "-r",
+          "trustRoot",
+          "-k",
+          "/Library/Keychains/System.keychain",
+          pki.certFile,
+        ]);
       }
-      sudo(["launchctl", "bootstrap", "system", files.file]);
+      if (!refresh || refresh.active) {
+        try {
+          sudo(["launchctl", "bootout", "system/dev.fleet.v2"], {
+            stdio: "ignore",
+          });
+        } catch {
+          // Service may not be loaded on first install.
+        }
+        sudo(["launchctl", "bootstrap", "system", files.file]);
+      }
+      if (refresh) return;
       // macOS uses this suffix-specific file and keeps existing VPN/default DNS.
       const resolver = path.join(staging, "resolver");
       write(
@@ -721,20 +800,22 @@ export async function install(home: string, config: FleetConfig): Promise<void> 
       sudo(["install", "-m", "644", resolver, "/etc/resolver/fleet"]);
       await refreshMacResolver();
     } else {
-      const rootCopy = "/usr/local/share/ca-certificates/fleet-v2.crt";
-      sudo(["install", "-m", "644", pki.certFile, rootCopy]);
-      sudo(["update-ca-certificates"]);
-      try {
-        run("certutil", ["-H"], { stdio: "ignore" });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          sudo(["apt-get", "install", "--yes", "libnss3-tools"]);
+      if (pki) {
+        const rootCopy = "/usr/local/share/ca-certificates/fleet-v2.crt";
+        sudo(["install", "-m", "644", pki.certFile, rootCopy]);
+        sudo(["update-ca-certificates"]);
+        try {
+          run("certutil", ["-H"], { stdio: "ignore" });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            sudo(["apt-get", "install", "--yes", "libnss3-tools"]);
+          }
         }
+        browserRoot(pki);
       }
-      browserRoot(pki);
       sudo(["systemctl", "daemon-reload"]);
-      sudo(["systemctl", "enable", "fleet-v2.service"]);
-      sudo(["systemctl", "restart", "fleet-v2.service"]);
+      if (!refresh) sudo(["systemctl", "enable", "fleet-v2.service"]);
+      if (!refresh || refresh.active) sudo(["systemctl", "restart", "fleet-v2.service"]);
       // Tailscale's tailnet split DNS supplies the suffix on Linux and Windows.
       // Do not replace resolv.conf or add a second manager for tailscale0.
     }
@@ -768,15 +849,7 @@ export function uninstall(home: string): void {
       cleanup,
       "$ErrorActionPreference='Stop'\nStop-ScheduledTask -TaskName FleetV2 -ErrorAction SilentlyContinue\nUnregister-ScheduledTask -TaskName FleetV2 -Confirm:$false -ErrorAction SilentlyContinue\nGet-NetFirewallRule -DisplayName 'Fleet v2 HTTPS','Fleet v2 DNS UDP','Fleet v2 DNS TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n",
     );
-    run(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        `$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ${ps(`-NoProfile -ExecutionPolicy Bypass -File "${cleanup}"`)}; exit $p.ExitCode`,
-      ],
-      { stdio: "inherit", timeout: 120_000 },
-    );
+    runElevatedWindows(cleanup);
     prompted(
       "certutil.exe",
       [
