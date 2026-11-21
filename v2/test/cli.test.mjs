@@ -11,6 +11,11 @@ import { start } from "../src/server.mjs";
 const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
 const exec = promisify(execFile);
 
+test("help includes jobs as a fleet call operation kind", async () => {
+  const { stdout } = await exec(process.execPath, [cli, "--help"]);
+  assert.match(stdout, /fleet call APP queries\|mutations\|jobs OP \[JSON\]/);
+});
+
 test("init writes public source and agent guidance while keeping Fleet state and secrets private", async (t) => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-init-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
