@@ -149,6 +149,19 @@ async function signin(daemon, ca, name = "notes", gateCookie) {
   };
 }
 
+test("bundled server code can dynamically require a Node builtin from CommonJS", async (t) => {
+  const { project, daemon } = await fixture(t, { pollMs: 3_600_000 });
+  write(path.join(project, "server", "common.cjs"), `
+    module.exports = (name) => require(name).Buffer.from("fleet").toString("hex");
+  `);
+  write(path.join(project, "server", "index.ts"), `
+    import encode from "./common.cjs";
+    export default { queries: { encode: (_ctx, input) => encode(input) } };
+  `);
+  const app = daemon.runtime.find("notes");
+  assert.equal(await daemon.runtime.call(app, "queries", "encode", "buffer"), "666c656574");
+});
+
 test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation work together", async (t) => {
   const { daemon, ca, home } = await fixture(t);
   assert.equal((await request(daemon, ca, "notes.fleet")).status, 303);
