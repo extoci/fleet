@@ -19,6 +19,7 @@ export interface GateAppView {
 export interface PageOptions {
   brandHref?: string;
   showLogout?: boolean;
+  showPrivacyToggle?: boolean;
   centered?: boolean;
   fontUrl?: string;
   script?: string;
@@ -34,6 +35,12 @@ const BRAND_WORDMARK_SVG = `<svg class="brand-svg" xmlns="http://www.w3.org/2000
 
 const ROW_ARROW_SVG =
   '<svg class="arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h12M9.5 3.5 14 8l-4.5 4.5"/></svg>';
+
+const EYE_SVG =
+  '<svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>';
+
+const EYE_OFF_SVG =
+  '<svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>';
 
 // Bayer 4x4 violet dither tile used for subtle row hover sheen (echoing web/components/landing.tsx).
 const DITHER_TILE_SVG =
@@ -114,6 +121,15 @@ button:hover,.button:hover{opacity:.88}
 button:focus-visible,.button:focus-visible{outline:2px solid var(--violet);outline-offset:3px}
 .signout{height:auto;padding:8px 0;background:none;border:0;color:var(--muted);font-size:16px;font-weight:400;border-radius:4px}
 .signout:hover{opacity:1;color:var(--fg)}
+.topbar-actions{display:flex;align-items:center;gap:8px}
+.topbar-actions form{margin:0;display:flex;align-items:center}
+.icon-btn{width:44px;height:44px;padding:0;background:none;border:0;border-radius:4px;color:var(--muted);transition:color .15s}
+.icon-btn:hover{opacity:1;color:var(--fg)}
+.icon-btn:focus-visible{outline:2px solid var(--violet);outline-offset:4px}
+.icon-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;display:block}
+.icon-btn .icon-eye-off{display:none}
+html[data-blur-pii="1"] .icon-btn .icon-eye{display:none}
+html[data-blur-pii="1"] .icon-btn .icon-eye-off{display:block}
 .text-link,.text-btn{display:inline-flex;align-items:center;gap:6px;height:44px;padding:0 4px;background:none;border:0;font-size:16px;font-weight:400;color:var(--muted);text-decoration:none;cursor:pointer;transition:color .15s}
 .text-link:hover,.text-btn:hover{opacity:1;color:var(--fg)}
 .text-link:focus-visible,.text-btn:focus-visible{outline:2px solid var(--violet);outline-offset:4px;border-radius:4px}
@@ -123,7 +139,9 @@ button:focus-visible,.button:focus-visible{outline:2px solid var(--violet);outli
 .app-row::before{content:"";position:absolute;inset:0;z-index:-1;opacity:0;transition:opacity .25s;background-image:url("${DITHER_TILE_URI}"),linear-gradient(to left,rgba(168,115,250,.15),transparent 78%);background-size:8px 8px,100% 100%;image-rendering:pixelated;-webkit-mask-image:linear-gradient(to right,transparent 16%,rgba(0,0,0,.35) 52%,#000 96%);mask-image:linear-gradient(to right,transparent 16%,rgba(0,0,0,.35) 52%,#000 96%)}
 .app-row:hover::before,.app-row:focus-visible::before{opacity:.85}
 .app-row:focus-visible{outline:2px solid var(--violet);outline-offset:-2px;border-radius:4px}
-.app-name{font-size:18px;font-weight:500;letter-spacing:-.01em;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-name{font-size:18px;font-weight:500;letter-spacing:-.01em;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px;margin:-6px}
+[data-pii]{transition:filter .15s}
+html[data-blur-pii="1"] [data-pii]{filter:blur(4px);-webkit-user-select:none;user-select:none}
 .app-status{display:inline-flex;align-items:center;gap:12px;font-family:var(--font-mono);font-size:16px;white-space:nowrap}
 .state{display:inline-flex;align-items:center;gap:7px;color:var(--dim)}
 .state-glyph{font-size:18px;line-height:1}
@@ -150,12 +168,12 @@ button:focus-visible,.button:focus-visible{outline:2px solid var(--violet);outli
 .s3{animation-delay:-1.6s}
 @keyframes shimmer{0%,100%{opacity:0}50%{opacity:.78}}
 @keyframes pulse{50%{opacity:.25}}
-@media(prefers-reduced-motion:reduce){.dot,.shimmer{animation:none}.shimmer{opacity:0}}
+@media(prefers-reduced-motion:reduce){.dot,.shimmer{animation:none}.shimmer{opacity:0}[data-pii]{transition:none}}
 @media(max-width:560px){
   main{padding:28px 18px 56px}
   .topbar{margin-bottom:36px}
   .brand-svg{height:34px}
-  .app-row{grid-template-columns:minmax(0,1fr) auto;padding:14px 2px}
+  .app-row{grid-template-columns:minmax(0,1fr) auto}
   .app-status{grid-column:1;margin-top:2px;flex-wrap:wrap}
   .app-row .arrow{grid-column:2;grid-row:1 / span 2}
 }`;
@@ -167,11 +185,74 @@ function renderTopbar(options: PageOptions): string {
   const brand = options.brandHref
     ? `<a class="brand" href="${escape(options.brandHref)}">${BRAND_WORDMARK_SVG}</a>`
     : `<span class="brand">${BRAND_WORDMARK_SVG}</span>`;
+  const privacyToggle = options.showPrivacyToggle
+    ? `<button class="icon-btn" type="button" data-blur-toggle aria-pressed="false" aria-label="Blur app names" title="Blur app names">${EYE_SVG}${EYE_OFF_SVG}</button>`
+    : "";
   const logout = options.showLogout
     ? '<form method="post" action="/__fleet/logout"><button class="signout" type="submit">Sign out</button></form>'
     : "";
-  return `<header class="topbar">${brand}${logout}</header>`;
+  const actions =
+    privacyToggle || logout ? `<div class="topbar-actions">${privacyToggle}${logout}</div>` : "";
+  return `<header class="topbar">${brand}${actions}</header>`;
 }
+
+const PRIVACY_BLUR_HEAD_SCRIPT = `<script>try{if(localStorage.getItem('fleet-blur-pii')==='1')document.documentElement.dataset.blurPii='1'}catch{}</script>`;
+
+// Deterministic redaction of [data-pii] text (app names), persisted in localStorage.
+const PRIVACY_BLUR_SCRIPT = `(()=>{
+const KEY='fleet-blur-pii';
+const CHARS='abcdefghjkmnpqrstuvwxyz23456789';
+const KEEP='@.-_ ';
+const redact=value=>{
+  let h=0x811c9dc5;
+  for(let i=0;i<value.length;i++){h^=value.charCodeAt(i);h=Math.imul(h,0x01000193);}
+  h^=h>>>16;h=Math.imul(h,0x85ebca6b);h^=h>>>13;h=Math.imul(h,0xc2b2ae35);h^=h>>>16;
+  let s=(h>>>0)||1;
+  const next=()=>{s^=s<<13;s^=s>>>17;s^=s<<5;s>>>=0;return s;};
+  let out='';
+  for(const ch of value)out+=KEEP.indexOf(ch)>=0?ch:CHARS[next()%CHARS.length];
+  return out;
+};
+const root=document.documentElement;
+const nodes=[...document.querySelectorAll('[data-pii]')];
+const originals=new Map();
+const fakes=new Map();
+for(const el of nodes){
+  const text=el.textContent||'';
+  originals.set(el,text);
+  fakes.set(el,redact(text));
+}
+const btn=document.querySelector('[data-blur-toggle]');
+let gen=0;
+const syncButton=blurred=>{
+  if(!btn)return;
+  btn.setAttribute('aria-pressed',blurred?'true':'false');
+  const label=blurred?'Show app names':'Blur app names';
+  btn.setAttribute('aria-label',label);
+  btn.title=label;
+};
+const apply=(blurred,immediate,persist)=>{
+  const token=++gen;
+  if(blurred)root.dataset.blurPii='1';else delete root.dataset.blurPii;
+  syncButton(blurred);
+  if(persist)try{if(blurred)localStorage.setItem(KEY,'1');else localStorage.removeItem(KEY);}catch{}
+  if(!blurred){for(const el of nodes)el.textContent=originals.get(el)||'';return;}
+  const swap=()=>{if(token!==gen)return;for(const el of nodes)el.textContent=fakes.get(el)||'';};
+  if(immediate||(typeof matchMedia==='function'&&matchMedia('(prefers-reduced-motion: reduce)').matches)){swap();return;}
+  if(nodes.length)void getComputedStyle(nodes[0]).filter;
+  const anims=[];
+  for(const el of nodes)
+    for(const a of (typeof el.getAnimations==='function'?el.getAnimations():[]))
+      if(a.transitionProperty==='filter'&&a.playState!=='finished'&&a.playState!=='idle')
+        anims.push(a);
+  if(!anims.length){swap();return;}
+  Promise.allSettled(anims.map(a=>a.finished)).then(swap);
+};
+if(root.dataset.blurPii==='1')apply(true,true,false);else syncButton(false);
+if(btn)btn.addEventListener('click',()=>apply(root.dataset.blurPii!=='1',false,true));
+addEventListener('storage',e=>{if(e.key===KEY)apply(e.newValue==='1',true,false);});
+addEventListener('pageshow',e=>{if(!e.persisted)return;try{apply(localStorage.getItem(KEY)==='1',true,false);}catch{}});
+})();`;
 
 export function page(
   title: string,
@@ -181,9 +262,10 @@ export function page(
   const options: PageOptions =
     typeof scriptOrOptions === "string" ? { script: scriptOrOptions } : scriptOrOptions;
   const css = options.fontUrl ? buildStyle(options.fontUrl) : style;
-  const script = options.script || "";
+  const headScript = options.showPrivacyToggle ? PRIVACY_BLUR_HEAD_SCRIPT : "";
+  const script = `${options.showPrivacyToggle ? PRIVACY_BLUR_SCRIPT : ""}${options.script || ""}`;
   const bodyClass = options.centered ? ' class="centered-body"' : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><meta name="theme-color" content="#090909" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)"><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><title>${escape(title)} · Fleet</title><style>${css}</style></head><body${bodyClass}><main>${renderTopbar(options)}${body}</main>${script ? `<script>${script}</script>` : ""}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><meta name="theme-color" content="#090909" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)"><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><title>${escape(title)} · Fleet</title><style>${css}</style>${headScript}</head><body${bodyClass}><main>${renderTopbar(options)}${body}</main>${script ? `<script>${script}</script>` : ""}</body></html>`;
 }
 
 function renderAppRow(app: GateAppView): string {
@@ -206,7 +288,7 @@ function renderAppRow(app: GateAppView): string {
   const errorNote = app.error
     ? '<span class="state tone-err"><span class="state-glyph" aria-hidden="true">✕</span>Needs attention</span>'
     : "";
-  return `<li><a class="app-row" href="${escape(app.url)}"><span class="app-name">${escape(app.name)}</span><span class="app-status"><span class="state${tone}"><span class="state-glyph" aria-hidden="true">${glyph}</span>${label}</span>${errorNote}</span>${ROW_ARROW_SVG}</a></li>`;
+  return `<li><a class="app-row" href="${escape(app.url)}"><span class="app-name" data-pii>${escape(app.name)}</span><span class="app-status"><span class="state${tone}"><span class="state-glyph" aria-hidden="true">${glyph}</span>${label}</span>${errorNote}</span>${ROW_ARROW_SVG}</a></li>`;
 }
 
 function renderAppList(apps: GateAppView[]): string {
@@ -229,6 +311,7 @@ export const homePage = (apps: GateAppView[], options: PageOptions = {}): string
   page("Your apps", `<h1>Welcome back.</h1>${renderAppList(apps)}`, {
     brandHref: "/",
     showLogout: true,
+    showPrivacyToggle: true,
     ...options,
   });
 
@@ -259,6 +342,7 @@ export const phoneConnectedPage = (params: {
     {
       brandHref: "/",
       fontUrl: params.fontUrl,
+      showPrivacyToggle: params.apps.length > 0,
     },
   );
 
