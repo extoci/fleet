@@ -1,60 +1,112 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+
+import { Dither } from './dither'
+
+const guides = [
+  {
+    name: 'Quickstart',
+    href: '/docs/quickstart',
+    text: 'Install the alpha and open your first app.',
+  },
+  { name: 'Apps', href: '/docs/apps', text: 'A Preact client, server operations and JSON data.' },
+  { name: 'Agents', href: '/docs/agents', text: 'Your coding agent edits. Fleet rebuilds.' },
+  { name: 'Networking', href: '/docs/networking', text: 'Private .fleet names over Tailscale.' },
+  { name: 'iPhone', href: '/docs/iphone', text: 'Open your apps from your phone.' },
+  { name: 'CLI', href: '/docs/cli', text: 'Every command.' },
+]
+
+function Arrow() {
+  return (
+    <svg className="fleet-arrow" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M5 11 11 5M6 5h5v5" />
+    </svg>
+  )
+}
+
+function RowArrow() {
+  return (
+    <svg className="fleet-arrow" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 8h12M9.5 3.5 14 8l-4.5 4.5" />
+    </svg>
+  )
+}
+
 export default function Landing() {
-  return <div className="fleet-landing">
-  <section className="fleet-hero" aria-labelledby="hero-title">
-    <div className="fleet-hero-copy">
-      <a className="fleet-eyebrow" href="/docs/overview"><span className="fleet-status-dot" /> V2 ALPHA <span className="fleet-eyebrow-divider">/</span> A more personal internet <span aria-hidden="true">↗</span></a>
-      <h1 id="hero-title">Personal apps.<br /><span>On your computers.</span></h1>
-      <p className="fleet-lede">Your agent builds them. Your computers run them. Open them on your devices, with a little help from Fleet.</p>
-      <div className="fleet-actions">
-        <a className="fleet-button fleet-button-primary" href="/docs/quickstart">Build your first app <span aria-hidden="true">↗</span></a>
-        <a className="fleet-text-link" href="https://github.com/extoci/fleet">Explore the source <span aria-hidden="true">↗</span></a>
-      </div>
-      <p className="fleet-hero-footnote">Open source. Self-hosted. Made for your Tailscale network.</p>
-    </div>
+  const [activeRow, setActiveRow] = useState<number | null>(null)
+  // Row fields only make sense where hover exists; skip the WebGL contexts elsewhere.
+  const [rowFields, setRowFields] = useState(false)
+  useEffect(() => {
+    const hoverable = window.matchMedia('(hover: hover)')
+    setRowFields(hoverable.matches)
+    const onChange = (event: MediaQueryListEvent) => setRowFields(event.matches)
+    hoverable.addEventListener('change', onChange)
+    return () => hoverable.removeEventListener('change', onChange)
+  }, [])
 
-    <figure className="fleet-scene" aria-label="Illustration of a private notes app and a Fleet agent workflow">
-      <div className="fleet-scene-grid" aria-hidden="true" />
-      <div className="fleet-scene-label"><span className="fleet-status-dot" /> YOUR LITTLE CORNER OF THE INTERNET</div>
-      <div className="fleet-app-window">
-        <div className="fleet-window-bar"><span className="fleet-window-dots" aria-hidden="true"><i /><i /><i /></span><span><span aria-hidden="true">⌁</span> notes.fleet</span><span className="fleet-private">PRIVATE</span></div>
-        <div className="fleet-notes">
-          <div className="fleet-notes-kicker">YOUR SPACE, YOUR PACE</div>
-          <div className="fleet-notes-title">A place for<br />your thoughts.</div>
-          <div className="fleet-note">A tiny app for the things<br />I don’t want to forget.<span>Saved on my computer <span aria-hidden="true">↗</span></span></div>
-          <div className="fleet-note fleet-note-second">Good ideas start small.<span>Just now</span></div>
+  return (
+    <div className="fleet-landing">
+      <section className="fleet-hero" aria-labelledby="fleet-title">
+        <div className="fleet-hero-field" aria-hidden="true">
+          <Dither focus={[0.55, 0.5]} spread={[1.1, 1.2]} gain={1.1} />
         </div>
-      </div>
-      <div className="fleet-terminal">
-        <div className="fleet-terminal-bar"><span><span aria-hidden="true">⌘</span> agent → fleet</span><span className="fleet-status-dot" /></div>
-        <div className="fleet-terminal-body"><div><span className="fleet-terminal-prompt">$</span> fleet inspect notes</div><div className="fleet-terminal-muted">Your checkout. Your runtime.</div><div><span className="fleet-terminal-check">✓</span> Built from your source</div><div><span className="fleet-terminal-check">✓</span> Data stays on your computer</div><div className="fleet-terminal-url">https://notes.fleet <span aria-hidden="true">↗</span></div></div>
-      </div>
-      <div className="fleet-device-tag"><span aria-hidden="true">▣</span> Computer → Tailscale → Your devices</div>
-      <figcaption>Product illustration · not a live dashboard</figcaption>
-    </figure>
-  </section>
+        <a className="fleet-badge" href="/docs/overview#alpha-status">
+          v2 alpha
+        </a>
+        <h1 id="fleet-title">
+          Personal apps, <span>on your own computers.</span>
+        </h1>
+        <p>Your agent writes them. Fleet runs them. Every device on your tailnet can open them.</p>
+        <div className="fleet-actions">
+          <a className="fleet-button" href="/docs/quickstart">
+            Get started
+          </a>
+          <a className="fleet-link" href="https://github.com/extoci/fleet">
+            GitHub <Arrow />
+          </a>
+        </div>
+        <pre className="fleet-terminal" aria-label="Example commands">
+          <code>
+            <span>$</span> fleet setup --install{'\n'}
+            <span>$</span> fleet init notes{'\n'}
+            <span>$</span> fleet open notes
+          </code>
+        </pre>
+      </section>
 
-  <div className="fleet-principles" aria-label="Fleet principles"><span>LOCAL BY DEFAULT</span><span>BUILT WITH YOUR AGENT</span><span>PRIVATE BY DESIGN</span><span>YOURS TO CHANGE</span></div>
-
-  <section className="fleet-section" aria-labelledby="less-heading">
-    <div className="fleet-section-heading"><div><p className="fleet-kicker">01 / LESS INFRASTRUCTURE, MORE YOU</p><h2 id="less-heading">Small apps.<br />A home of their own.</h2></div><p>A notebook. A habit tracker. That oddly specific tool only you need. Not everything needs a cloud platform.</p></div>
-    <div className="fleet-feature-grid">
-      <a className="fleet-feature" href="/docs/agents"><span className="fleet-feature-icon" aria-hidden="true">↳</span><h3>From idea to your app.</h3><p>Give your coding agent a checkout. Fleet builds its edits and refreshes your app. No separate dev server to keep running.</p><span className="fleet-feature-link">The agent workflow <span aria-hidden="true">↗</span></span></a>
-      <a className="fleet-feature" href="/docs/networking"><span className="fleet-feature-icon" aria-hidden="true">⌁</span><h3>A name that feels local.</h3><p>Open notes.fleet across your Tailscale devices. One private gateway handles names, HTTPS, and sign-in through Fleet Gate.</p><span className="fleet-feature-link">How your devices connect <span aria-hidden="true">↗</span></span></a>
-      <a className="fleet-feature" href="/docs/data-and-jobs"><span className="fleet-feature-icon" aria-hidden="true">◴</span><h3>Quiet when you’re away.</h3><p>App workers unload when idle. Data lives outside the checkout, and scheduled jobs run while the host computer is awake.</p><span className="fleet-feature-link">Data and the app lifecycle <span aria-hidden="true">↗</span></span></a>
+      <section className="fleet-guides" aria-labelledby="fleet-guides-title">
+        <h2 id="fleet-guides-title">Docs</h2>
+        <ul>
+          {guides.map((guide, index) => (
+            <li key={guide.href}>
+              <a
+                href={guide.href}
+                onPointerEnter={() => setActiveRow(index)}
+                onPointerLeave={() => setActiveRow((cur) => (cur === index ? null : cur))}
+                onFocus={() => setActiveRow(index)}
+                onBlur={() => setActiveRow((cur) => (cur === index ? null : cur))}
+              >
+                {rowFields && (
+                  <span className="fleet-row-field" aria-hidden="true">
+                    <Dither
+                      focus={[1, 0.5]}
+                      spread={[4, 8]}
+                      gain={1.05}
+                      pixelSize={2}
+                      seed={index * 1.37}
+                      active={activeRow === index}
+                    />
+                  </span>
+                )}
+                <span className="fleet-row-name">{guide.name}</span>
+                <span className="fleet-row-text">{guide.text}</span>
+                <RowArrow />
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
-  </section>
-
-  <section className="fleet-workflow" aria-labelledby="workflow-heading">
-    <div className="fleet-workflow-intro"><p className="fleet-kicker">02 / A SHORTER PATH TO USEFUL</p><h2 id="workflow-heading">Make something<br />just for you.</h2><p>Bring Node.js, Tailscale, and an idea. Fleet gives your app a place to run.</p><a className="fleet-text-link" href="/docs/quickstart">Follow the alpha quickstart <span aria-hidden="true">↗</span></a></div>
-    <ol className="fleet-steps">
-      <li><span className="fleet-step-number">01</span><div><h3>Set up your computer.</h3><p>Install the v2 alpha from source. Let Fleet prepare its runtime, then add the one-time tailnet DNS rule.</p><code>fleet setup --install</code></div></li>
-      <li><span className="fleet-step-number">02</span><div><h3>Give your idea a checkout.</h3><p>Start with a working notes app. Your agent gets source files and instructions, not a blank infrastructure project.</p><code>fleet init notes</code></div></li>
-      <li><span className="fleet-step-number">03</span><div><h3>Open it. Make it yours.</h3><p>Sign in through Gate, then change the app with your agent. A failed build keeps the last successful version available.</p><code>fleet open notes</code></div></li>
-    </ol>
-  </section>
-
-  <aside className="fleet-alpha-note"><span className="fleet-alpha-label">EARLY, ON PURPOSE</span><div><p>Fleet v2 is an alpha, not a finished cloud replacement.</p><p>Install from source on a test computer. Native installation and real iPhone qualification are still in progress. Keep backups of anything important.</p><a className="fleet-text-link" href="/docs/overview#alpha-status">Read what works and what’s next <span aria-hidden="true">↗</span></a></div></aside>
-
-  <section className="fleet-bottom-cta" aria-labelledby="start-heading"><p className="fleet-kicker">YOUR COMPUTERS CAN DO MORE.</p><h2 id="start-heading">Give your next idea<br />a .fleet address.</h2><a className="fleet-button fleet-button-primary" href="/docs/quickstart">Get started with Fleet <span aria-hidden="true">↗</span></a><span className="fleet-bottom-note">Your app. Your data. Your machines.</span></section>
-</div>
+  )
 }

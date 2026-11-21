@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 
 export function pageSlugs(config) {
-  return config.navigation.groups.flatMap(group => group.pages);
+  return config.navigation.groups.flatMap((group) => group.pages);
 }
 
 export function routeFor(slug) {
@@ -14,7 +14,7 @@ export function routeFor(slug) {
 }
 
 function filesIn(directory) {
-  return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const file = path.join(directory, entry.name);
     return entry.isDirectory() ? filesIn(file) : [file];
   });
@@ -27,7 +27,7 @@ export function checkContent(root = projectRoot) {
   assert(slugs.includes('index'), 'Navigation must include the homepage');
   const routes = new Set(slugs.map(routeFor));
   const redirects = config.redirects ?? [];
-  const validRoutes = new Set([...routes, ...redirects.map(item => item.source)]);
+  const validRoutes = new Set([...routes, ...redirects.map((item) => item.source)]);
   const pages = new Map();
   const titles = new Set();
 
@@ -70,10 +70,16 @@ export function checkContent(root = projectRoot) {
   }
 
   const authored = filesIn(path.join(root, 'pages'))
-    .filter(file => /\.mdx?$/.test(file))
-    .map(file => path.relative(path.join(root, 'pages'), file).replaceAll(path.sep, '/').replace(/\.mdx?$/, ''));
+    .filter((file) => /\.mdx?$/.test(file))
+    .map((file) =>
+      path
+        .relative(path.join(root, 'pages'), file)
+        .replaceAll(path.sep, '/')
+        .replace(/\.mdx?$/, ''),
+    );
   assert.deepEqual(authored.sort(), [...slugs].sort(), 'Every page must be in navigation');
-  for (const item of redirects) assert(routes.has(item.destination), `Unknown redirect target: ${item.destination}`);
+  for (const item of redirects)
+    assert(routes.has(item.destination), `Unknown redirect target: ${item.destination}`);
   function checkConfigLinks(value) {
     if (!value || typeof value !== 'object') return;
     if (typeof value.href === 'string') checkLink(value.href, 'docs.json');
@@ -82,7 +88,7 @@ export function checkContent(root = projectRoot) {
   checkConfigLinks(config);
   const components = path.join(root, 'components');
   if (fs.existsSync(components)) {
-    for (const file of filesIn(components).filter(file => /\.[jt]sx?$/.test(file))) {
+    for (const file of filesIn(components).filter((file) => /\.[jt]sx?$/.test(file))) {
       checkSourceLinks(fs.readFileSync(file, 'utf8'), path.relative(root, file));
     }
   }
@@ -91,5 +97,7 @@ export function checkContent(root = projectRoot) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { pages } = checkContent();
-  console.log(`Content check passed: ${pages.size} pages, navigation, metadata, and local link targets.`);
+  console.log(
+    `Content check passed: ${pages.size} pages, navigation, metadata, and local link targets.`,
+  );
 }
