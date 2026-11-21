@@ -14,12 +14,17 @@ import { Peers, peerRequest } from "./peers.mjs";
 import { page, escape, loginPage, wakePage } from "./pages.mjs";
 import { turnOffPhoneRoute } from "./platform.mjs";
 
+class BodyLimitError extends Error {}
+
 export async function body(request, limit = 1_048_576) {
   const chunks = [];
   let size = 0;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
-    if (size > limit) throw new Error("Request exceeds 1 MB.");
+    if (size > limit) {
+      request.resume();
+      throw new BodyLimitError(`Request exceeds ${limit} bytes.`);
+    }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -124,6 +129,32 @@ function appHead(app) {
     (manifest ? `<link rel="manifest" href="${escape(manifest)}">` : "")
   );
 }
+const clientErrorRoute = "/__fleet/client-error";
+const clientErrorReporter = `<script>(() => {
+  let remaining = 5;
+  function report(message) {
+    if (!remaining || typeof message !== 'string' || !message) return;
+    remaining--;
+    fetch('${clientErrorRoute}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: message.slice(0, 512) }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+  window.addEventListener('error', event => report(event.message));
+  window.addEventListener('unhandledrejection', ({ reason }) => {
+    report(reason instanceof Error ? reason.message :
+      typeof reason === 'string' ? reason : 'Unhandled promise rejection');
+  });
+})();</script>`;
+function clientErrorMessage(value) {
+  if (typeof value === "string")
+    return value
+      .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]+/g, " ")
+      .trim()
+      .slice(0, 1024);
+}
 export function encodings(header = "") {
   const accepted = new Set();
   for (const part of header.split(",")) {
@@ -171,6 +202,7 @@ export async function start(home, options = {}) {
   const servers = [];
   const dnsServers = [];
   const eventClients = new Set();
+  const clientErrorWindows = new Map();
   const phoneTickets = new Set();
   let phoneRouteClosed = true;
   let closed = false;
@@ -192,6 +224,19 @@ export async function start(home, options = {}) {
       Boolean(appFor(name.replace(/\.fleet$/, "")) && name.endsWith(".fleet"))
     );
   }
+  function permitClientError(id) {
+    const now = Date.now();
+    for (const [key, window] of clientErrorWindows)
+      if (window.until <= now) clientErrorWindows.delete(key);
+    const window = clientErrorWindows.get(id) || {
+      count: 0,
+      until: now + 60_000,
+    };
+    if (window.count >= 10) return false;
+    window.count++;
+    clientErrorWindows.set(id, window);
+    return true;
+  }
   async function handle(request, response) {
     try {
       const host = hostname(request.headers.host);
@@ -209,6 +254,7 @@ export async function start(home, options = {}) {
         return json(response, 200, await peers.announce(token, message.args));
       }
       const app = isGate ? null : appFor(host.slice(0, -6));
+      const isClientError = app && url.pathname === clientErrorRoute;
       const destination = url.searchParams.get("app") || "";
       const validDestination =
         destination === "" || Boolean(appFor(destination));
@@ -294,7 +340,7 @@ export async function start(home, options = {}) {
         );
       }
       if (!gate.authorized(request, host)) {
-        if (url.pathname.startsWith("/__fleet/api/"))
+        if (isClientError || url.pathname.startsWith("/__fleet/api/"))
           return json(response, 401, { error: "Sign in through Fleet Gate." });
         return redirect(
           response,
@@ -345,6 +391,30 @@ export async function start(home, options = {}) {
             `<h1>Your apps.</h1><p>Private. On your computers.</p>${appSections}`,
           ),
         );
+      }
+      if (isClientError) {
+        if (request.method !== "POST")
+          return json(response, 405, { error: "Use POST for client errors." });
+        if (
+          request.headers["content-type"]?.split(";", 1)[0] !== "application/json"
+        )
+          return json(response, 415, { error: "Send application/json." });
+        if (!permitClientError(app.id))
+          return json(response, 429, { error: "Too many client error reports." });
+        let message;
+        try {
+          const report = JSON.parse(await body(request, 4096));
+          message = clientErrorMessage(report?.message);
+        } catch (error) {
+          if (error instanceof BodyLimitError)
+            return json(response, 413, { error: error.message });
+          if (!(error instanceof SyntaxError)) throw error;
+        }
+        if (!message)
+          return json(response, 400, { error: "Send a client error message." });
+        if (app.peer) await peers.call(app, "client-error", { message });
+        else runtime.log(app.id, `Client error: ${message}`);
+        return send(response, 204, undefined, "text/plain");
       }
       if (url.pathname === "/__fleet/ready") {
         if (!app.peer && !app.revision && !app.building)
@@ -494,7 +564,7 @@ export async function start(home, options = {}) {
       return send(
         response,
         200,
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${appHead(app)}${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}</head><body><div id="app"></div><script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></body></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${appHead(app)}${app.peer || fs.existsSync(path.join(app.buildDir, "app.css")) ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}</head><body><div id="app"></div>${clientErrorReporter}<script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></body></html>`,
       );
     } catch (error) {
       runtime.log("daemon", error.message);
@@ -727,6 +797,15 @@ export async function start(home, options = {}) {
                 head: args.head === true,
                 peer: true,
               });
+            }
+            if (method === "client-error") {
+              const message = clientErrorMessage(args.message);
+              if (!message)
+                return json(response, 400, {
+                  error: "Send a client error message.",
+                });
+              runtime.log(app.id, `Client error: ${message}`);
+              return json(response, 200, { logged: true });
             }
             if (
               method === "asset" &&
