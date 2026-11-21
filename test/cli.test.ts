@@ -6,6 +6,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, test } from "bun:test";
+import {
+  formatAppList,
+  formatDoctor,
+  formatGateCode,
+  formatHelp,
+  formatInit,
+  formatInspect,
+  renderWordmarkBanner,
+} from "../src/cli-ui.ts";
 import { start } from "../src/server.ts";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -119,4 +128,73 @@ test("local phone off is a successful no-op without a phone route", async () => 
   const { run } = await setupLocal();
   const { stdout } = await run("phone", "off", "--json");
   assert.equal(JSON.parse(stdout), "There is no Fleet phone setup route to remove.");
+});
+
+test("CLI UI omits ANSI escapes when color is disabled and renders truecolor wordmark when enabled", async () => {
+  const { stdout } = await exec(process.execPath, [cli, "--help"], {
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  assert.equal(stdout.includes("\x1b["), false, "piped/NO_COLOR help must not emit ANSI escapes");
+  assert.match(stdout, /personal apps on your own computers/);
+
+  const coloredBanner = renderWordmarkBanner("2.0.0", { color: true });
+  assert.equal(coloredBanner.includes("\x1b[38;2;168;115;250m"), true);
+  assert.equal(coloredBanner.split("\n").length, 5);
+
+  const plainBanner = renderWordmarkBanner("2.0.0", { color: false });
+  assert.equal(plainBanner.includes("\x1b["), false);
+  assert.equal(plainBanner.split("\n").length, 5);
+
+  const help = formatHelp("2.0.0", { color: false });
+  assert.match(help, /APPS/);
+  assert.match(help, /DEVICES & ACCESS/);
+  assert.match(help, /fleet call APP queries\|mutations\|jobs OP \[JSON\]/);
+
+  const list = formatAppList(
+    [
+      {
+        id: "1",
+        name: "notes",
+        directory: "/tmp/notes",
+        running: true,
+        building: false,
+        revision: "a1b2c3d4e5",
+        error: null,
+      },
+    ],
+    { color: false },
+  );
+  assert.match(list, /notes/);
+  assert.match(list, /● running/);
+  assert.match(list, /https:\/\/notes\.fleet/);
+
+  const inspect = formatInspect(
+    {
+      id: "1",
+      name: "notes",
+      directory: "/tmp/notes",
+      running: true,
+      building: false,
+      revision: "a1b2c3d4",
+      error: null,
+      operations: { queries: ["notes"], mutations: ["addNote"], jobs: ["digest"] },
+      jobs: [{ name: "digest", everySeconds: 3600 }],
+    },
+    { color: false },
+  );
+  assert.match(inspect, /Queries\s+notes/);
+  assert.match(inspect, /digest \(every 1h\)/);
+
+  const doctor = formatDoctor(
+    [
+      { check: "tailscale", ok: true, dnsName: "mac.ts.net", addresses: ["100.64.0.1"] },
+      { check: "daemon", ok: true, apps: 2 },
+      { check: "system-dns", ok: true, addresses: [{ address: "100.64.0.1" }] },
+    ],
+    { color: false },
+  );
+  assert.match(doctor, /All checks passed\./);
+
+  assert.match(formatInit("notes", "/tmp/notes", { color: false }), /Created notes/);
+  assert.match(formatGateCode("ABCD-1234", { color: false }), /ABCD-1234/);
 });

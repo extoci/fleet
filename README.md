@@ -1,12 +1,27 @@
-# Fleet
+<p align="center">
+  <a href="https://fleet.extoci.lol">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./web/public/fleet-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="./web/public/fleet-light.svg" />
+      <img alt="Fleet" src="./web/public/fleet-dark.svg" height="44" />
+    </picture>
+  </a>
+</p>
 
-**Personal apps on your own computers, open from every device on your tailnet.**
+<p align="center">
+  <strong>Personal apps on your own computers, open from every device on your tailnet.</strong>
+</p>
 
-Your coding agent writes the app. Fleet builds and updates it automatically with Bun, serves it over private HTTPS at addresses like `https://notes.fleet`, protects it behind Fleet Gate, and stops idle app workers when you're not using them.
-
-Docs and guides live at **[fleet.extoci.lol](https://fleet.extoci.lol)**.
+<p align="center">
+  <a href="https://fleet.extoci.lol">Docs</a> &middot;
+  <a href="https://fleet.extoci.lol/docs/quickstart">Quickstart</a> &middot;
+  <a href="https://fleet.extoci.lol/docs/cli">CLI Reference</a> &middot;
+  <a href="https://fleet.extoci.lol/docs/security">Security</a>
+</p>
 
 ---
+
+Your coding agent writes the app. Fleet builds and updates it automatically with Bun, serves it over private HTTPS at addresses like `https://notes.fleet`, protects it behind Fleet Gate, and stops idle app workers when you're not using them.
 
 ## Install
 

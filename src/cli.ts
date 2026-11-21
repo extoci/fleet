@@ -8,6 +8,22 @@ import QRCode from "qrcode";
 import pkg from "../package.json" with { type: "json" };
 import { authority, leaf, mobileProfile } from "./certificates.ts";
 import {
+  type AppListItem,
+  type DoctorCheck,
+  formatAppList,
+  formatDaemonReady,
+  formatDoctor,
+  formatError,
+  formatGateCode,
+  formatHelp,
+  formatInit,
+  formatInspect,
+  formatNotice,
+  formatPhoneSetup,
+  formatSetup,
+  shortenHome,
+} from "./cli-ui.ts";
+import {
   ensureDNS,
   install,
   openBrowser,
@@ -205,13 +221,8 @@ async function phone(): Promise<void> {
     out({ url, expires: setup.expires, deviceCode: pairing.code });
     return;
   }
-  console.log("Scan this with your iPhone while Tailscale is connected.");
-  console.log(await QRCode.toString(url, { type: "terminal", small: true }));
-  console.log(url);
-  console.log(`\nFleet Gate device code: ${pairing.code}`);
-  console.log(
-    "\nInstall the Fleet profile in Settings > General > VPN & Device Management, then enable Fleet private apps in General > About > Certificate Trust Settings.\nTap Open Fleet on the setup page to sign in at https://gate.fleet/phone — the temporary setup link closes automatically.",
-  );
+  const qr = await QRCode.toString(url, { type: "terminal", small: true });
+  console.log(formatPhoneSetup({ qr, url, code: pairing.code }));
 }
 
 function checkRuntimeVersion(): void {
@@ -240,9 +251,7 @@ async function main(): Promise<void> {
     return;
   }
   if (values.help || !command) {
-    console.log(
-      `Fleet · personal apps on your own computers\n\n  fleet setup --install    Set up this computer and start Fleet at boot\n  fleet init [directory]   Create and register an app\n  fleet list --json        List apps and runtime state\n  fleet open [NAME]        Open an app, signed in through Gate\n  fleet inspect NAME       Inspect an app\n  fleet logs NAME          Read an app's build and runtime log\n  fleet call APP queries|mutations|jobs OP [JSON]  Run an operation as the owner\n  fleet backup NAME --output FILE   Snapshot an app's SQLite database\n  fleet restore NAME FILE  Restore an app's SQLite database while stopped\n  fleet gate               Create a device sign-in code\n  fleet gate reset         Disconnect all signed-in browsers\n  fleet invite --output FILE   Connect another computer with app checkouts\n  fleet phone              Connect an iPhone with a QR code\n  fleet phone off          Remove Fleet's temporary setup route\n  fleet doctor             Check DNS, HTTPS, Tailscale, and the daemon\n  fleet unregister NAME    Remove an app route, keep source and data\n  fleet profile --output FILE   Export the public iPhone profile\n  fleet daemon             Run in the foreground\n  fleet uninstall          Stop Fleet and remove computer trust\n\nRequires Bun 1.4+ and Tailscale. Use --json for agent output.`,
-    );
+    console.log(formatHelp(pkg.version));
     return;
   }
   if (
@@ -316,17 +325,13 @@ async function main(): Promise<void> {
       });
       return;
     }
-    console.log("Fleet is configured.");
-    if (!values.install) {
-      console.log(
-        "Run fleet setup --install for background startup, or fleet daemon for a foreground test.",
-      );
-    }
-    if (!values.local && config.mode !== "node" && !dns.configured) {
-      console.log(
-        `\nOne-time Tailscale setup:\nOpen https://login.tailscale.com/admin/dns\nAdd a restricted nameserver: ${net.addresses.find((a) => a.includes("."))}\nRestrict it to: fleet\nIf you use an exit node, enable Use with exit node for this nameserver.\n\nThen run fleet gate to connect this browser, or fleet phone to connect your iPhone.`,
-      );
-    }
+    console.log(
+      formatSetup({
+        installed: Boolean(values.install),
+        ipv4: net.addresses.find((a) => a.includes(".")),
+        needsDns: !values.local && config.mode !== "node" && !dns.configured,
+      }),
+    );
     return;
   }
   if (command === "init") {
@@ -343,13 +348,17 @@ async function main(): Promise<void> {
     out(
       values.json
         ? { ...app, directory, url: `https://${app.name}.fleet` }
-        : `Created ${app.name}.\n${directory}\nhttps://${app.name}.fleet\n\nYour agent can edit client/index.tsx and server/index.ts. Fleet updates the app automatically.`,
+        : formatInit(app.name, directory),
     );
     return;
   }
   if (command === "register") {
     const app = register(home, path.resolve(args[0] || "."));
-    out({ ...app, url: `https://${app.name}.fleet` });
+    out(
+      values.json
+        ? { ...app, url: `https://${app.name}.fleet` }
+        : formatNotice("ok", `Registered ${app.name}.`, `https://${app.name}.fleet`),
+    );
     return;
   }
   if (command === "daemon") {
@@ -358,7 +367,7 @@ async function main(): Promise<void> {
       home,
       values.forwarded ? { hosts: ["127.0.0.1"], httpsPort: 8443, dnsPort: 1053 } : {},
     );
-    console.log("Fleet is running. Open https://gate.fleet.");
+    console.log(formatDaemonReady());
     for (const signal of ["SIGINT", "SIGTERM"] as const) {
       process.once(signal, () => {
         void daemon.close().then(() => process.exit(0));
@@ -373,14 +382,22 @@ async function main(): Promise<void> {
     if (fs.existsSync(values.output)) {
       throw new Error("The output file already exists.");
     }
-    write(path.resolve(values.output), await rpc("invite"));
+    const target = path.resolve(values.output);
+    write(target, await rpc("invite"));
     out(
-      `Computer invitation saved to ${path.resolve(values.output)}. It expires in ten minutes. Transfer it privately to your other computer, then run fleet setup --join FILE --install there.`,
+      values.json
+        ? `Computer invitation saved to ${target}. It expires in ten minutes. Transfer it privately to your other computer, then run fleet setup --join FILE --install there.`
+        : formatNotice(
+            "ok",
+            `Computer invitation saved to ${shortenHome(target)}`,
+            "Expires in 10 minutes. Transfer it privately and run fleet setup --join FILE --install.",
+          ),
     );
     return;
   }
   if (command === "list") {
-    out(await rpc("list"));
+    const apps = await rpc<AppListItem[]>("list");
+    out(values.json ? apps : formatAppList(apps));
     return;
   }
   if (command === "open") {
@@ -390,18 +407,19 @@ async function main(): Promise<void> {
       return;
     }
     openBrowser(result.url);
-    out(`Opening ${args[0] || "Fleet"}.`);
+    out(formatNotice("info", `Opening ${args[0] || "Fleet"}…`));
     return;
   }
   if (command === "inspect") {
-    const apps = await rpc<Array<{ name: string }>>("list");
+    const apps = await rpc<AppListItem[]>("list");
     const app = apps.find((a) => a.name === args[0]);
     if (!app) throw new Error("Unknown app.");
-    out({
+    const full: AppListItem = {
       ...app,
       jobsState: read(path.join(home, "jobs.json"), {}),
       url: `https://${app.name}.fleet`,
-    });
+    };
+    out(values.json ? full : formatInspect(full));
     return;
   }
   if (command === "logs") {
@@ -436,8 +454,13 @@ async function main(): Promise<void> {
   if (command === "backup") {
     if (!values.output) throw new Error("Choose a backup file with --output.");
     const { exportData } = await import("./data.ts");
-    await exportData(home, args[0], path.resolve(values.output));
-    out("Data backup saved.");
+    const target = path.resolve(values.output);
+    await exportData(home, args[0], target);
+    out(
+      values.json
+        ? "Data backup saved."
+        : formatNotice("ok", "Data backup saved.", shortenHome(target)),
+    );
     return;
   }
   if (command === "restore") {
@@ -446,19 +469,26 @@ async function main(): Promise<void> {
     }
     const { restoreData } = await import("./data.ts");
     const previous = await restoreData(home, args[0], path.resolve(args[1]));
-    out(`Data restored. The previous data is retained at ${previous}.`);
+    out(
+      values.json
+        ? `Data restored. The previous data is retained at ${previous}.`
+        : formatNotice(
+            "ok",
+            "Data restored.",
+            `Previous data retained at ${shortenHome(previous)}`,
+          ),
+    );
     return;
   }
   if (command === "gate") {
     if (args[0] === "reset") {
-      out(await rpc("reset"));
+      const result = await rpc("reset");
+      out(values.json ? result : formatNotice("ok", "Disconnected all signed-in browsers."));
       return;
     }
     const result = await rpc<{ code: string }>("pair");
     if (!values.json) {
-      console.log(
-        `Device code: ${result.code}\nValid for ten minutes. Open https://gate.fleet on your device.`,
-      );
+      console.log(formatGateCode(result.code));
       if (!values.noopen) openBrowser("https://gate.fleet");
     } else {
       out(result);
@@ -469,10 +499,18 @@ async function main(): Promise<void> {
     if (args[0] === "off") {
       const result = await turnOffPhoneRoute(home);
       if (!result.removed) {
-        out("There is no Fleet phone setup route to remove.");
+        out(
+          values.json
+            ? "There is no Fleet phone setup route to remove."
+            : formatNotice("info", "There is no Fleet phone setup route to remove."),
+        );
         return;
       }
-      out("Phone setup route removed.");
+      out(
+        values.json
+          ? "Phone setup route removed."
+          : formatNotice("ok", "Phone setup route removed."),
+      );
       return;
     }
     await phone();
@@ -481,8 +519,9 @@ async function main(): Promise<void> {
   if (command === "profile") {
     if (!values.output) throw new Error("Choose an output file with --output.");
     if (fs.existsSync(values.output)) throw new Error("Output file already exists.");
-    write(path.resolve(values.output), mobileProfile(home));
-    out(path.resolve(values.output));
+    const target = path.resolve(values.output);
+    write(target, mobileProfile(home));
+    out(values.json ? target : formatNotice("ok", "Exported iPhone profile.", shortenHome(target)));
     return;
   }
   if (command === "unregister") {
@@ -495,7 +534,11 @@ async function main(): Promise<void> {
         apps.filter((a) => a.name !== args[0]),
       );
     });
-    out("App route removed. Source and data are retained.");
+    out(
+      values.json
+        ? "App route removed. Source and data are retained."
+        : formatNotice("ok", `Unregistered ${args[0]}.`, "Source files and data are retained."),
+    );
     return;
   }
   if (command === "doctor") {
@@ -517,7 +560,7 @@ async function main(): Promise<void> {
       skipped: true,
       reason: "Fleet is configured with --local.",
     };
-    const checks: Array<Record<string, unknown>> = [];
+    const checks: DoctorCheck[] = [];
     if (localOnly) {
       checks.push({ check: "tailscale", ...skipped });
     } else {
@@ -551,14 +594,20 @@ async function main(): Promise<void> {
         });
       }
     }
-    out(checks);
+    out(values.json ? checks : formatDoctor(checks));
     if (checks.some((c) => c.ok === false)) process.exitCode = 1;
     return;
   }
   if (command === "uninstall") {
     uninstall(home);
     out(
-      "Fleet background startup and computer trust removed. App source and data are retained. Remove the fleet DNS rule in Tailscale and the profile on your phone if you are retiring this Fleet.",
+      values.json
+        ? "Fleet background startup and computer trust removed. App source and data are retained. Remove the fleet DNS rule in Tailscale and the profile on your phone if you are retiring this Fleet."
+        : formatNotice(
+            "ok",
+            "Fleet background startup and computer trust removed.",
+            "App source and data are retained. Remove the fleet DNS rule in Tailscale and the iPhone profile if retiring Fleet.",
+          ),
     );
     return;
   }
@@ -566,6 +615,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(`Fleet: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(formatError(error instanceof Error ? error.message : String(error)));
   process.exitCode = 1;
 });
