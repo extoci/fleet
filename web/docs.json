@@ -6,7 +6,14 @@
   "favicon": "/favicon.svg",
   "colors": { "primary": "#a873fa", "dark": "#6d3fd1", "light": "#a873fa" },
   "appearance": { "default": "dark", "strict": false },
-  "fonts": { "family": "Geist" },
+  "fonts": {
+    "family": "Geist",
+    "heading": {
+      "family": "Geist Pixel Square",
+      "source": "/fonts/GeistPixel-Square.woff2",
+      "format": "woff2"
+    }
+  },
   "icons": { "library": "lucide" },
   "assistant": { "enabled": false },
   "search": { "prompt": "Search Fleet docs…" },

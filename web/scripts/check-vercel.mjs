@@ -26,6 +26,7 @@ for (const asset of [
   'fleet-light.svg',
   'fleet-dark.svg',
   'favicon.svg',
+  'fonts/GeistPixel-Square.woff2',
   'install',
   'install.sh',
   'install.ps1',

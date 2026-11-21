@@ -22,6 +22,7 @@
 :root {
   --primary-foreground: #fff;
   --ring: #6d3fd1;
+  --weight-heading: 400;
 }
 
 .fleet-dither {
@@ -87,10 +88,11 @@
 .fleet-hero h1 {
   max-width: 640px;
   margin: 0;
-  font-size: clamp(40px, 6vw, 64px);
-  font-weight: 500;
-  line-height: 1.02;
-  letter-spacing: -0.045em;
+  font-family: var(--font-heading, 'Geist Pixel Square', var(--font-sans));
+  font-size: clamp(38px, 5.6vw, 60px);
+  font-weight: 400;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
   color: var(--foreground);
 }
 .fleet-hero h1 span {
@@ -167,8 +169,10 @@
 
 .fleet-guides h2 {
   margin: 0 0 8px;
-  font-size: 14px;
-  font-weight: 500;
+  font-family: var(--font-heading, 'Geist Pixel Square', var(--font-sans));
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
   color: var(--muted-foreground);
 }
 .fleet-guides ul {
