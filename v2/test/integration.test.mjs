@@ -447,6 +447,7 @@ test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation 
   await until(() => !app.worker);
   assert.ok(fs.existsSync(path.join(home, "data", app.id, "app.sqlite")));
   const response = await post("queries/notes", null);
+  assert.equal(response.status, 200, response.text);
   assert.equal(
     JSON.parse(response.text).value[0].text,
     "Persistent personal data",
@@ -464,6 +465,35 @@ test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation 
     request(daemon, ca, "unknown.fleet"),
     /TLS|socket|alert|ECONNRESET|disconnected/i,
   );
+});
+
+test("waking an idle app waits for its previous worker to exit", async (t) => {
+  const { daemon } = await fixture(t, { pollMs: 3_600_000 });
+  const { runtime } = daemon;
+  const app = runtime.find("notes");
+  const saved = await runtime.call(app, "mutations", "addNote", {
+    text: "Keep this on wake",
+  });
+  const previous = app.worker;
+  const terminate = previous.terminate.bind(previous);
+  const { promise: canExit, resolve: release } = Promise.withResolvers();
+  const stopping = canExit.then(() => terminate());
+  t.mock.method(previous, "terminate", () => stopping);
+  let query;
+  let notes;
+  try {
+    app.lastUsed = 0;
+    await runtime.tick();
+    assert.equal(app.worker, null);
+    query = runtime.call(app, "queries", "notes", null);
+    await new Promise(setImmediate);
+    assert.ok(!app.worker, "A replacement started before the old worker exited.");
+  } finally {
+    release();
+    await stopping;
+    notes = await query;
+  }
+  assert.deepEqual(notes, [saved]);
 });
 
 test("live builds retain the previous app on build failure and keep data across daemon restart", async (t) => {

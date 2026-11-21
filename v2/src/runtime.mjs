@@ -119,7 +119,7 @@ export class Runtime {
     this.idleMs = idleMs;
     this.apps = new Map();
     this.closed = false;
-    this.terminations = new Set();
+    this.terminations = new Map();
     this.revisionListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e) => this.log("daemon", e.message)),
@@ -440,12 +440,17 @@ export class Runtime {
     if (app.warming) return app.warming;
     if (app.worker) {
       app.lastUsed = Date.now();
-      return;
+      return app.worker;
     }
     app.warming = (async () => {
       if (!(await this.build(app)))
         throw new Error("App has no successful build. Run fleet logs.");
+      // Let the old worker release its SQLite connections before reopening them.
+      const stopping = this.terminations.get(app.id);
+      if (stopping) await stopping;
       if (this.closed) throw new Error("Fleet is stopping.");
+      if (this.apps.get(app.id) !== app)
+        throw new Error("App was unregistered.");
       const database = path.join(this.home, "data", app.id, "app.sqlite");
       fs.mkdirSync(path.dirname(database), { recursive: true, mode: 0o700 });
       const worker = new Worker(new URL("./app-worker.mjs", import.meta.url), {
@@ -469,13 +474,14 @@ export class Runtime {
       const ready = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error("App startup exceeded five seconds."));
-          this.unload(app);
+          if (app.worker === worker) this.unload(app);
         }, 5000);
         worker.on("message", (message) => {
+          if (app.worker !== worker) return;
           if (message.ready) {
             clearTimeout(timer);
             app.lastUsed = Date.now();
-            if (app.worker === worker) app.operations ??= message.operations;
+            app.operations ??= message.operations;
             resolve();
           } else if (message.log) this.log(app.id, message.log);
           else {
@@ -494,7 +500,7 @@ export class Runtime {
           clearTimeout(timer);
           this.log(app.id, error.message);
           reject(error);
-          this.unload(app);
+          if (app.worker === worker) this.unload(app);
         });
         worker.once("exit", () => {
           clearTimeout(timer);
@@ -503,13 +509,16 @@ export class Runtime {
         });
       });
       await ready;
+      return worker;
     })().finally(() => {
       app.warming = null;
     });
     return app.warming;
   }
   async call(app, kind, name, input, user = { id: "owner" }, runId) {
-    await this.wake(app);
+    const worker = await this.wake(app);
+    if (app.worker !== worker)
+      throw new Error("App stopped or updated. The operation was not retried.");
     if (app.pending.size >= 32)
       throw new Error("App is busy. Try again shortly.");
     return new Promise((resolve, reject) => {
@@ -525,7 +534,7 @@ export class Runtime {
         kind === "jobs" ? 30_000 : 15_000,
       );
       app.pending.set(id, { resolve, reject, timer });
-      app.worker.postMessage({ id, kind, name, input, user, runId });
+      worker.postMessage({ id, kind, name, input, user, runId });
     });
   }
   unload(app) {
@@ -540,8 +549,9 @@ export class Runtime {
     app.pending.clear();
     if (worker) {
       const ending = worker.terminate();
-      this.terminations.add(ending);
-      ending.finally(() => this.terminations.delete(ending));
+      this.terminations.set(app.id, ending);
+      const clear = () => this.terminations.delete(app.id);
+      ending.then(clear, clear);
     }
   }
   async tick() {
@@ -628,7 +638,7 @@ export class Runtime {
     await Promise.allSettled(
       [...this.apps.values()].map((app) => app.building).filter(Boolean),
     );
-    await Promise.allSettled([...this.terminations]);
+    await Promise.allSettled(this.terminations.values());
     while (this.ticking)
       await new Promise((resolve) => setTimeout(resolve, 10));
   }
