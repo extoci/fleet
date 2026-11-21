@@ -134,6 +134,77 @@ if (useState !== preactUseState || reactRender !== compatRender)
     await page.getByText("My phone can use this app.", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
 
+    await page.goto(`https://gate.fleet:${daemon.httpsPort}/`);
+    await page.getByRole("heading", { name: "Welcome back." }).waitFor();
+    const gateName = page.locator(".app-name").first();
+    await gateName.waitFor();
+    assert.equal(await gateName.textContent(), "notes");
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() => document.documentElement.hasAttribute("data-blur-pii")),
+      false,
+    );
+    const toggle = page.locator("[data-blur-toggle]");
+    const blurToggle = page.getByRole("button", { name: "Blur app names" });
+    await blurToggle.waitFor();
+    assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+    assert.equal(await gateName.evaluate((el) => getComputedStyle(el).filter), "none");
+    await blurToggle.click();
+    await page.waitForFunction(() => document.documentElement.dataset.blurPii === "1");
+    const showToggle = page.getByRole("button", { name: "Show app names" });
+    await showToggle.waitFor();
+    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+    await page.waitForFunction(() => {
+      const name = document.querySelector(".app-name");
+      if (!name) return false;
+      const styles = getComputedStyle(name);
+      return styles.filter.includes("blur(4px)") && styles.userSelect === "none";
+    });
+    await page.waitForFunction(() => document.querySelector(".app-name")?.textContent !== "notes");
+    const redacted = await gateName.textContent();
+    assert.ok(redacted);
+    assert.notEqual(redacted, "notes");
+    assert.equal(redacted.length, "notes".length);
+    await page.reload();
+    await page.getByRole("heading", { name: "Welcome back." }).waitFor();
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.blurPii), "1");
+    const persistedToggle = page.getByRole("button", { name: "Show app names" });
+    await persistedToggle.waitFor();
+    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+    await page.waitForFunction(() => {
+      const name = document.querySelector(".app-name");
+      return name !== null && getComputedStyle(name).filter.includes("blur(4px)");
+    });
+    await page.waitForFunction(
+      (expected) => document.querySelector(".app-name")?.textContent === expected,
+      redacted,
+    );
+    assert.equal(await gateName.textContent(), redacted);
+    await persistedToggle.click();
+    await page.waitForFunction(() => !document.documentElement.dataset.blurPii);
+    const restoredToggle = page.getByRole("button", { name: "Blur app names" });
+    await restoredToggle.waitFor();
+    assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+    await page.waitForFunction(() => document.querySelector(".app-name")?.textContent === "notes");
+    assert.equal(await gateName.textContent(), "notes");
+    await page.evaluate(() => {
+      const btn = document.querySelector<HTMLButtonElement>("[data-blur-toggle]");
+      btn?.click();
+      btn?.click();
+    });
+    await page.waitForTimeout(250);
+    assert.equal(
+      await page.evaluate(() => document.documentElement.hasAttribute("data-blur-pii")),
+      false,
+    );
+    assert.equal(await gateName.textContent(), "notes");
+    await page.goto(`https://notes.fleet:${daemon.httpsPort}/`);
+    await page.getByText("My phone can use this app.", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+
     const reports = ["Browser exception", "Browser rejection"].map((message) =>
       page.waitForResponse(
         (response) =>
