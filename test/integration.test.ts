@@ -875,6 +875,20 @@ test("the phone setup delivers only the profile, signs in at gate.fleet/phone, a
   assert.equal(profile.status, 200);
   assert.match(String(profile.headers.get("content-type")), /application\/x-apple-aspen-config/);
   assert.doesNotMatch(await profile.text(), /PRIVATE KEY/);
+  const setupFont = await fetch(
+    `http://127.0.0.1:${daemon.adminPort}${daemon.setupPath}/geist-pixel-square.woff2`,
+  );
+  assert.equal(setupFont.status, 200);
+  assert.equal(setupFont.headers.get("content-type"), "font/woff2");
+  const gateFont = await request(
+    daemon,
+    ca,
+    "gate.fleet",
+    "/__fleet/assets/geist-pixel-square.woff2",
+  );
+  assert.equal(gateFont.status, 200);
+  assert.equal(gateFont.headers["content-type"], "font/woff2");
+  assert.match(String(gateFont.headers["cache-control"]), /immutable/);
   assert.equal(
     (await fetch(`http://127.0.0.1:${daemon.adminPort}/setup/wrong/fleet.mobileconfig`)).status,
     403,
