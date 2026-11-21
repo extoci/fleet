@@ -11,6 +11,7 @@ import {
   headMetadata,
 } from "./state.mjs";
 import { sameSecret } from "./gate.mjs";
+import { operationKinds } from "./app-definition.mjs";
 
 export function privateAddress(address) {
   if (typeof address !== "string") return false;
@@ -179,6 +180,14 @@ export class Peers {
         error: a.error || null,
         head: headMetadata(a.head),
         hasPublic: a.hasPublic === true,
+        operations: Object.fromEntries(
+          operationKinds
+            .filter((kind) => Array.isArray(a.operations?.[kind]))
+            .map((kind) => [
+              kind,
+              a.operations[kind].filter((name) => typeof name === "string"),
+            ]),
+        ),
       }));
       const occupied = new Set([
         ...this.runtime.list().map((a) => a.name),
