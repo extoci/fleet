@@ -108,10 +108,10 @@ async function rpc<T = unknown>(
 function createApp(directory: string, name: string): AppManifest {
   validateName(name);
   const template = fileURLToPath(new URL("../templates/", import.meta.url));
-  const copySource = (file: string) => {
+  const copySource = (file: string, source = path.join(template, file)) => {
     const target = path.join(directory, file);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, fs.readFileSync(path.join(template, file)), {
+    fs.writeFileSync(target, fs.readFileSync(source), {
       flag: "wx",
     });
   };
@@ -128,13 +128,29 @@ function createApp(directory: string, name: string): AppManifest {
     addTypes();
     return app;
   }
-  const files = ["client/index.tsx", "client/style.css", "server/index.ts"];
-  for (const file of files) {
+  const files = [
+    "client/index.tsx",
+    "client/style.css",
+    "server/index.ts",
+    "public/fleet/fonts.css",
+    "public/fleet/wordmark.svg",
+  ];
+  const fonts = ["Geist-Variable.woff2", "GeistPixel-Square.woff2", "geist-font-OFL.txt"];
+  for (const dir of ["public", "public/fleet"]) {
+    const existing = fs.lstatSync(path.join(directory, dir), { throwIfNoEntry: false });
+    if (existing && !existing.isDirectory()) {
+      throw new Error(`${dir} must be a directory to store the Fleet starter assets.`);
+    }
+  }
+  for (const file of [...files, ...fonts.map((font) => `public/fleet/${font}`)]) {
     if (fs.existsSync(path.join(directory, file))) {
       throw new Error(`${file} already exists. Fleet will not overwrite your source files.`);
     }
   }
   for (const file of files) copySource(file);
+  for (const font of fonts) {
+    copySource(`public/fleet/${font}`, fileURLToPath(new URL(`./assets/${font}`, import.meta.url)));
+  }
   fs.writeFileSync(
     configFile,
     JSON.stringify({ version: 2, id: randomUUID(), name, jobs: [] }, null, 2),
