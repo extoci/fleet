@@ -1,0 +1,12 @@
+# Let Vite load the .env files for its selected mode.
+env = false
+
+[fmt]
+singleQuote = true
+printWidth = 100
+# Preserve quoted MDX frontmatter and the examples in fenced code blocks.
+embeddedLanguageFormatting = "off"
+
+[[fmt.overrides]]
+files = ["*.ts", "*.tsx"]
+options = { semi = false }

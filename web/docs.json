@@ -1,17 +1,18 @@
 {
   "$schema": "https://holocron.so/docs.json",
   "name": "Fleet",
-  "description": "Personal apps on your own computers. Built with your agent, available across your Tailscale devices.",
+  "description": "Personal apps on your own computers, open from every device on your tailnet.",
   "logo": { "light": "/fleet-light.svg", "dark": "/fleet-dark.svg" },
   "favicon": "/favicon.svg",
-  "colors": { "primary": "#426b3c", "dark": "#426b3c", "light": "#b7df9c" },
-  "appearance": { "default": "light", "strict": false },
+  "colors": { "primary": "#a873fa", "dark": "#6d3fd1", "light": "#a873fa" },
+  "appearance": { "default": "dark", "strict": false },
+  "fonts": { "family": "Geist" },
   "icons": { "library": "lucide" },
   "assistant": { "enabled": false },
   "search": { "prompt": "Search Fleet docs…" },
   "navbar": {
     "links": [
-      { "label": "Documentation", "href": "/docs/overview" },
+      { "label": "Docs", "href": "/docs/overview" },
       { "type": "github", "href": "https://github.com/extoci/fleet" }
     ],
     "primary": { "type": "button", "label": "Get started", "href": "/docs/quickstart" }
@@ -24,20 +25,6 @@
       { "group": "Reference", "pages": ["docs/cli", "docs/security", "docs/troubleshooting"] }
     ]
   },
-  "footer": {
-    "socials": { "github": "https://github.com/extoci/fleet" },
-    "links": [
-      { "header": "Learn", "items": [
-        { "label": "Quickstart", "href": "/docs/quickstart" },
-        { "label": "App format", "href": "/docs/apps" },
-        { "label": "iPhone setup", "href": "/docs/iphone" }
-      ] },
-      { "header": "Project", "items": [
-        { "label": "Source code", "href": "https://github.com/extoci/fleet" },
-        { "label": "Report an issue", "href": "https://github.com/extoci/fleet/issues" },
-        { "label": "Security model", "href": "/docs/security" }
-      ] }
-    ]
-  },
+  "footer": { "socials": { "github": "https://github.com/extoci/fleet" } },
   "redirects": [{ "source": "/docs", "destination": "/docs/overview" }]
 }

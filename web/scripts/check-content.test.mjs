@@ -11,7 +11,8 @@ function fixture(t) {
   fs.mkdirSync(path.join(root, 'pages'));
   fs.mkdirSync(path.join(root, 'public'));
   const config = { navigation: { groups: [{ group: 'Start', pages: ['index'] }] } };
-  const page = '---\ntitle: "Personal apps"\nsidebarTitle: "Home"\ndescription: "An example homepage."\n---\n<h1>Personal apps</h1>\n';
+  const page =
+    '---\ntitle: "Personal apps"\nsidebarTitle: "Home"\ndescription: "An example homepage."\n---\n<h1>Personal apps</h1>\n';
   const save = (body = page, nextConfig = config) => {
     fs.writeFileSync(path.join(root, 'docs.json'), JSON.stringify(nextConfig));
     fs.writeFileSync(path.join(root, 'pages', 'index.mdx'), body);
@@ -23,38 +24,41 @@ function fixture(t) {
 test('maps navigation to routes', () => {
   assert.equal(routeFor('index'), '/');
   assert.equal(routeFor('docs/apps'), '/docs/apps');
-  assert.deepEqual(pageSlugs({ navigation: { groups: [{ pages: ['index', 'docs/apps'] }] } }), ['index', 'docs/apps']);
+  assert.deepEqual(pageSlugs({ navigation: { groups: [{ pages: ['index', 'docs/apps'] }] } }), [
+    'index',
+    'docs/apps',
+  ]);
 });
 
 test('validates the actual site', () => {
   assert.equal(checkContent().pages.size, 12);
 });
 
-test('accepts a valid minimal site', t => {
+test('accepts a valid minimal site', (t) => {
   assert.equal(checkContent(fixture(t).root).pages.size, 1);
 });
 
-test('rejects missing navigation targets', t => {
+test('rejects missing navigation targets', (t) => {
   const { root, config, save } = fixture(t);
   config.navigation.groups[0].pages.push('missing');
   save(undefined, config);
   assert.throws(() => checkContent(root), /Missing page/);
 });
 
-test('rejects broken local links', t => {
+test('rejects broken local links', (t) => {
   const { root, page, save } = fixture(t);
   save(`${page}\n[Missing](/docs/missing)`);
   assert.throws(() => checkContent(root), /unknown local link/);
 });
 
-test('rejects duplicate navigation entries', t => {
+test('rejects duplicate navigation entries', (t) => {
   const { root, config, save } = fixture(t);
   config.navigation.groups[0].pages.push('index');
   save(undefined, config);
   assert.throws(() => checkContent(root), /duplicate pages/);
 });
 
-test('rejects unquoted metadata and duplicate headings', t => {
+test('rejects unquoted metadata and duplicate headings', (t) => {
   const { root, page, save } = fixture(t);
   save(page.replace('title: "Personal apps"', 'title: Personal apps'));
   assert.throws(() => checkContent(root), /quoted string/);
@@ -62,7 +66,7 @@ test('rejects unquoted metadata and duplicate headings', t => {
   assert.throws(() => checkContent(root), /duplicate H1/);
 });
 
-test('rejects orphaned pages', t => {
+test('rejects orphaned pages', (t) => {
   const { root } = fixture(t);
   fs.writeFileSync(path.join(root, 'pages', 'orphan.mdx'), '# Orphan');
   assert.throws(() => checkContent(root), /Every page must be in navigation/);
