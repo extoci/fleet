@@ -82,33 +82,62 @@ async function rpc(method, args, config = configuration(home)) {
 }
 function createApp(directory, name) {
   validateName(name);
-  if (fs.existsSync(path.join(directory, "fleet.json")))
-    return register(home, directory);
   const template = fileURLToPath(new URL("../templates/", import.meta.url));
+  const copySource = (file) => {
+    const target = path.join(directory, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, fs.readFileSync(path.join(template, file)), {
+      flag: "wx",
+    });
+  };
+  const addTypes = () => {
+    try {
+      copySource("fleet.d.ts");
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  };
+  const configFile = path.join(directory, "fleet.json");
+  if (fs.existsSync(configFile)) {
+    const app = register(home, directory);
+    addTypes();
+    return app;
+  }
   const files = ["client/index.tsx", "client/style.css", "server/index.ts"];
   for (const file of files)
     if (fs.existsSync(path.join(directory, file)))
       throw new Error(
         `${file} already exists. Fleet will not overwrite your source files.`,
       );
-  fs.mkdirSync(directory, { recursive: true });
-  for (const file of files)
-    write(
-      path.join(directory, file),
-      fs.readFileSync(path.join(template, file)),
-    );
-  write(path.join(directory, "fleet.json"), {
-    version: 2,
-    id: randomUUID(),
-    name,
-    jobs: [],
-  });
-  const instructions = `\n## Fleet app\n\nThis is a private Fleet v2 app. Edit client/index.tsx and server/index.ts. Fleet builds and updates it automatically. Do not start Vite or a separate app server.\n\nUse fleet list --json, fleet inspect ${name}, fleet logs ${name}, and fleet call ${name} queries notes to inspect the running app. Use fleet call APP mutations NAME '{"key":"value"}' for writes.\n\nThe server exports queries, mutations, and jobs. Handlers receive ctx.user, ctx.db.get/set/delete/list, ctx.log, and ctx.runId. Queries cannot write. Store persistent JSON in ctx.db. Data lives outside the checkout and survives rebuilds. Never store secrets in client files.\n\nDeclare scheduled jobs in fleet.json jobs as {"name":"dailyCheck","everySeconds":86400}. Jobs run without a browser. They may retry after interruption with the same ctx.runId. Use that ID for external API idempotency. App code runs with this computer user's permissions.\n\nBrowser clients import useQuery and useMutation from fleet/client and use Preact. useQuery returns {data,error}. All app requests use Fleet Gate. Do not add a separate login system.\n`;
-  fs.appendFileSync(path.join(directory, "AGENTS.md"), instructions);
-  fs.appendFileSync(
-    path.join(directory, "AGENTS.md"),
-    "\nServer secrets belong in .env.fleet.server and are available through ctx.env. This file is ignored by Git. Never import it into the client.\n",
+  for (const file of files) copySource(file);
+  fs.writeFileSync(
+    configFile,
+    JSON.stringify({ version: 2, id: randomUUID(), name, jobs: [] }, null, 2),
+    { flag: "wx" },
   );
+  addTypes();
+  const instructions = `
+## Fleet app
+
+Edit client/index.tsx and server/index.ts. Fleet builds and updates the app automatically. Do not start Vite or a separate app server.
+
+Use fleet list --json, fleet inspect ${name}, fleet logs ${name}, and fleet call ${name} queries notes to inspect the running app. Use fleet call APP mutations NAME '{"key":"value"}' for writes.
+
+The server exports queries, mutations, and jobs. See fleet.d.ts for FleetCtx and FleetDb. Store persistent JSON in ctx.db. The data is outside the checkout and survives rebuilds. Queries cannot write.
+
+ctx.db.get returns null for a missing key. ctx.db.delete returns true if it deleted a key. ctx.db.list(prefix) returns up to 1,000 items.
+
+Fleet runs each mutation or job in an implicit SQLite transaction. If the handler throws, Fleet rolls back all ctx.db writes from that call. Return a structured { ok: false, error } result to keep writes that record a failure.
+
+To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs array in fleet.json. Jobs run without a browser. Fleet can retry an interrupted job with the same ctx.runId. Use that ID as the idempotency key for external API requests. App code runs with this computer user's permissions.
+
+Import useQuery, useMutation, and call from fleet/client. Fleet provides Preact. Do not install Preact in the app. useQuery returns { data, error }. The error starts as null. Use call(kind, name, input) to write without refetching all queries.
+
+Fleet Gate handles sign-in. Do not add a separate login system.
+
+Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
+`;
+  fs.appendFileSync(path.join(directory, "AGENTS.md"), instructions);
   if (!fs.existsSync(path.join(directory, ".env.fleet.server")))
     write(
       path.join(directory, ".env.fleet.server"),

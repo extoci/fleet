@@ -25,6 +25,23 @@ test(
       env: { ...process.env, FLEET_V2_HOME: home },
       stdio: "pipe",
     });
+    const client = path.join(project, "client", "index.tsx");
+    const localPreact = path.join(project, "node_modules", "preact");
+    fs.cpSync(new URL("../node_modules/preact/", import.meta.url), localPreact, {
+      recursive: true,
+    });
+    write(
+      client,
+      fs.readFileSync(client, "utf8").replace(
+        "import { useState } from 'preact/hooks';",
+        `import { useState } from 'react';
+import { useState as preactUseState } from 'preact/hooks';
+import { render as reactRender } from 'react-dom';
+import { render as compatRender } from 'preact/compat';
+if (useState !== preactUseState || reactRender !== compatRender)
+  throw new Error('Multiple Preact copies');`,
+      ),
+    );
     write(path.join(home, "config.json"), {
       version: 2,
       addresses: ["127.0.0.1"],
@@ -122,7 +139,6 @@ test(
           cookie.name === "__Host-fleet" && cookie.secure && cookie.httpOnly,
       ),
     );
-    const client = path.join(project, "client", "index.tsx");
     write(
       client,
       fs.readFileSync(client, "utf8").replace("A place for", "A home for"),
