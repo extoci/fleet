@@ -1,5 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
+import { loadApp, operationKinds, operationNames } from "./app-definition.mjs";
 
 const writeDb = new DatabaseSync(workerData.database);
 writeDb.exec(
@@ -8,9 +9,7 @@ writeDb.exec(
 // WAL lets this connection read committed data while a write handler awaits.
 const readDb = new DatabaseSync(workerData.database, { readOnly: true });
 readDb.exec("PRAGMA busy_timeout=5000");
-const app = (await import(workerData.module)).default;
-if (!app || typeof app !== "object")
-  throw new Error("server/index.ts must export a default app definition.");
+const app = await loadApp(workerData.module);
 const key = (value) => {
   if (typeof value !== "string" || value.length > 512)
     throw new Error("Data keys must be strings of at most 512 characters.");
@@ -20,7 +19,7 @@ async function run(message) {
   let transaction = false;
   try {
     const { id, kind, name, input, user, runId } = message;
-    if (!["queries", "mutations", "jobs"].includes(kind))
+    if (!operationKinds.includes(kind))
       throw new Error("Unknown operation kind.");
     if (
       !Object.hasOwn(app[kind] || {}, name) ||
@@ -109,7 +108,5 @@ parentPort.on("message", (message) => {
 });
 parentPort.postMessage({
   ready: true,
-  operations: Object.fromEntries(
-    ["queries", "mutations", "jobs"].map((k) => [k, Object.keys(app[k] || {})]),
-  ),
+  operations: operationNames(app),
 });

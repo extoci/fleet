@@ -151,6 +151,24 @@ if (useState !== preactUseState || reactRender !== compatRender)
       .waitFor();
     assert.deepEqual(errors, []);
 
+    const reports = ["Browser exception", "Browser rejection"].map((message) =>
+      page.waitForResponse((response) =>
+        response.url().endsWith("/__fleet/client-error") &&
+        response.request().postDataJSON()?.message.includes(message),
+      ),
+    );
+    await page.evaluate(() => {
+      setTimeout(() => { throw new Error("Browser exception"); }, 0);
+      Promise.reject(new Error("Browser rejection"));
+    });
+    for (const response of await Promise.all(reports))
+      assert.equal(response.status(), 204);
+    const app = daemon.runtime.find("notes");
+    const log = fs.readFileSync(path.join(home, "logs", `${app.id}.log`), "utf8");
+    assert.match(log, /Client error: .*Browser exception/);
+    assert.match(log, /Client error: Browser rejection/);
+    errors.length = 0;
+
     await page.addInitScript(() => {
       window.requests = [];
       window.fetch = async (route, options) => {
@@ -213,6 +231,14 @@ if (useState !== preactUseState || reactRender !== compatRender)
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
     assert.equal(await page.locator("output").innerText(), "ready");
+    const crashReports = await page.evaluate(() => {
+      window.requests.length = 0;
+      for (let i = 0; i < 7; i++)
+        window.dispatchEvent(new ErrorEvent("error", { message: "Repeated crash" }));
+      return window.requests.filter(({ route }) => route === "/__fleet/client-error");
+    });
+    assert.equal(crashReports.length, 5);
+    assert.ok(crashReports.every(({ keepalive }) => keepalive));
     assert.deepEqual(errors, []);
   },
 );
