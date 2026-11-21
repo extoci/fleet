@@ -5,17 +5,42 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import tls, { type TLSSocket } from "node:tls";
+import { fileURLToPath } from "node:url";
 import type { OperationKind } from "./app-definition.ts";
 import { authority, leaf, mobileProfile } from "./certificates.ts";
 import { type DnsServer, startDNS } from "./dns.ts";
 import { Gate, sameSecret } from "./gate.ts";
-import { escape, loginPage, page, wakePage } from "./pages.ts";
+import {
+  escape,
+  FONT_ROUTE,
+  type GateAppView,
+  homePage,
+  loginPage,
+  offlinePage,
+  phoneConnectedPage,
+  phoneSetupPage,
+  unavailablePage,
+  wakePage,
+} from "./pages.ts";
 import { type PeerAppView, Peers, peerRequest } from "./peers.ts";
 import { turnOffPhoneRoute } from "./platform.ts";
 import { type LocalAppState, Runtime } from "./runtime.ts";
 import { acquire, type FleetConfig, hostname, read, secret, write } from "./state.ts";
 
 class BodyLimitError extends Error {}
+
+let cachedHeadingFont: Buffer | null | undefined;
+function headingFont(): Buffer | null {
+  if (cachedHeadingFont !== undefined) return cachedHeadingFont;
+  try {
+    cachedHeadingFont = fs.readFileSync(
+      fileURLToPath(new URL("./assets/GeistPixel-Square.woff2", import.meta.url)),
+    );
+  } catch {
+    cachedHeadingFont = null;
+  }
+  return cachedHeadingFont;
+}
 
 export async function body(request: IncomingMessage, limit = 1_048_576): Promise<string> {
   const chunks: Buffer[] = [];
@@ -363,6 +388,18 @@ export async function start(home: string, options: StartOptions = {}) {
         return;
       }
       const url = new URL(request.url || "/", `https://${request.headers.host}`);
+      if (url.pathname === FONT_ROUTE && (request.method === "GET" || request.method === "HEAD")) {
+        const font = headingFont();
+        if (!font) {
+          send(response, 404, "", "text/plain");
+          return;
+        }
+        send(response, 200, request.method === "HEAD" ? undefined : font, "font/woff2", {
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": font.length,
+        });
+        return;
+      }
       const isGate = host === "gate.fleet";
       if (isGate && url.pathname === "/__fleet/peers/register" && request.method === "POST") {
         const token = request.headers.authorization?.replace(/^Bearer /, "");
@@ -483,14 +520,7 @@ export async function start(home: string, options: StartOptions = {}) {
         return;
       }
       if (app?.peer && !app.online) {
-        send(
-          response,
-          503,
-          page(
-            app.name,
-            `<h1>This computer is offline.</h1><p>Turn on the computer with ${escape(app.name)} and connect it to Tailscale. Your app and data stay there.</p><a class="button" href="/">Try again</a>`,
-          ),
-        );
+        send(response, 503, offlinePage(app.name, originFor("gate")));
         return;
       }
       if (url.pathname === "/__fleet/logout" && request.method === "POST") {
@@ -506,31 +536,20 @@ export async function start(home: string, options: StartOptions = {}) {
           json(response, 405, { error: "Method not allowed." });
           return;
         }
-        const apps = appList();
-        const appSections = apps.length
-          ? apps
-              .map(
-                (a) =>
-                  `<section><a href="${originFor(a.name)}">${escape(a.name)}</a><p><small>${a.running ? "Running" : "Ready on demand"}${a.error ? " · Latest edit needs attention" : ""}</small></p></section>`,
-              )
-              .join("")
-          : "<p>Run <code>fleet init</code> in a project directory to create your first app.</p>";
+        const apps: GateAppView[] = appList().map((a) => ({
+          name: a.name,
+          url: originFor(a.name),
+          running: a.running,
+          building: "building" in a ? a.building : false,
+          error: a.error,
+          peer: "peer" in a ? a.peer : undefined,
+          online: "online" in a ? a.online : undefined,
+        }));
         if (url.pathname === "/phone") {
-          send(
-            response,
-            200,
-            page(
-              "Phone connected",
-              `<h1>Phone connected.</h1><p>${phoneRouteClosed ? "Your phone trusts Fleet HTTPS and is signed in. The temporary setup link has been turned off automatically." : "Your phone trusts Fleet HTTPS and is signed in. Run <code>fleet phone off</code> on your computer to close the temporary setup link."}</p>${appSections}<p><a class="button" href="/">Open Fleet</a></p>`,
-            ),
-          );
+          send(response, 200, phoneConnectedPage({ apps, routeClosed: phoneRouteClosed }));
           return;
         }
-        send(
-          response,
-          200,
-          page("Your apps", `<h1>Your apps.</h1><p>Private. On your computers.</p>${appSections}`),
-        );
+        send(response, 200, homePage(apps));
         return;
       }
       if (!app) {
@@ -654,7 +673,7 @@ export async function start(home: string, options: StartOptions = {}) {
             // Build error is recorded on app.buildError.
           });
         }
-        send(response, 200, wakePage(app.name));
+        send(response, 200, wakePage(app.name, { brandHref: originFor("gate") }));
         return;
       }
       if (["/app.js", "/app.css"].includes(url.pathname)) {
@@ -749,14 +768,7 @@ export async function start(home: string, options: StartOptions = {}) {
       runtime.log("daemon", message);
       if (response.headersSent) response.end();
       else if (request.method === "GET" && request.headers.accept?.includes("text/html")) {
-        send(
-          response,
-          503,
-          page(
-            "App unavailable",
-            '<h1>This app is unavailable.</h1><p>Check that its computer is on and connected to Tailscale. Your agent can read Fleet logs to find the problem.</p><a class="button" href="/">Try again</a>',
-          ),
-        );
+        send(response, 503, unavailablePage(originFor("gate")));
       } else {
         json(response, 500, { error: message });
       }
@@ -781,11 +793,29 @@ export async function start(home: string, options: StartOptions = {}) {
         send(
           response,
           200,
-          page(
-            "Connect your phone",
-            `<h1>Fleet on your phone.</h1><p>Keep Tailscale connected and open this page in Safari.</p><section><h2>1. Install your Fleet profile</h2><p>Tap Download profile, then Allow. Open Settings &rarr; General &rarr; VPN &amp; Device Management, tap Fleet private apps, and tap Install.</p><a class="button" href="/setup/${setupToken}/fleet.mobileconfig">Download profile</a></section><section><h2>2. Enable trust</h2><p>In Settings, open General &rarr; About &rarr; Certificate Trust Settings and enable Fleet private apps.</p><small>Your computer can then issue trusted website certificates. This profile adds its public certificate. It does not enroll the phone in device management.</small></section><section><h2>3. Open your apps</h2><p>Return here after enabling trust. This button signs your phone into Fleet and turns off this temporary setup link automatically.</p><a class="button" href="${originFor("gate")}/phone?ticket=${ticket}">Open Fleet</a></section>`,
-          ),
+          phoneSetupPage({
+            profileUrl: `/setup/${setupToken}/fleet.mobileconfig`,
+            openUrl: `${originFor("gate")}/phone?ticket=${ticket}`,
+            fontUrl: `/setup/${setupToken}/geist-pixel-square.woff2`,
+          }),
         );
+        return;
+      }
+      if (
+        setupToken &&
+        url.pathname === `/setup/${setupToken}/geist-pixel-square.woff2` &&
+        Date.now() < setupExpires &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        const font = headingFont();
+        if (!font) {
+          send(response, 404, "", "text/plain");
+          return;
+        }
+        send(response, 200, request.method === "HEAD" ? undefined : font, "font/woff2", {
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": font.length,
+        });
         return;
       }
       if (
