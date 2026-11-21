@@ -2,7 +2,14 @@ import https from "node:https";
 import net from "node:net";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { read, write, secret, validateName, withStateLock } from "./state.mjs";
+import {
+  read,
+  write,
+  secret,
+  validateName,
+  withStateLock,
+  headMetadata,
+} from "./state.mjs";
 import { sameSecret } from "./gate.mjs";
 
 export function privateAddress(address) {
@@ -37,6 +44,15 @@ export function peerRequest(target, method, args = {}) {
         },
       },
       (response) => {
+        response.on("error", reject);
+        if (
+          method === "asset" &&
+          args.publicPath &&
+          response.headers["x-fleet-public-asset"] === "1"
+        ) {
+          resolve(response);
+          return;
+        }
         let size = 0;
         const chunks = [];
         response.on("data", (chunk) => {
@@ -45,7 +61,6 @@ export function peerRequest(target, method, args = {}) {
             request.destroy(new Error("Fleet peer response exceeds 8 MB."));
           else chunks.push(chunk);
         });
-        response.on("error", reject);
         response.on("end", () => {
           try {
             const result = JSON.parse(Buffer.concat(chunks).toString());
@@ -162,6 +177,8 @@ export class Peers {
         revision: a.revision || null,
         running: Boolean(a.running),
         error: a.error || null,
+        head: headMetadata(a.head),
+        hasPublic: a.hasPublic === true,
       }));
       const occupied = new Set([
         ...this.runtime.list().map((a) => a.name),

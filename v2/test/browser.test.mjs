@@ -150,5 +150,69 @@ if (useState !== preactUseState || reactRender !== compatRender)
       .getByText("My phone can use this app.", { exact: true })
       .waitFor();
     assert.deepEqual(errors, []);
+
+    await page.addInitScript(() => {
+      window.requests = [];
+      window.fetch = async (route, options) => {
+        window.requests.push({ route, keepalive: options?.keepalive });
+        if (window.delayPoll && route.endsWith("/defaultPoll")) {
+          window.delayPoll = false;
+          return new Promise((resolve) => {
+            window.finishPoll = () => resolve(Response.json({ value: "stale" }));
+          });
+        }
+        return Response.json({ value: "ready" });
+      };
+    });
+    await page.clock.install();
+    write(client, `
+      import { render } from "preact";
+      import { call, useMutation, useQuery } from "fleet/client";
+      function App() {
+        const { data } = useQuery("defaultPoll");
+        useQuery("noPoll", null, { pollMs: false });
+        useQuery("zeroPoll", null, { pollMs: 0 });
+        const selective = useMutation("selective", { invalidate: ["noPoll"] });
+        const quiet = useMutation("quiet", { invalidate: false });
+        const all = useMutation("all");
+        return <main>
+          <output>{data}</output>
+          <button onClick={() => selective()}>Selective</button>
+          <button onClick={() => quiet()}>Quiet</button>
+          <button onClick={() => all()}>All</button>
+          <button onClick={() => call("mutations", "leaving", null, { keepalive: true })}>Leaving</button>
+        </main>;
+      }
+      render(<App />, document.getElementById("app"));
+    `);
+    await page.getByText("ready", { exact: true }).waitFor();
+    const requestNames = () =>
+      page.evaluate(() =>
+        window.requests.map(({ route }) => route.split("/").at(-1)),
+      );
+    assert.deepEqual(await requestNames(), ["defaultPoll", "noPoll", "zeroPoll"]);
+    await page.evaluate(() => { window.delayPoll = true; });
+    await page.clock.fastForward(10_000);
+    assert.deepEqual(await requestNames(), [
+      "defaultPoll", "noPoll", "zeroPoll", "defaultPoll",
+    ]);
+
+    await page.getByRole("button", { name: "Selective" }).click();
+    await page.getByRole("button", { name: "Quiet" }).click();
+    await page.getByRole("button", { name: "All" }).click();
+    await page.getByRole("button", { name: "Leaving" }).click();
+    assert.deepEqual((await requestNames()).slice(4), [
+      "selective", "noPoll", "quiet", "all", "defaultPoll", "noPoll", "zeroPoll", "leaving",
+    ]);
+    assert.deepEqual(await page.evaluate(() => window.requests.at(-1)), {
+      route: "/__fleet/api/mutations/leaving",
+      keepalive: true,
+    });
+    await page.evaluate(async () => {
+      window.finishPoll();
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    assert.equal(await page.locator("output").innerText(), "ready");
+    assert.deepEqual(errors, []);
   },
 );
