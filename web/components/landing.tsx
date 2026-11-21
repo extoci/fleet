@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 
 import { Dither } from './dither'
+import { Plumbob } from './plumbob'
 
 const guides = [
   {
@@ -51,29 +52,33 @@ export default function Landing() {
         <div className="fleet-hero-field" aria-hidden="true">
           <Dither focus={[0.55, 0.5]} spread={[1.1, 1.2]} gain={1.1} />
         </div>
-        <a className="fleet-badge" href="/docs/overview">
-          Fleet v2
-        </a>
-        <h1 id="fleet-title">
-          Personal apps, <span>on your own computers.</span>
-        </h1>
-        <p>Your agent writes them. Fleet runs them. Every device on your tailnet can open them.</p>
-        <div className="fleet-actions">
-          <a className="fleet-button" href="/docs/quickstart">
-            Get started
-          </a>
-          <a className="fleet-link" href="https://github.com/extoci/fleet">
-            GitHub <Arrow />
-          </a>
+        <div className="fleet-hero-copy">
+          <h1 id="fleet-title">
+            Personal apps, <span>on your own computers.</span>
+          </h1>
+          <p>
+            Your agent writes them. Fleet runs them. Every device on your tailnet can open them.
+          </p>
+          <div className="fleet-actions">
+            <a className="fleet-button" href="/docs/quickstart">
+              Get started
+            </a>
+            <a className="fleet-link" href="https://github.com/extoci/fleet">
+              GitHub <Arrow />
+            </a>
+          </div>
+          <pre className="fleet-terminal" aria-label="Example commands">
+            <code>
+              <span>$</span> curl -fsSL https://fleet.extoci.lol/install | bash{'\n'}
+              <span>$</span> fleet setup --install{'\n'}
+              <span>$</span> fleet init notes{'\n'}
+              <span>$</span> fleet open notes
+            </code>
+          </pre>
         </div>
-        <pre className="fleet-terminal" aria-label="Example commands">
-          <code>
-            <span>$</span> curl -fsSL https://fleet.extoci.lol/install | bash{'\n'}
-            <span>$</span> fleet setup --install{'\n'}
-            <span>$</span> fleet init notes{'\n'}
-            <span>$</span> fleet open notes
-          </code>
-        </pre>
+        <div className="fleet-hero-mark" aria-hidden="true">
+          <Plumbob />
+        </div>
       </section>
 
       <section className="fleet-guides" aria-labelledby="fleet-guides-title">
