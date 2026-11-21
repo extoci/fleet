@@ -114,6 +114,17 @@ if (useState !== preactUseState || reactRender !== compatRender)
         { cause: error },
       );
     }
+    await page.waitForFunction(() => {
+      const logo = document.querySelector<HTMLImageElement>('img[alt="Fleet"]');
+      const loadedFonts = [...document.fonts]
+        .filter((font) => font.status === "loaded")
+        .map((font) => font.family.replaceAll('"', ""));
+      return (
+        logo &&
+        logo.naturalWidth > 0 &&
+        ["Geist", "Geist Pixel Square"].every((font) => loadedFonts.includes(font))
+      );
+    });
     await page.getByLabel("New note").fill("My phone can use this app.");
     await page.getByRole("button", { name: "Save note" }).click();
     await page.getByText("My phone can use this app.", { exact: true }).waitFor();
@@ -127,10 +138,8 @@ if (useState !== preactUseState || reactRender !== compatRender)
         (cookie) => cookie.name === "__Host-fleet" && cookie.secure && cookie.httpOnly,
       ),
     );
-    write(client, fs.readFileSync(client, "utf8").replace("A place for", "A home for"));
-    await page
-      .getByRole("heading", { name: "A home for your thoughts." })
-      .waitFor({ timeout: 15000 });
+    write(client, fs.readFileSync(client, "utf8").replace("<h1>Notes</h1>", "<h1>My notes</h1>"));
+    await page.getByRole("heading", { name: "My notes" }).waitFor({ timeout: 15000 });
     await page.getByText("My phone can use this app.", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
 
