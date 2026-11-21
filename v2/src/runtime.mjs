@@ -1,12 +1,14 @@
 import fs from "node:fs";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import zlib from "node:zlib";
 import { Worker } from "node:worker_threads";
+import { pipeline } from "node:stream/promises";
 import * as esbuild from "esbuild";
 import { parseEnv } from "node:util";
-import { read, write, manifest } from "./state.mjs";
+import { read, write, manifest, headMetadata } from "./state.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const reactAliases = {
@@ -28,18 +30,30 @@ const fleetPreact = {
 };
 function signature(directory) {
   const files = [];
-  function walk(dir) {
+  const publicFiles = [];
+  const publicRoot = path.join(directory, "public");
+  const publicInputs = [publicRoot];
+  function walk(dir, isPublic = false) {
     for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
       if (
-        item.name.startsWith(".") ||
-        ["node_modules", "dist", "target"].includes(item.name)
+        !isPublic &&
+        (item.name.startsWith(".") ||
+          ["node_modules", "dist", "target"].includes(item.name))
       )
         continue;
       const file = path.join(dir, item.name);
-      if (item.isDirectory()) walk(file);
-      else if (item.isFile()) {
-        const stat = fs.statSync(file);
-        files.push(`${file}:${stat.mtimeMs}:${stat.size}`);
+      if (item.isDirectory()) {
+        if (isPublic) publicInputs.push(file);
+        walk(file, isPublic || file === publicRoot);
+      } else if (item.isFile()) {
+        const stat = fs.lstatSync(file);
+        if (!stat.isFile()) continue;
+        const changed = isPublic ? `:${stat.ctimeMs}` : "";
+        files.push(`${file}:${stat.mtimeMs}:${stat.size}${changed}`);
+        if (isPublic) {
+          publicInputs.push(file);
+          publicFiles.push(file);
+        }
       }
       if (files.length > 10000)
         throw new Error(
@@ -49,7 +63,43 @@ function signature(directory) {
   }
   walk(directory);
   files.push(inputStamp([path.join(directory, ".env.fleet.server")]));
-  return createHash("sha256").update(files.sort().join("\n")).digest("hex");
+  const stamp = createHash("sha256").update(files.sort().join("\n")).digest("hex");
+  return { stamp, publicRoot, publicFiles, publicInputs };
+}
+async function snapshotPublic(dir, root, files) {
+  const target = path.join(dir, "public");
+  if (!files.length || fs.existsSync(target)) return;
+  const staging = fs.mkdtempSync(path.join(dir, ".public-"));
+  try {
+    for (const file of files) {
+      const source = await open(
+        file,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+      );
+      try {
+        const opened = await source.stat();
+        const current = fs.lstatSync(file);
+        if (
+          !opened.isFile() ||
+          opened.dev !== current.dev ||
+          opened.ino !== current.ino ||
+          fs.realpathSync(file) !== file
+        )
+          throw new Error("A public file changed during the build.");
+        const output = path.join(staging, path.relative(root, file));
+        fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
+        await pipeline(
+          source.createReadStream(),
+          fs.createWriteStream(output, { mode: 0o600 }),
+        );
+      } finally {
+        await source.close();
+      }
+    }
+    fs.renameSync(staging, target);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
 }
 function inputStamp(files) {
   return files
@@ -112,21 +162,22 @@ export class Runtime {
             ? path.join(this.home, "builds", app.id, last.revision)
             : null,
           jobs: last?.jobs || [],
+          head: last?.head || {},
+          hasPublic: last?.hasPublic || false,
         };
         try {
           state.watcher = fs.watch(
             app.directory,
             { recursive: true },
             (_event, name) => {
+              const parts = String(name || "").split(/[\\/]/);
               if (
-                !name ||
-                !String(name)
-                  .split(/[\\/]/)
-                  .some(
-                    (part) =>
-                      part.startsWith(".") ||
-                      ["node_modules", "dist", "target"].includes(part),
-                  )
+                parts[0] === "public" ||
+                !parts.some(
+                  (part) =>
+                    part.startsWith(".") ||
+                    ["node_modules", "dist", "target"].includes(part),
+                )
               ) {
                 state.dirty = true;
                 this.scheduleBuild(state);
@@ -191,6 +242,8 @@ export class Runtime {
       error: a.buildError,
       operations: a.operations || {},
       jobs: a.jobs || [],
+      head: a.head,
+      hasPublic: a.hasPublic,
     }));
   }
   async build(app) {
@@ -204,6 +257,7 @@ export class Runtime {
         "client/index.tsx",
         "server/index.ts",
         ".env.fleet.server",
+        "public",
       ].map((file) => path.join(app.directory, file));
     const audit = inputStamp(auditFiles);
     if (app.watcher && !app.dirty && audit === app.auditStamp)
@@ -216,7 +270,9 @@ export class Runtime {
         throw new Error(
           "App identity changed. Restore fleet.json or explicitly unregister and register the new app.",
         );
-      const stamp = signature(app.directory);
+      const { stamp, publicRoot, publicFiles, publicInputs } = signature(
+        app.directory,
+      );
       if (stamp === app.checked) return Boolean(app.revision);
       app.checked = stamp;
       const dir = path.join(this.home, "builds", app.id, stamp);
@@ -272,32 +328,34 @@ export class Runtime {
           write(`${file}.gz`, zlib.gzipSync(output.contents, { level: 9 }));
         }
         await this.validate(path.join(dir, "server.mjs"));
+        await snapshotPublic(dir, publicRoot, publicFiles);
         if (this.closed) return false;
-        app.auditFiles = [
-          ...new Set(
-            [
-              "fleet.json",
-              ".env.fleet.server",
-              ...Object.keys(client.metafile.inputs),
-              ...Object.keys(server.metafile.inputs),
-            ]
-              .map((file) => path.resolve(app.directory, file))
-              .filter(
-                (file) =>
-                  file.startsWith(app.directory + path.sep) &&
-                  !file.includes(`${path.sep}node_modules${path.sep}`),
-              ),
-          ),
-        ];
+        const buildInputs = [
+          "fleet.json",
+          ".env.fleet.server",
+          ...Object.keys(client.metafile.inputs),
+          ...Object.keys(server.metafile.inputs),
+        ]
+          .map((file) => path.resolve(app.directory, file))
+          .filter(
+            (file) =>
+              file.startsWith(app.directory + path.sep) &&
+              !file.includes(`${path.sep}node_modules${path.sep}`),
+          );
+        app.auditFiles = [...new Set([...buildInputs, ...publicInputs])];
         app.auditStamp = inputStamp(app.auditFiles);
         this.unload(app);
         app.revision = stamp;
         app.buildDir = dir;
         app.buildError = null;
         app.jobs = current.jobs || [];
+        app.head = headMetadata(current);
+        app.hasPublic = publicFiles.length > 0;
         write(path.join(this.home, "builds", app.id, "current.json"), {
           revision: stamp,
           jobs: app.jobs,
+          head: app.head,
+          hasPublic: app.hasPublic,
         });
         const parent = path.dirname(dir);
         const older = fs
@@ -336,6 +394,8 @@ export class Runtime {
               last.revision,
             );
             app.jobs = last.jobs;
+            app.head = last.head || {};
+            app.hasPublic = last.hasPublic || false;
           }
         }
         return Boolean(app.revision);

@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { authority, mobileProfile } from "../src/certificates.mjs";
 import { start } from "../src/server.mjs";
 import { write, secret, read } from "../src/state.mjs";
@@ -160,6 +162,141 @@ test("bundled server code can dynamically require a Node builtin from CommonJS",
   `);
   const app = daemon.runtime.find("notes");
   assert.equal(await daemon.runtime.call(app, "queries", "encode", "buffer"), "666c656574");
+});
+
+test("public assets and head metadata follow the last successful build", async (t) => {
+  const { daemon, ca, project } = await fixture(t, { pollMs: 3_600_000 });
+  const app = daemon.runtime.find("notes");
+  const manifestFile = path.join(project, "fleet.json");
+  write(manifestFile, {
+    ...read(manifestFile),
+    title: 'Notes <& "private">',
+    themeColor: '#123456" data-test="unsafe',
+    icon: "/icons/note.svg",
+    manifest: "/app.webmanifest",
+  });
+  const icon = path.join(project, "public", "icons", "note.svg");
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+  write(icon, svg);
+  write(path.join(project, "public", "app.webmanifest"), { name: "Notes" });
+  write(path.join(project, "public", "app.js"), "shadow bundle");
+  write(path.join(project, "public", "app.css"), "shadow stylesheet");
+  write(path.join(project, "public", "__fleet", "hidden.txt"), "shadow endpoint");
+  write(path.join(project, ".env.fleet.server"), "PRIVATE=server-secret");
+  fs.symlinkSync("../../.env.fleet.server", path.join(project, "public", "icons", "link.txt"));
+  fs.symlinkSync("..", path.join(project, "public", "linked-dir"), "dir");
+  await daemon.runtime.build(app);
+
+  const auth = await signin(daemon, ca);
+  const get = (route, options) => request(daemon, ca, "notes.fleet", route, { ...auth, ...options });
+  const page = await get("/watch/123");
+  assert.equal(page.status, 200);
+  for (const tag of [
+    "<title>Notes &lt;&amp; &quot;private&quot;&gt;</title>",
+    '<meta name="theme-color" content="#123456&quot; data-test=&quot;unsafe">',
+    '<link rel="icon" href="/icons/note.svg">',
+    '<link rel="apple-touch-icon" href="/icons/note.svg">',
+    '<link rel="manifest" href="/app.webmanifest">',
+  ]) assert.ok(page.text.includes(tag), tag);
+
+  const asset = await get("/icons/note.svg");
+  assert.equal(asset.status, 200);
+  assert.equal(asset.text, svg);
+  assert.equal(asset.headers["content-type"], "image/svg+xml");
+  assert.equal(asset.headers["x-content-type-options"], "nosniff");
+  assert.match(asset.headers["cache-control"], /private, no-cache/);
+  assert.equal((await get("/app.webmanifest")).headers["content-type"], "application/manifest+json");
+  const head = await get("/icons/note.svg", { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(head.headers["content-length"], String(Buffer.byteLength(svg)));
+  assert.equal(head.text, "");
+  const cached = await get("/icons/note.svg", {
+    headers: { "If-None-Match": `"previous", W/${asset.headers.etag}` },
+  });
+  assert.equal(cached.status, 304);
+  assert.equal(cached.text, "");
+  for (const route of [
+    "/icons/link.txt",
+    "/linked-dir/.env.fleet.server",
+    "/../.env.fleet.server",
+    "/icons/%2e%2e/icons/note.svg",
+    "/icons%5c..%5c.env.fleet.server",
+    "/icons/note.svg/child",
+  ]) {
+    const missing = await get(route);
+    assert.equal(missing.status, 200, route);
+    assert.equal(missing.text, page.text, route);
+  }
+  assert.doesNotMatch((await get("/app.js")).text, /shadow bundle/);
+  assert.doesNotMatch((await get("/app.css")).text, /shadow stylesheet/);
+  assert.equal((await get("/__fleet/hidden.txt")).status, 404);
+
+  const server = path.join(project, "server", "index.ts");
+  const validServer = fs.readFileSync(server);
+  write(server, "export default {");
+  write(icon, "<svg>updated</svg>");
+  await daemon.runtime.build(app);
+  assert.ok(app.buildError);
+  assert.equal((await get("/icons/note.svg")).text, svg);
+  write(server, validServer);
+  await daemon.runtime.build(app);
+  const updated = await get("/icons/note.svg", {
+    headers: { "If-None-Match": asset.headers.etag },
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.text, "<svg>updated</svg>");
+  assert.notEqual(updated.headers.etag, asset.headers.etag);
+});
+
+test("queries read committed data while an async mutation waits, including on rollback", { timeout: 10_000 }, async (t) => {
+  const { daemon, project } = await fixture(t, { pollMs: 3_600_000 });
+  write(path.join(project, "server", "index.ts"), `
+    export default {
+      queries: {
+        read: ({ db }) => ({ value: db.get("value"), all: db.list() }),
+        set: ({ db }) => db.set("value", "illegal"),
+        delete: ({ db }) => db.delete("value"),
+      },
+      mutations: {
+        save: ({ db }) => db.set("value", "committed"),
+        async slow({ db }, url) {
+          db.set("value", "uncommitted");
+          db.set("pending", true);
+          await fetch(url);
+          throw new Error("roll back");
+        },
+      },
+    };
+  `);
+  const app = daemon.runtime.find("notes");
+  const call = (kind, name, input = null) => daemon.runtime.call(app, kind, name, input);
+  await call("mutations", "save");
+  const { promise: waiting, resolve: arrived } = Promise.withResolvers();
+  const remote = http.createServer((_request, response) => arrived(response));
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    remote.closeAllConnections();
+    remote.close();
+  });
+  const mutation = assert.rejects(
+    call("mutations", "slow", `http://127.0.0.1:${remote.address().port}`),
+    /roll back/,
+  );
+  const response = await waiting;
+  const expected = { value: "committed", all: [{ key: "value", value: "committed" }] };
+  try {
+    const snapshot = await Promise.race([
+      call("queries", "read"),
+      delay(2_000, undefined, { ref: false }).then(() => assert.fail("Query waited for the mutation")),
+    ]);
+    assert.deepEqual(snapshot, expected);
+    for (const name of ["set", "delete"])
+      await assert.rejects(call("queries", name), /Queries cannot change data/);
+  } finally {
+    response.end();
+    await mutation;
+  }
+  assert.deepEqual(await call("queries", "read"), expected);
 });
 
 test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation work together", async (t) => {
@@ -390,6 +527,11 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
     env: { ...process.env, FLEET_V2_HOME: nodeHome },
     stdio: "pipe",
   });
+  const manifest = path.join(project, "fleet.json");
+  write(manifest, { ...read(manifest), title: "Remote notes", icon: "/icon.png" });
+  // Use an asset too large for the peer JSON response limit.
+  const icon = Buffer.alloc(6_100_000, 42);
+  write(path.join(project, "public", "icon.png"), icon);
   const config = read(path.join(home, "config.json"));
   // The production enrollment validates Tailscale addresses. The test broker
   // explicitly allows loopback so this exercises actual TLS on random ports.
@@ -474,6 +616,26 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   );
   assert.equal(bundle.status, 200);
   assert.ok(bundle.text.length > 1000);
+  const asset = await request(gateway, ca, "remote-notes.fleet", "/icon.png", auth);
+  assert.equal(asset.status, 200);
+  assert.deepEqual(asset.raw, icon);
+  assert.equal(asset.headers["content-type"], "image/png");
+  assert.equal(asset.headers["x-content-type-options"], "nosniff");
+  const head = await request(gateway, ca, "remote-notes.fleet", "/icon.png", {
+    ...auth,
+    method: "HEAD",
+  });
+  assert.equal(head.status, 200);
+  assert.equal(head.headers["content-length"], String(icon.length));
+  assert.equal(head.text, "");
+  const cached = await request(gateway, ca, "remote-notes.fleet", "/icon.png", {
+    ...auth,
+    headers: { "If-None-Match": asset.headers.etag },
+  });
+  assert.equal(cached.status, 304);
+  const page = await request(gateway, ca, "remote-notes.fleet", "/watch/123", auth);
+  assert.match(page.text, /<title>Remote notes<\/title>/);
+  assert.match(page.text, /<link rel="icon" href="\/icon.png">/);
   const nodeApp = node.runtime.find("remote-notes");
   assert.ok(
     fs.existsSync(path.join(nodeHome, "data", nodeApp.id, "app.sqlite")),
