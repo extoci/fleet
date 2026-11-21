@@ -600,7 +600,7 @@ export function serviceFiles(
     addresses: config.addresses,
     mode: config.mode,
   };
-  const servicePath = platform === "darwin" ? path.posix : path;
+  const servicePath = path.posix;
   const executable = servicePath.join(destination, "bun");
   const helperPath = servicePath.join(destination, "ports.ts");
   const configPath = servicePath.join(destination, "owner.json");

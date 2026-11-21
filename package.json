@@ -8,10 +8,10 @@
     "fleet": "src/cli.ts"
   },
   "scripts": {
-    "test": "bun test test",
+    "test": "bun test ./test",
     "typecheck": "bun check --no-script",
-    "lint": "bun lint --no-script",
-    "lint:fix": "bun lint --no-script --fix",
+    "lint": "bun scripts/lint.ts",
+    "lint:fix": "bun scripts/lint.ts --fix",
     "format": "bun fmt --no-script",
     "format:check": "bun fmt --no-script --check",
     "check": "bun run typecheck && bun run format:check"

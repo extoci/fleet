@@ -30,15 +30,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run format:check
-      - name: Lint with Bun
-        shell: bash
-        run: |
-          if bun lint --no-script --help >/dev/null 2>&1; then
-            bun lint --no-script --max-warnings 0
-          else
-            bunx bun@canary lint --no-script --max-warnings 0
-          fi
-      - run: bun test test
+      - run: bun run lint -- --max-warnings 0
+      - run: bun test ./test
       - name: Package release archive
         shell: bash
         run: |
