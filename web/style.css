@@ -279,3 +279,12 @@
     padding: 12px 8px;
   }
 }
+
+@media (max-width: 560px) {
+  .fleet-guides a {
+    grid-template-columns: 1fr auto;
+  }
+  .fleet-row-text {
+    display: none;
+  }
+}
