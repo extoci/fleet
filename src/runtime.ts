@@ -15,7 +15,7 @@ import {
   type JobSpec,
   manifest,
   type RegisteredApp,
-  read,
+  readShared,
   write,
 } from "./state.ts";
 
@@ -250,10 +250,10 @@ export class Runtime {
   }
 
   sync(): void {
-    const registered = read<RegisteredApp[]>(path.join(this.home, "apps.json"), []);
+    const registered = readShared<RegisteredApp[]>(path.join(this.home, "apps.json"), []);
     for (const app of registered) {
       if (!this.apps.has(app.id)) {
-        const last = read<BuildMeta | null>(
+        const last = readShared<BuildMeta | null>(
           path.join(this.home, "builds", app.id, "current.json"),
           null,
         );
@@ -492,7 +492,7 @@ export class Runtime {
         app.buildError = formatBuildError(error);
         this.log(app.id, `Build failed: ${app.buildError}`);
         if (!app.revision) {
-          const last = read<BuildMeta | null>(
+          const last = readShared<BuildMeta | null>(
             path.join(this.home, "builds", app.id, "current.json"),
             null,
           );
@@ -681,7 +681,9 @@ export class Runtime {
     try {
       this.sync();
       const jobsFile = path.join(this.home, "jobs.json");
-      const state = read<Record<string, JobRecord>>(jobsFile, {});
+      // Entries are replaced, never mutated in place, so a shallow copy keeps
+      // the shared snapshot intact.
+      const state = { ...readShared<Record<string, JobRecord>>(jobsFile, {}) };
       let dirty = false;
       for (const app of this.apps.values()) {
         // Let the watcher settle a batch of edits before rebuilding.

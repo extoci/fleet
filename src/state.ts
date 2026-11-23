@@ -69,6 +69,23 @@ export const read = <T>(file: string, fallback: T): T => {
   }
 };
 
+const readCache = new Map<string, { stamp: string; value: unknown }>();
+
+// Like read(), but skips the file read and parse while mtime and size are
+// unchanged — for hot paths that poll small JSON state files. The return value
+// is shared: callers must not mutate it (copy first).
+export function readShared<T>(file: string, fallback: T): T {
+  const stat = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stat?.isFile()) return fallback;
+  const stamp = `${stat.mtimeMs}:${stat.size}`;
+  const cached = readCache.get(file);
+  if (cached?.stamp === stamp) return cached.value as T;
+  const value = JSON.parse(fs.readFileSync(file, "utf8")) as T;
+  if (readCache.size > 256) readCache.clear();
+  readCache.set(file, { stamp, value });
+  return value;
+}
+
 export function write(file: string, value: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
