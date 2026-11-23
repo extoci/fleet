@@ -20,7 +20,9 @@ interface WorkerMessage {
 const init = workerData as WorkerInit;
 const writeDb = new DatabaseSync(init.database);
 writeDb.exec(
-  "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+  // synchronous=NORMAL is safe under WAL — commits stay crash-consistent and
+  // only lose to an OS/power failure, skipping an fsync per commit.
+  "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 );
 // WAL lets this connection read committed data while a write handler awaits.
 const readDb = new DatabaseSync(init.database, { readOnly: true });
