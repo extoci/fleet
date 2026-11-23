@@ -694,13 +694,25 @@ export class Runtime {
       // the shared snapshot intact.
       const state = { ...readShared<Record<string, JobRecord>>(jobsFile, {}) };
       let dirty = false;
+      // Builds are independent per app — start them together so boot rebuilds
+      // overlap instead of serializing on the save-to-serve path. Apps with a
+      // debounced rebuild pending are left alone.
+      const building = new Map<LocalAppState, Promise<void>>();
       for (const app of this.apps.values()) {
-        // Let the watcher settle a batch of edits before rebuilding.
         if (!app.rebuild) {
-          await this.build(app).catch((error: unknown) => {
-            app.buildError = formatBuildError(error);
-          });
+          building.set(
+            app,
+            this.build(app).then(
+              () => undefined,
+              (error: unknown) => {
+                app.buildError = formatBuildError(error);
+              },
+            ),
+          );
         }
+      }
+      for (const app of this.apps.values()) {
+        await building.get(app);
         for (const job of app.jobs || []) {
           const key = `${app.id}/${job.name}`;
           const old = state[key];
