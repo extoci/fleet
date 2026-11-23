@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
@@ -27,23 +29,21 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version" >&2
             exit 1
           }
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           # Shares the checks cache key: this job also runs lint (bun@canary)
           key: ${{ runner.os }}-bun-checks-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
-      - run: bun run check
-      - run: bun run lint -- --max-warnings 0
+      - run: bun run check && bun run lint -- --max-warnings 0
       - run: bun test --parallel ./test
 
   package:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"

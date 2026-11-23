@@ -37,20 +37,18 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           # Separate key: lint pulls bun@canary into the cache, keep it out of the shared one
           key: ${{ runner.os }}-bun-web-checks-${{ hashFiles('web/bun.lock') }}
       - run: bun install --frozen-lockfile
-      - run: bun run check
-      - run: bun run typecheck && bun run format:check && bun run lint -- --max-warnings 0
+      - run: bun run check && bun run typecheck && bun run format:check && bun run lint -- --max-warnings 0
       - run: bun test
 
   web-build:
@@ -61,18 +59,17 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
       - run: bun install --frozen-lockfile
       - run: bun run build && bun run test:production
@@ -85,18 +82,17 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
       - run: bun install --frozen-lockfile
       - run: bun run build:vercel && bun run test:vercel
