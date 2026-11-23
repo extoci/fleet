@@ -41,7 +41,8 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /*
-            !/web/
+            !/web/*
+            /web/public/
             !/docs/
             !/.github/
       - uses: oven-sh/setup-bun@v2
@@ -69,7 +70,8 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /*
-            !/web/
+            !/web/*
+            /web/public/
             !/docs/
             !/.github/
       - uses: oven-sh/setup-bun@v2
