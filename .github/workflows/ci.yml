@@ -21,6 +21,7 @@ jobs:
           bun-version: "1.4.5"
       - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
         id: bun-cache
+        shell: bash
       - uses: actions/cache@v4
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
@@ -43,6 +44,7 @@ jobs:
           bun-version: "1.4.5"
       - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
         id: bun-cache
+        shell: bash
       - uses: actions/cache@v4
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
@@ -67,6 +69,7 @@ jobs:
           node-version: "22"
       - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
         id: bun-cache
+        shell: bash
       - uses: actions/cache@v4
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
