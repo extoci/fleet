@@ -433,23 +433,28 @@ export class Runtime {
         // Compress browser assets once per build instead of on every request.
         // Keep the synchronous compressors off the main thread — quality-11
         // brotli stalls every request for tens of milliseconds per build.
+        // Validation, compression and the public snapshot are independent, so
+        // they run together: the validate worker spawn no longer sits on the
+        // save-to-serve critical path.
         const brotli = promisify(zlib.brotliCompress);
         const gzip = promisify(zlib.gzip);
-        await Promise.all(
-          clientBuffers.map(async (output) => {
-            const file = path.join(dir, output.name);
-            const [br, gz] = await Promise.all([
-              brotli(output.bytes, {
-                params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
-              }),
-              gzip(output.bytes, { level: 9 }),
-            ]);
-            write(`${file}.br`, br);
-            write(`${file}.gz`, gz);
-          }),
-        );
-        const operations = await this.validate(path.join(dir, "server.mjs"));
-        await snapshotPublic(dir, publicRoot, publicFiles);
+        const [operations] = await Promise.all([
+          this.validate(path.join(dir, "server.mjs")),
+          Promise.all(
+            clientBuffers.map(async (output) => {
+              const file = path.join(dir, output.name);
+              const [br, gz] = await Promise.all([
+                brotli(output.bytes, {
+                  params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+                }),
+                gzip(output.bytes, { level: 9 }),
+              ]);
+              write(`${file}.br`, br);
+              write(`${file}.gz`, gz);
+            }),
+          ),
+          snapshotPublic(dir, publicRoot, publicFiles),
+        ]);
         if (this.closed) return false;
         const metaInputs = [
           ...Object.keys(client.metafile?.inputs ?? {}),
