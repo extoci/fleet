@@ -172,6 +172,22 @@ function sendPublic(
   });
 }
 
+// Files in a build dir are immutable, so buffer each variant once per build
+// instead of reading it off disk on every request.
+function appAsset(app: LocalAppState, file: string): Buffer | undefined {
+  if (!app.assets || app.assets.dir !== app.buildDir) {
+    app.assets = { dir: app.buildDir, files: new Map() };
+  }
+  let data = app.assets.files.get(file);
+  if (!data) {
+    if (!fs.existsSync(file)) return undefined;
+    data = fs.readFileSync(file);
+    if (app.assets.files.size > 64) app.assets.files.clear();
+    app.assets.files.set(file, data);
+  }
+  return data;
+}
+
 function appHead(app: LocalAppState | PeerAppView): string {
   const { title = app.name, themeColor, icon, manifest } = app.head || {};
   return (
@@ -710,11 +726,11 @@ export async function start(home: string, options: StartOptions = {}) {
             ["br", "br"],
             ["gzip", "gz"],
           ] as const
-        ).find(([name, suffix]) => accepted.has(name) && fs.existsSync(`${file}.${suffix}`));
+        ).find(([name, suffix]) => accepted.has(name) && appAsset(app, `${file}.${suffix}`));
         const data =
           request.method === "HEAD"
             ? ""
-            : fs.readFileSync(encoding ? `${file}.${encoding[1]}` : file);
+            : (appAsset(app, encoding ? `${file}.${encoding[1]}` : file) ?? "");
         send(response, 200, data, type, {
           ...caching,
           ...(encoding ? { "Content-Encoding": encoding[0] } : {}),
@@ -757,7 +773,7 @@ export async function start(home: string, options: StartOptions = {}) {
       }
       const hasCss =
         isPeerApp(app) ||
-        Boolean(app.buildDir && fs.existsSync(path.join(app.buildDir, "app.css")));
+        Boolean(app.buildDir && appAsset(app, path.join(app.buildDir, "app.css")));
       send(
         response,
         200,
@@ -1053,11 +1069,11 @@ export async function start(home: string, options: StartOptions = {}) {
                 ["app.js", "app.css"].includes(args.file)
               ) {
                 const file = app.buildDir ? path.join(app.buildDir, args.file) : "";
-                const exists = Boolean(file && fs.existsSync(file));
+                const data = file ? appAsset(app, file) : undefined;
                 json(response, 200, {
-                  status: exists ? 200 : 404,
+                  status: data ? 200 : 404,
                   type: args.file.endsWith(".css") ? "text/css" : "text/javascript",
-                  data: exists ? fs.readFileSync(file).toString("base64") : "",
+                  data: data?.toString("base64") ?? "",
                 });
                 return;
               }

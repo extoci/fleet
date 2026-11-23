@@ -176,6 +176,8 @@ export interface LocalAppState extends RegisteredApp {
   dirty: boolean;
   revision?: string;
   buildDir: string | null;
+  // Buffers for files in the build dir, dropped when the dir changes.
+  assets?: { dir: string | null; files: Map<string, Buffer> };
   jobs: JobSpec[];
   operations?: OperationMap;
   head: HeadMetadata;
