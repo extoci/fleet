@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  verify-and-package:
+  verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -36,10 +36,17 @@ jobs:
           # Shares the checks cache key: this job also runs lint (bun@canary)
           key: ${{ runner.os }}-bun-checks-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run format:check
+      - run: bun run check
       - run: bun run lint -- --max-warnings 0
       - run: bun test --parallel ./test
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
       - name: Package release archive
         shell: bash
         run: |
@@ -72,7 +79,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: verify-and-package
+    needs: [verify, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
