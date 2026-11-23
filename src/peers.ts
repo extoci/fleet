@@ -62,6 +62,10 @@ export function privateAddress(address: unknown): address is string {
   );
 }
 
+// Reuse TLS connections between computers — a fresh handshake per call costs
+// more than the call itself on a tailnet.
+const agent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30_000 });
+
 export function peerRequest(
   target: PeerTarget,
   method: string,
@@ -75,6 +79,7 @@ export function peerRequest(
         port: target.port,
         servername: "gate.fleet",
         ca: target.ca,
+        agent,
         path: target.route || "/node",
         method: "POST",
         headers: {
