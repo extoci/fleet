@@ -38,6 +38,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/web/*
+            /web/public/
+            !/docs/
+            !/.github/
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
@@ -60,6 +67,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/web/*
+            /web/public/
+            !/docs/
+            !/.github/
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
@@ -68,4 +82,4 @@ jobs:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
-      - run: bun test --parallel ./test
+      - run: bun test --parallel --parallel-delay=0 ./test
