@@ -4,9 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import QRCode from "qrcode";
 import pkg from "../package.json" with { type: "json" };
-import { authority, leaf, mobileProfile } from "./certificates.ts";
 import {
   type AppListItem,
   type DoctorCheck,
@@ -23,16 +21,6 @@ import {
   formatSetup,
   shortenHome,
 } from "./cli-ui.ts";
-import {
-  ensureDNS,
-  install,
-  openBrowser,
-  tailnet,
-  tailscale,
-  tailscaleServe,
-  turnOffPhoneRoute,
-  uninstall,
-} from "./platform.ts";
 import {
   type AppManifest,
   configuration,
@@ -206,6 +194,7 @@ async function phone(): Promise<void> {
   }
   const setup = await rpc<{ path: string; expires: number }>("setup");
   const pairing = await rpc<{ code: string }>("pair");
+  const { tailscale, tailscaleServe } = await import("./platform.ts");
   const before = JSON.parse(tailscale(["serve", "status", "--json"])) as {
     TCP?: Record<string, unknown>;
     Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>;
@@ -237,6 +226,7 @@ async function phone(): Promise<void> {
     out({ url, expires: setup.expires, deviceCode: pairing.code });
     return;
   }
+  const { default: QRCode } = await import("qrcode");
   const qr = await QRCode.toString(url, { type: "terminal", small: true });
   console.log(formatPhoneSetup({ qr, url, code: pairing.code }));
 }
@@ -292,6 +282,8 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "setup") {
+    const { ensureDNS, install, tailnet } = await import("./platform.ts");
+    const { authority, leaf } = await import("./certificates.ts");
     const old = configuration(home);
     const net = values.local ? { addresses: ["127.0.0.1"], dnsName: "" } : tailnet();
     const config: FleetConfig = {
@@ -437,7 +429,7 @@ async function main(): Promise<void> {
       out(result);
       return;
     }
-    openBrowser(result.url);
+    (await import("./platform.ts")).openBrowser(result.url);
     out(formatNotice("info", `Opening ${args[0] || "Fleet"}…`));
     return;
   }
@@ -520,7 +512,7 @@ async function main(): Promise<void> {
     const result = await rpc<{ code: string }>("pair");
     if (!values.json) {
       console.log(formatGateCode(result.code));
-      if (!values.noopen) openBrowser("https://gate.fleet");
+      if (!values.noopen) (await import("./platform.ts")).openBrowser("https://gate.fleet");
     } else {
       out(result);
     }
@@ -528,7 +520,7 @@ async function main(): Promise<void> {
   }
   if (command === "phone") {
     if (args[0] === "off") {
-      const result = await turnOffPhoneRoute(home);
+      const result = await (await import("./platform.ts")).turnOffPhoneRoute(home);
       if (!result.removed) {
         out(
           values.json
@@ -550,6 +542,7 @@ async function main(): Promise<void> {
   if (command === "profile") {
     if (!values.output) throw new Error("Choose an output file with --output.");
     if (fs.existsSync(values.output)) throw new Error("Output file already exists.");
+    const { mobileProfile } = await import("./certificates.ts");
     const target = path.resolve(values.output);
     write(target, mobileProfile(home));
     out(values.json ? target : formatNotice("ok", "Exported iPhone profile.", shortenHome(target)));
@@ -596,6 +589,7 @@ async function main(): Promise<void> {
       checks.push({ check: "tailscale", ...skipped });
     } else {
       try {
+        const { tailnet } = await import("./platform.ts");
         checks.push({ check: "tailscale", ok: true, ...tailnet() });
       } catch (e) {
         checks.push({
@@ -630,7 +624,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "uninstall") {
-    uninstall(home);
+    (await import("./platform.ts")).uninstall(home);
     out(
       values.json
         ? "Fleet background startup and computer trust removed. App source and data are retained. Remove the fleet DNS rule in Tailscale and the profile on your phone if you are retiring this Fleet."
