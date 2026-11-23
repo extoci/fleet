@@ -36,15 +36,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           # Separate key: lint pulls bun@canary into the cache, keep it out of the shared one
           key: ${{ runner.os }}-bun-checks-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
@@ -59,15 +58,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
-      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-        id: bun-cache
-        shell: bash
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.bun-cache.outputs.dir }}
+          path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
       - run: bun test --parallel ./test
