@@ -4,7 +4,7 @@ import { open } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseEnv } from "node:util";
+import { parseEnv, promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import zlib from "node:zlib";
 import type { BunPlugin } from "bun";
@@ -431,16 +431,23 @@ export class Runtime {
           write(path.join(dir, output.name), output.bytes);
         }
         // Compress browser assets once per build instead of on every request.
-        for (const output of clientBuffers) {
-          const file = path.join(dir, output.name);
-          write(
-            `${file}.br`,
-            zlib.brotliCompressSync(output.bytes, {
-              params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
-            }),
-          );
-          write(`${file}.gz`, zlib.gzipSync(output.bytes, { level: 9 }));
-        }
+        // Keep the synchronous compressors off the main thread — quality-11
+        // brotli stalls every request for tens of milliseconds per build.
+        const brotli = promisify(zlib.brotliCompress);
+        const gzip = promisify(zlib.gzip);
+        await Promise.all(
+          clientBuffers.map(async (output) => {
+            const file = path.join(dir, output.name);
+            const [br, gz] = await Promise.all([
+              brotli(output.bytes, {
+                params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+              }),
+              gzip(output.bytes, { level: 9 }),
+            ]);
+            write(`${file}.br`, br);
+            write(`${file}.gz`, gz);
+          }),
+        );
         const operations = await this.validate(path.join(dir, "server.mjs"));
         await snapshotPublic(dir, publicRoot, publicFiles);
         if (this.closed) return false;
