@@ -9,6 +9,8 @@ One computer acts as your Fleet **gateway** for DNS, HTTPS, and Gate sign-in. Yo
 
 Apps and their SQLite databases stay on the computer where you created them.
 
+If the other computer already runs a web service, give it a `.fleet` shortcut with [`fleet alias`](/docs/cli#redirecting-to-an-existing-service). The shortcut redirects the browser to the service. Only the gateway needs to run Fleet.
+
 ## Before you join
 
 - [Install Fleet](/docs/quickstart) on the second computer and connect it to the same Tailscale network.

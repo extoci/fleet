@@ -11,6 +11,7 @@ import {
   type HeadMetadata,
   headMetadata,
   read,
+  readAliases,
   readShared,
   secret,
   validateName,
@@ -257,6 +258,7 @@ export class Peers {
       const occupied = new Set([
         ...this.runtime.list().map((a) => a.name),
         ...peers.filter((p) => p.id !== peerId).flatMap((p) => p.apps.map((a) => a.name)),
+        ...readAliases(this.home).map((alias) => alias.name),
       ]);
       for (const app of apps) {
         if (occupied.has(app.name)) {
@@ -278,6 +280,7 @@ export class Peers {
         const occupiedNow = new Set([
           ...this.runtime.list().map((a) => a.name),
           ...latest.filter((p) => p.id !== peerId).flatMap((p) => p.apps.map((a) => a.name)),
+          ...readAliases(this.home).map((alias) => alias.name),
         ]);
         for (const app of apps) {
           if (

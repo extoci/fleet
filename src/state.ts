@@ -26,6 +26,11 @@ export interface RegisteredApp extends AppManifest {
   directory: string;
 }
 
+export interface FleetAlias {
+  name: string;
+  target: string;
+}
+
 export interface GatewayConfig {
   address: string;
   port: number;
@@ -71,13 +76,12 @@ export const read = <T>(file: string, fallback: T): T => {
 
 const readCache = new Map<string, { stamp: string; value: unknown }>();
 
-// Like read(), but skips the file read and parse while mtime and size are
-// unchanged — for hot paths that poll small JSON state files. The return value
-// is shared: callers must not mutate it (copy first).
+// Skip the file read and parse while the inode, mtime, and size are unchanged.
+// The return value is shared. Copy it before making changes.
 export function readShared<T>(file: string, fallback: T): T {
   const stat = fs.statSync(file, { throwIfNoEntry: false });
   if (!stat?.isFile()) return fallback;
-  const stamp = `${stat.mtimeMs}:${stat.size}`;
+  const stamp = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
   const cached = readCache.get(file);
   if (cached?.stamp === stamp) return cached.value as T;
   const value = JSON.parse(fs.readFileSync(file, "utf8")) as T;
@@ -156,6 +160,58 @@ export function register(home: string, directory: string): AppManifest {
   return withStateLock(home, () => registerUnlocked(home, directory));
 }
 
+export function readAliases(home: string): FleetAlias[] {
+  return readShared<FleetAlias[]>(path.join(home, "aliases.json"), []);
+}
+
+export function registerAlias(home: string, name: string, destination: string): FleetAlias {
+  validateName(name);
+  const target = /^https?:\/\//i.test(destination) ? URL.parse(destination) : null;
+  if (!target || target.username || target.password) {
+    throw new Error("Use a full HTTP or HTTPS URL without credentials.");
+  }
+  if (target.hostname.replace(/\.$/, "") === `${name}.fleet`) {
+    throw new Error("An alias cannot redirect to itself.");
+  }
+  return withStateLock(home, () => {
+    const names = read<Record<string, string>>(path.join(home, "names.json"), {});
+    const apps = read<RegisteredApp[]>(path.join(home, "apps.json"), []);
+    const peers = read<Array<{ apps: Array<{ name: string }> }>>(path.join(home, "peers.json"), []);
+    if (
+      Object.hasOwn(names, name) ||
+      apps.some((app) => app.name === name) ||
+      peers.some((peer) => peer.apps.some((app) => app.name === name))
+    ) {
+      throw new Error(`${name} belongs to a Fleet app. Choose another alias name.`);
+    }
+    const alias = { name, target: target.href };
+    write(path.join(home, "aliases.json"), [
+      ...readAliases(home).filter((a) => a.name !== name),
+      alias,
+    ]);
+    return alias;
+  });
+}
+
+export function unregister(home: string, name: string): "app" | "alias" {
+  return withStateLock(home, () => {
+    const file = path.join(home, "apps.json");
+    const apps = read<RegisteredApp[]>(file, []);
+    if (apps.some((app) => app.name === name)) {
+      write(
+        file,
+        apps.filter((app) => app.name !== name),
+      );
+      return "app";
+    }
+    const aliases = readAliases(home);
+    const remaining = aliases.filter((alias) => alias.name !== name);
+    if (remaining.length === aliases.length) throw new Error("Unknown app or alias.");
+    write(path.join(home, "aliases.json"), remaining);
+    return "alias";
+  });
+}
+
 export function withStateLock<T>(home: string, operation: () => T): T {
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   const lock = path.join(home, "registry.lock");
@@ -196,6 +252,9 @@ export function withStateLock<T>(home: string, operation: () => T): T {
 function registerUnlocked(home: string, directory: string): AppManifest {
   directory = fs.realpathSync(directory);
   const app = manifest(directory);
+  if (readAliases(home).some((alias) => alias.name === app.name)) {
+    throw new Error(`${app.name} is a Fleet alias. Choose another app name.`);
+  }
   const file = path.join(home, "apps.json");
   const apps = read<RegisteredApp[]>(file, []);
   const peers = read<Array<{ apps: Array<{ name: string }> }>>(path.join(home, "peers.json"), []);

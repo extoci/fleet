@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { Resolver } from "node:dns/promises";
 import fs from "node:fs";
 import http, { type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -10,6 +12,61 @@ import type { OperationKind } from "../src/app-definition.ts";
 import { start } from "../src/server.ts";
 import { read, write } from "../src/state.ts";
 import { cleanups, fixture, request, runCli, signin, until } from "./integration-helpers.ts";
+
+test("gateway aliases resolve over DNS and redirect through Gate without a daemon restart", async () => {
+  const { home, daemon, ca } = await fixture({ noDns: false });
+  assert.ok(daemon.dnsPort);
+  const resolve4 = (host: string) => {
+    const resolver = new Resolver({ timeout: 1000, tries: 1 });
+    resolver.setServers([`127.0.0.1:${daemon.dnsPort}`]);
+    return resolver.resolve4(host);
+  };
+  const host = "media.fleet";
+  const target = "https://service.example.test:7337/dashboard?view=grid#recent";
+  assert.deepEqual(await runCli(home, "alias", "media", target), {
+    name: "media",
+    target,
+    url: `https://${host}`,
+  });
+  assert.deepEqual(await resolve4(host), ["127.0.0.1"]);
+
+  const signedOut = await request(daemon, ca, host);
+  assert.equal(signedOut.status, 303);
+  assert.equal(
+    signedOut.headers.location,
+    `https://gate.fleet:${daemon.httpsPort}/__fleet/login?app=media`,
+  );
+  assert.equal(signedOut.text, "");
+  const auth = await signin(daemon, ca, "media");
+  const index = await request(daemon, ca, "gate.fleet", "/", { cookie: auth.gateCookie });
+  assert.equal(index.status, 200);
+  assert.ok(index.text.includes(`href="https://${host}:${daemon.httpsPort}"`));
+  assert.ok(index.text.includes("Redirect</span>"));
+
+  const redirect = await request(daemon, ca, host, "/extra?app=unknown", auth);
+  assert.equal(redirect.status, 302);
+  assert.equal(redirect.headers.location, target);
+  assert.equal(redirect.headers["cache-control"], "no-store");
+  assert.equal(redirect.text, "");
+
+  await assert.rejects(runCli(home, "alias", "notes", target), /belongs to a Fleet app/);
+  const conflict = path.join(home, "conflict");
+  write(path.join(conflict, "fleet.json"), { version: 2, id: randomUUID(), name: "media" });
+  await assert.rejects(runCli(home, "register", conflict), /is a Fleet alias/);
+  await assert.rejects(
+    runCli(home, "alias", "media", "file:///tmp/service"),
+    /Use a full HTTP or HTTPS URL/,
+  );
+  const updatedTarget = "http://service.example.test:8080/";
+  await runCli(home, "alias", "media", updatedTarget);
+  const updated = await request(daemon, ca, host, "/", { ...auth, method: "HEAD" });
+  assert.equal(updated.status, 302);
+  assert.equal(updated.headers.location, updatedTarget);
+  assert.equal(updated.text, "");
+
+  await runCli(home, "unregister", "media");
+  await assert.rejects(resolve4(host), { code: "ENOTFOUND" });
+});
 
 test("bundled server code can dynamically require a Node builtin from CommonJS", async () => {
   const { project, daemon } = await fixture({ pollMs: 3_600_000 });

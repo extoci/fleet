@@ -12,6 +12,7 @@ export interface GateAppView {
   running: boolean;
   building?: boolean;
   error?: string | null;
+  alias?: boolean;
   peer?: string;
   online?: boolean;
 }
@@ -272,7 +273,10 @@ function renderAppRow(app: GateAppView): string {
   let glyph = "○";
   let label = "Ready on demand";
   let tone = "";
-  if (app.peer && app.online === false) {
+  if (app.alias) {
+    glyph = "↗";
+    label = "Redirect";
+  } else if (app.peer && app.online === false) {
     glyph = "◇";
     label = "Offline";
     tone = " tone-warn";

@@ -27,7 +27,7 @@ Fleet Gate handles sign-in. Do not add a separate login system.
 
 Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
 
-fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet call, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations and jobs write real app data). Every other subcommand — including setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
+fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet call, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations and jobs write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
 
 You are done when fleet inspect ${name} reports a new revision with no error (rebuilds take a few seconds) and, if an operation changed, fleet call exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.
 `;
@@ -50,7 +50,9 @@ These commands are normal app work and need no extra authorization — the daemo
 
 Run app commands on the computer that holds the checkout — \`fleet init\`, \`fleet register\`, \`fleet logs\`, and \`fleet backup\` operate on local apps.
 
-Do not run other \`fleet\` subcommands (\`setup\`, \`daemon\`, \`gate\`, \`phone\`, \`invite\`, \`profile\`, \`restore\`, \`unregister\`, \`update\`, \`uninstall\`) or edit files under the Fleet home directory (\`~/.fleet/v2\`, or \`$FLEET_V2_HOME\`/\`$FLEET_HOME\`) unless explicitly asked. If a command reports that Fleet is not running, tell the user — do not start the daemon or run setup yourself.
+Do not run other \`fleet\` subcommands (\`alias\`, \`setup\`, \`daemon\`, \`gate\`, \`phone\`, \`invite\`, \`profile\`, \`restore\`, \`unregister\`, \`update\`, \`uninstall\`) or edit files under the Fleet home directory (\`~/.fleet/v2\`, or \`$FLEET_V2_HOME\`/\`$FLEET_HOME\`) unless explicitly asked. If a command reports that Fleet is not running, tell the user — do not start the daemon or run setup yourself.
+
+When asked to link to an existing web service, run \`fleet alias NAME URL\` on the Fleet gateway. Open \`https://NAME.fleet\` to sign in and go to the configured URL. The browser needs access to that service. Use \`fleet unregister NAME\` to remove the alias.
 
 ## Workflow
 

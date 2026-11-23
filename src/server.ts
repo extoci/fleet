@@ -25,7 +25,7 @@ import {
 import { type PeerAppView, Peers, peerRequest } from "./peers.ts";
 import { turnOffPhoneRoute } from "./platform.ts";
 import { type LocalAppState, Runtime } from "./runtime.ts";
-import { acquire, type FleetConfig, hostname, read, secret, write } from "./state.ts";
+import { acquire, type FleetConfig, hostname, read, readAliases, secret, write } from "./state.ts";
 
 class BodyLimitError extends Error {}
 
@@ -346,6 +346,8 @@ export async function start(home: string, options: StartOptions = {}) {
   const appFor = (name: string): LocalAppState | PeerAppView | undefined =>
     runtime.find(name) || peers.find(name);
   const appList = () => [...runtime.list(), ...peers.list()];
+  const aliasFor = (name: string) => readAliases(home).find((alias) => alias.name === name);
+  const routeExists = (name: string) => Boolean(aliasFor(name) || appFor(name));
 
   let announceTimer: ReturnType<typeof setInterval> | undefined;
   let announcing = false;
@@ -373,10 +375,7 @@ export async function start(home: string, options: StartOptions = {}) {
   }
 
   function known(name: string): boolean {
-    return (
-      name === "gate.fleet" ||
-      Boolean(appFor(name.replace(/\.fleet$/, "")) && name.endsWith(".fleet"))
-    );
+    return name.endsWith(".fleet") && (name === "gate.fleet" || routeExists(name.slice(0, -6)));
   }
 
   function permitClientError(id: string): boolean {
@@ -399,12 +398,24 @@ export async function start(home: string, options: StartOptions = {}) {
       const host = hostname(request.headers.host);
       const rawServername = (request.socket as TLSSocket).servername;
       const servername = typeof rawServername === "string" ? rawServername.toLowerCase() : "";
-      if (!known(host) || host !== servername) {
+      if (!host.endsWith(".fleet") || host !== servername) {
+        send(response, 421, "Unknown Fleet app.", "text/plain");
+        return;
+      }
+      const isGate = host === "gate.fleet";
+      const name = host.slice(0, -6);
+      const alias = isGate ? undefined : aliasFor(name);
+      const app = isGate || alias ? undefined : appFor(name);
+      if (!isGate && !app && !alias) {
         send(response, 421, "Unknown Fleet app.", "text/plain");
         return;
       }
       const url = new URL(request.url || "/", `https://${request.headers.host}`);
-      if (url.pathname === FONT_ROUTE && (request.method === "GET" || request.method === "HEAD")) {
+      if (
+        !alias &&
+        url.pathname === FONT_ROUTE &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
         const font = headingFont();
         if (!font) {
           send(response, 404, "", "text/plain");
@@ -416,17 +427,16 @@ export async function start(home: string, options: StartOptions = {}) {
         });
         return;
       }
-      const isGate = host === "gate.fleet";
       if (isGate && url.pathname === "/__fleet/peers/register" && request.method === "POST") {
         const token = request.headers.authorization?.replace(/^Bearer /, "");
         const message = JSON.parse(await body(request)) as { args: Record<string, unknown> };
         json(response, 200, await peers.announce(token, message.args));
         return;
       }
-      const app = isGate ? null : appFor(host.slice(0, -6));
       const isClientError = Boolean(app && url.pathname === clientErrorRoute);
-      const destination = url.searchParams.get("app") || "";
-      const validDestination = destination === "" || Boolean(appFor(destination));
+      const destination = alias ? "" : url.searchParams.get("app") || "";
+      const validDestination =
+        !destination || (isGate ? routeExists(destination) : appFor(destination));
       if (!validDestination) {
         send(response, 404, "Unknown app.", "text/plain");
         return;
@@ -513,7 +523,7 @@ export async function start(home: string, options: StartOptions = {}) {
         if (!gate.claim(url.searchParams.get("ticket"), host)) {
           redirect(
             response,
-            `${originFor("gate")}/__fleet/login?app=${encodeURIComponent(app?.name || destination)}`,
+            `${originFor("gate")}/__fleet/login?app=${encodeURIComponent(isGate ? destination : name)}`,
           );
           return;
         }
@@ -525,14 +535,22 @@ export async function start(home: string, options: StartOptions = {}) {
         return;
       }
       if (!gate.authorized(request, host)) {
-        if (isClientError || url.pathname.startsWith("/__fleet/api/")) {
+        if (!alias && (isClientError || url.pathname.startsWith("/__fleet/api/"))) {
           json(response, 401, { error: "Sign in through Fleet Gate." });
           return;
         }
         redirect(
           response,
-          `${originFor("gate")}/__fleet/login?app=${encodeURIComponent(app?.name || "")}`,
+          `${originFor("gate")}/__fleet/login?app=${encodeURIComponent(isGate ? "" : name)}`,
         );
+        return;
+      }
+      if (alias) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          send(response, 405, "Use GET or HEAD.", "text/plain", { Allow: "GET, HEAD" });
+          return;
+        }
+        send(response, 302, "", "text/plain", { Location: alias.target });
         return;
       }
       if (app?.peer && !app.online) {
@@ -561,6 +579,9 @@ export async function start(home: string, options: StartOptions = {}) {
           peer: "peer" in a ? a.peer : undefined,
           online: "online" in a ? a.online : undefined,
         }));
+        for (const alias of readAliases(home)) {
+          apps.push({ name: alias.name, url: originFor(alias.name), running: false, alias: true });
+        }
         if (url.pathname === "/phone") {
           send(response, 200, phoneConnectedPage({ apps, routeClosed: phoneRouteClosed }));
           return;
@@ -871,8 +892,8 @@ export async function start(home: string, options: StartOptions = {}) {
       }
       if (method === "browser") {
         const appName = typeof args.app === "string" ? args.app : "";
-        if (appName && !appFor(appName)) {
-          json(response, 404, { error: "Unknown app." });
+        if (appName && !routeExists(appName)) {
+          json(response, 404, { error: "Unknown app or alias." });
           return;
         }
         json(response, 200, {
@@ -975,7 +996,12 @@ export async function start(home: string, options: StartOptions = {}) {
             host,
             port: options.dnsPort ?? config.dnsPort ?? 53,
             addresses: config.addresses,
-            names: () => new Set(["gate.fleet", ...appList().map((a) => `${a.name}.fleet`)]),
+            names: () =>
+              new Set([
+                "gate.fleet",
+                ...appList().map((app) => `${app.name}.fleet`),
+                ...readAliases(home).map((alias) => `${alias.name}.fleet`),
+              ]),
           }),
         );
       }
@@ -1138,7 +1164,7 @@ export async function start(home: string, options: StartOptions = {}) {
     } else {
       await runtime.tick();
     }
-    return { ...running, runtime, gate, close: cleanup };
+    return { ...running, dnsPort: dnsServers[0]?.port, runtime, gate, close: cleanup };
   } catch (error) {
     await cleanup();
     throw error;
