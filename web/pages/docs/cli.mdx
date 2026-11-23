@@ -5,7 +5,7 @@ description: "Complete reference for Fleet CLI commands: setup, creating apps, i
 icon: "lucide:square-terminal"
 ---
 
-Run `fleet --help` to see the summary in your terminal, or pass `--json` to commands like `list`, `inspect`, `logs`, `gate`, `phone`, and `doctor` for structured agent output.
+Run `fleet --help` to see the summary in your terminal, or pass `--json` to commands like `agent`, `list`, `inspect`, `logs`, `gate`, `phone`, and `doctor` for structured agent output.
 
 ## Setup and daemon
 
@@ -48,6 +48,16 @@ fleet unregister notes
 - `fleet init --name NAME` initializes an app in the current directory without overwriting existing source files.
 - `fleet register DIR` registers an existing Fleet app checkout.
 - `fleet unregister NAME` removes the app's route while preserving its source files and database. The name remains bound to its original app ID so a browser origin isn't silently reused by a different app.
+
+## Agent instructions
+
+```sh
+fleet agent
+fleet agent --install
+```
+
+- `fleet agent` prints the app-building contract for coding agents — the app model, `fleet init` workflow, and the same contract `fleet init` writes into each app's `AGENTS.md`.
+- `fleet agent --install` installs that contract as a `SKILL.md` into `~/.agents/skills/fleet/SKILL.md` and any detected local agent skill directories (`~/.claude`, `~/.codex`, `~/.config/devin`), or to a custom path with `--output FILE`.
 
 ## Opening and inspecting apps
 

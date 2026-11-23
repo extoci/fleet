@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for agents working on `extoci/fleet` (Fleet v2). App-level instructions written by `fleet init` live separately in `src/cli.ts` and `templates/`.
+Instructions for agents working on `extoci/fleet` (Fleet v2). App-level instructions written by `fleet init` live separately in `src/agent-guide.ts` and `templates/`.
 
 ## Product Scope & Non-Goals
 
@@ -12,7 +12,7 @@ Instructions for agents working on `extoci/fleet` (Fleet v2). App-level instruct
 
 ## Isolated Development & Live Daemon Safety
 
-- **Never touch the user's running Fleet daemon**—do not start, stop, restart, or upgrade it, mutate live app data, or change host trust, DNS, or Tailscale settings without explicit authorization.
+- **When developing Fleet itself, never touch the user's running Fleet daemon**—do not start, stop, restart, or upgrade it, mutate live app data, or change host trust, DNS, or Tailscale settings without explicit authorization. App work is normal usage and needs no extra authorization—`fleet agent`, `fleet init`, `fleet list`, `fleet logs`, `fleet inspect`, `fleet register`, `fleet backup`, `fleet doctor`, and `fleet call` on apps you were asked to build or test (mutations and jobs write real app data). Run them against the user's real Fleet home for actual app work; point `FLEET_V2_HOME` at a temp dir only for Fleet development and tests per the next rule. Every other subcommand (`fleet setup`, `fleet daemon`, `fleet update`, `fleet uninstall`, `fleet gate`, `fleet phone`, and the rest) and direct edits under `FLEET_V2_HOME` still need explicit authorization.
 - Run tests and previews against a temporary `FLEET_V2_HOME`, loopback, and ephemeral ports (and temporary `HOME` / cert DB for installer and browser tests).
 - State lookup order is `FLEET_V2_HOME` → `FLEET_HOME` → `~/.fleet/v2`. Set `FLEET_V2_HOME` explicitly before running any command that may write state.
 - When authorized to debug a live upgrade, inspect the running process's actual entrypoint and invoke a real API op—a stale daemon after an entrypoint move can still serve static app HTML while 500ing every operation.
@@ -61,7 +61,7 @@ bun run test:vercel
 - **Worker lifecycle:** Track `worker.terminate()` by `app.id`. Clear `app.worker` immediately on unload so pending calls reject right away, but await the old worker's exit before opening the replacement's SQLite connections and verify the worker is still current before `postMessage`.
 - **Jobs:** Preserve `ctx.runId` when retrying an interrupted job so apps can use it as an idempotency key.
 - **Backups & restore:** Export via SQLite's backup API and switch the snapshot to `journal_mode=DELETE` before publishing a single-file backup (WAL files break macOS restores with `SQLITE_CANTOPEN`). Stage inputs before restore, leave the caller's backup untouched, and reject restores while the daemon can still write.
-- **Template & docs sync:** When runtime or client APIs change (including `useQuery`/`useMutation`/`call` options such as `pollMs`, `invalidate`, `keepalive`), update `templates/fleet.d.ts`, scaffold files, the app instructions in `src/cli.ts`, and `web/` docs in the same change.
+- **Template & docs sync:** When runtime or client APIs change (including `useQuery`/`useMutation`/`call` options such as `pollMs`, `invalidate`, `keepalive`), update `templates/fleet.d.ts`, scaffold files, the app instructions in `src/agent-guide.ts`, and `web/` docs in the same change. When subcommands or their behavior change, keep the command lists in `src/agent-guide.ts` in step with the code and the daemon-safety rule above.
 - **Permissions:** Create scaffolded project files with standard permissions, private state/secrets with `0600` (files) and `0700` (dirs) on POSIX, and keep `.env.fleet.server` server-only.
 - **CLI ergonomics:** Keep stdout scannable and within terminal width; keep `--json` and single-line `--version` machine-readable; strip ANSI when piped or under `NO_COLOR`/`TERM=dumb`; route verbose diagnostics to `fleet logs`; enforce deadlines on subprocesses and network calls so commands never hang.
 

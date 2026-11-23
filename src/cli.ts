@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
+import { agentContract, agentGuide, installAgentSkill } from "./agent-guide.ts";
 import {
   type AppListItem,
   type DoctorCheck,
@@ -110,10 +111,20 @@ function createApp(directory: string, name: string): AppManifest {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
   };
+  const addAgentGuide = (appName: string) => {
+    const file = path.join(directory, "AGENTS.md");
+    const contract = agentContract(appName);
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, contract);
+    } else if (!fs.readFileSync(file, "utf8").includes("## Fleet app")) {
+      fs.appendFileSync(file, `\n${contract}`);
+    }
+  };
   const configFile = path.join(directory, "fleet.json");
   if (fs.existsSync(configFile)) {
     const app = register(home, directory);
     addTypes();
+    addAgentGuide(app.name);
     return app;
   }
   const files = [
@@ -145,32 +156,7 @@ function createApp(directory: string, name: string): AppManifest {
     { flag: "wx" },
   );
   addTypes();
-  const instructions = `
-## Fleet app
-
-Edit client/index.tsx and server/index.ts. Fleet builds and updates the app automatically. Do not start Vite or a separate app server.
-
-Use fleet list --json, fleet inspect ${name}, fleet logs ${name}, and fleet call ${name} queries notes to inspect the running app. Use fleet call APP mutations NAME '{"key":"value"}' for writes.
-
-The server exports queries, mutations, and jobs. See fleet.d.ts for FleetCtx and FleetDb. Store persistent JSON in ctx.db. The data is outside the checkout and survives rebuilds. Queries cannot write.
-
-ctx.db.get returns null for a missing key. ctx.db.delete returns true if it deleted a key. ctx.db.list(prefix) returns up to 1,000 items.
-
-Fleet runs each mutation or job in an implicit SQLite transaction. If the handler throws, Fleet rolls back all ctx.db writes from that call. Return a structured { ok: false, error } result to keep writes that record a failure.
-
-To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs array in fleet.json. Jobs run without a browser. Fleet can retry an interrupted job with the same ctx.runId. Use that ID as the idempotency key for external API requests. App code runs with this computer user's permissions.
-
-Import useQuery, useMutation, and call from fleet/client. Fleet provides Preact. Do not install Preact in the app. useQuery returns { data, error }. The error starts as null. Use call(kind, name, input) to write without refetching all queries.
-
-useQuery(name, input, { pollMs }) polls every 10 seconds by default. Set pollMs to false or 0 to stop interval polling. useMutation(name, { invalidate }) refreshes all active queries by default. Set invalidate to an array of query names or to false to skip the refresh. Pass { keepalive: true } as the fourth argument to call for a small write during page unload.
-
-Put static files in public/. Set title, themeColor, icon, or manifest in fleet.json to change the HTML head. Use paths from the site root, such as /icon.svg, for icon and manifest.
-
-Fleet Gate handles sign-in. Do not add a separate login system.
-
-Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
-`;
-  fs.appendFileSync(path.join(directory, "AGENTS.md"), instructions);
+  addAgentGuide(name);
   if (!fs.existsSync(path.join(directory, ".env.fleet.server"))) {
     write(
       path.join(directory, ".env.fleet.server"),
@@ -355,6 +341,24 @@ async function main(): Promise<void> {
         needsDns: !values.local && config.mode !== "node" && !dns.configured,
       }),
     );
+    return;
+  }
+  if (command === "agent") {
+    if (values.install) {
+      const installed = installAgentSkill(undefined, values.output);
+      out(
+        values.json
+          ? { installed }
+          : formatNotice(
+              "ok",
+              `Installed Fleet agent skill (${installed.length} ${installed.length === 1 ? "location" : "locations"}).`,
+              installed.map((file) => shortenHome(file)).join("\n   "),
+            ),
+      );
+      return;
+    }
+    const guide = agentGuide();
+    out(values.json ? { guide } : guide);
     return;
   }
   if (command === "init") {

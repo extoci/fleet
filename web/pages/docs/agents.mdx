@@ -9,7 +9,13 @@ Fleet works with any coding agent that can edit local files and run terminal com
 
 ## Give your agent the contract
 
-Open the app folder and point your agent at the generated `AGENTS.md`. A good first prompt looks like:
+Before creating an app, point your agent at `fleet agent` — it prints Fleet's app model (every app is a directory registered in place via `fleet init`), authorized commands, and workflow. You can also install it as a global `SKILL.md` for coding agents with:
+
+```sh
+fleet agent --install
+```
+
+Inside an existing app folder, point your agent at the generated `AGENTS.md`. A good first prompt looks like:
 
 > Read AGENTS.md. Add a search bar to this notes app. Keep the existing data format, use Fleet queries and mutations, and check `fleet logs notes` after editing. Do not start a separate dev server.
 
@@ -45,12 +51,12 @@ Mutations and jobs run as you and write to real app data. Back up the database f
 
 ## Verify changes cleanly
 
-After an edit, have your agent verify four things:
+After an edit, your agent should verify two things before reporting `https://<app>.fleet`:
 
-1. Run `fleet inspect notes` and `fleet logs notes` to confirm the build succeeded (remember: a failed build falls back to the previous working bundle, which can look like an edit didn't apply).
+1. Give the rebuild a few seconds, then run `fleet inspect notes` (and `fleet logs notes` if needed) to confirm a new build revision succeeded with no error (remember: a failed build falls back to the previous working bundle, which can look like an edit didn't apply).
 2. Exercise changed queries or mutations with `fleet call`.
-3. Open the app in a browser and check `fleet logs notes` for any client errors.
-4. Confirm existing data still loads cleanly.
+
+For changes that touch stored data or visual behavior you want double-checked, ask explicitly for a browser pass or data check.
 
 ## Back up before risky edits
 

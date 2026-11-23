@@ -25,9 +25,61 @@ afterEach(async () => {
   for (const fn of cleanups.splice(0).reverse()) await fn();
 });
 
-test("help includes jobs as a fleet call operation kind", async () => {
+test("help includes jobs as a fleet call operation kind and fleet agent pointer", async () => {
   const { stdout } = await exec(process.execPath, [cli, "--help"]);
   assert.match(stdout, /fleet call APP queries\|mutations\|jobs OP \[JSON\]/);
+  assert.match(stdout, /fleet agent \[--install\]/);
+  assert.match(stdout, /Agents: fleet agent/);
+});
+
+test("fleet agent prints the shared contract and installs SKILL.md", async () => {
+  const { stdout } = await exec(process.execPath, [cli, "agent"]);
+  assert.match(stdout, /A Fleet app is a directory anywhere on this computer/);
+  assert.match(stdout, /scaffold a directory with `fleet init`/);
+  assert.match(stdout, /## Fleet app/);
+  assert.match(stdout, /You are done when fleet inspect NAME reports a new revision/);
+
+  const { stdout: jsonOut } = await exec(process.execPath, [cli, "agent", "--json"]);
+  const parsed = JSON.parse(jsonOut) as { guide: string };
+  assert.equal(parsed.guide, stdout.trimEnd() + "\n");
+
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-skill-"));
+  cleanups.push(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(fakeHome, ".config", "devin"), { recursive: true });
+  const env = { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome };
+
+  const { stdout: installJson } = await exec(
+    process.execPath,
+    [cli, "agent", "--install", "--json"],
+    {
+      env,
+    },
+  );
+  const { installed } = JSON.parse(installJson) as { installed: string[] };
+  const expected = [
+    path.resolve(fakeHome, ".agents", "skills", "fleet", "SKILL.md"),
+    path.resolve(fakeHome, ".claude", "skills", "fleet", "SKILL.md"),
+    path.resolve(fakeHome, ".config", "devin", "skills", "fleet", "SKILL.md"),
+  ];
+  assert.deepEqual(installed, expected);
+  assert.equal(fs.existsSync(path.join(fakeHome, ".codex")), false);
+
+  for (const file of expected) {
+    const content = fs.readFileSync(file, "utf8");
+    assert.match(content, /^---\nname: fleet\n/);
+    assert.match(content, /A Fleet app is a directory anywhere on this computer/);
+    assert.match(content, /## Fleet app/);
+  }
+
+  const customTarget = path.join(fakeHome, "custom", "SKILL.md");
+  const { stdout: customOut } = await exec(
+    process.execPath,
+    [cli, "agent", "--install", "--output", customTarget, "--json"],
+    { env },
+  );
+  assert.deepEqual(JSON.parse(customOut), { installed: [path.resolve(customTarget)] });
+  assert.match(fs.readFileSync(customTarget, "utf8"), /^---\nname: fleet\n/);
 });
 
 test("version reports Fleet 2.x", async () => {
@@ -71,10 +123,12 @@ test("init writes public source and agent guidance while keeping Fleet state and
   assert.match(agents, /list\(prefix\) returns up to 1,000 items/);
   assert.match(agents, /rolls back all ctx.db writes/);
   assert.match(agents, /call\(kind, name, input\)/);
+  assert.match(agents, /You are done when fleet inspect notes reports a new revision/);
 
   fs.unlinkSync(types);
   await init(app);
   assert.match(fs.readFileSync(types, "utf8"), /interface FleetCtx/);
+  assert.equal(fs.readFileSync(path.join(app, "AGENTS.md"), "utf8"), agents);
   const existing = path.join(temporary, "existing");
   fs.mkdirSync(existing);
   const existingTypes = path.join(existing, "fleet.d.ts");

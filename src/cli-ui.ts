@@ -246,6 +246,7 @@ const HELP_GROUPS: HelpGroup[] = [
     title: "Apps",
     items: [
       ["fleet init [directory]", "Create and register an app"],
+      ["fleet agent [--install]", "Print or install coding agent instructions"],
       ["fleet list [--json]", "List apps and runtime state"],
       ["fleet open [NAME]", "Open an app, signed in through Gate"],
       ["fleet inspect NAME", "Inspect an app's operations and jobs"],
@@ -312,7 +313,7 @@ export function formatHelp(version: string, opts: UiOptions = {}): string {
   }
 
   lines.push(
-    `  ${s.dim("Requires Bun 1.4+ and Tailscale  ·  Pass")} ${s.violet("--json")} ${s.dim("for agent output.")}`,
+    `  ${s.dim("Requires Bun 1.4+ and Tailscale  ·  Agents:")} ${s.violet("fleet agent")}  ${s.dim("·  Pass")} ${s.violet("--json")} ${s.dim("for machine output.")}`,
   );
   return lines.join("\n");
 }

@@ -95,6 +95,7 @@ Each checkout created by `fleet init` contains:
 Useful commands for you and your agent:
 
 ```sh
+fleet agent
 fleet list --json
 fleet inspect notes
 fleet logs notes
