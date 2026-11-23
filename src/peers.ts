@@ -11,6 +11,7 @@ import {
   type HeadMetadata,
   headMetadata,
   read,
+  readShared,
   secret,
   validateName,
   withStateLock,
@@ -140,7 +141,7 @@ export class Peers {
   }
 
   all(): PeerRecord[] {
-    return read<PeerRecord[]>(path.join(this.home, "peers.json"), []);
+    return readShared<PeerRecord[]>(path.join(this.home, "peers.json"), []);
   }
 
   list(): PeerAppView[] {
