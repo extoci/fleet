@@ -60,9 +60,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    # Pull requests only run ubuntu; macOS/Windows run on main and manual runs
-    if: github.event_name != 'pull_request' || matrix.os == 'ubuntu-latest'
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/web/*
+            /web/public/
+            !/docs/
+            !/.github/
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - run: bun test --parallel --parallel-delay=0 ./test
+
+  # Pull requests only run the ubuntu leg above; macOS/Windows run on
+  # pushes to main and manual runs so PRs aren't held up by the Windows
+  # leg or the macOS runner queue. matrix isn't available in a
+  # job-level `if`, so the extra OSes live in a second job.
+  fleet-extra:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
