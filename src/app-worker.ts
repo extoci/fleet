@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { loadApp, type OperationKind, operationKinds, operationNames } from "./app-definition.ts";
 
@@ -27,6 +27,16 @@ const readDb = new DatabaseSync(init.database, { readOnly: true });
 readDb.exec("PRAGMA busy_timeout=5000");
 
 const app = await loadApp(init.module);
+
+// Preparing a statement per db call costs more than the query itself.
+const statements = new WeakMap<DatabaseSync, Map<string, StatementSync>>();
+function statement(db: DatabaseSync, sql: string): StatementSync {
+  let cache = statements.get(db);
+  if (!cache) statements.set(db, (cache = new Map()));
+  let prepared = cache.get(sql);
+  if (!prepared) cache.set(sql, (prepared = db.prepare(sql)));
+  return prepared;
+}
 
 const key = (value: unknown): string => {
   if (typeof value !== "string" || value.length > 512) {
@@ -59,7 +69,7 @@ async function run(message: WorkerMessage): Promise<void> {
       runId,
       db: {
         get: (nameKey: string) => {
-          const row = db.prepare("SELECT value FROM kv WHERE key=?").get(key(nameKey)) as
+          const row = statement(db, "SELECT value FROM kv WHERE key=?").get(key(nameKey)) as
             { value: string } | undefined;
           return row ? JSON.parse(row.value) : null;
         },
@@ -69,20 +79,22 @@ async function run(message: WorkerMessage): Promise<void> {
           if (encoded === undefined || encoded.length > 2_000_000) {
             throw new Error("Store JSON values of at most 2 MB.");
           }
-          db.prepare(
+          statement(
+            db,
             "INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
           ).run(key(nameKey), encoded);
           return value;
         },
         delete: (nameKey: string) => {
           permit();
-          const result = db.prepare("DELETE FROM kv WHERE key=?").run(key(nameKey));
+          const result = statement(db, "DELETE FROM kv WHERE key=?").run(key(nameKey));
           return Number(result.changes) > 0;
         },
         list: (prefix = "") => {
-          const rows = db
-            .prepare("SELECT key,value FROM kv WHERE substr(key,1,?)=? ORDER BY key LIMIT 1000")
-            .all(key(prefix).length, prefix) as Array<{ key: string; value: string }>;
+          const rows = statement(
+            db,
+            "SELECT key,value FROM kv WHERE substr(key,1,?)=? ORDER BY key LIMIT 1000",
+          ).all(key(prefix).length, prefix) as Array<{ key: string; value: string }>;
           return rows.map((row) => ({ key: row.key, value: JSON.parse(row.value) }));
         },
       },
