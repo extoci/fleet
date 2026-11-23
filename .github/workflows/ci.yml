@@ -6,22 +6,30 @@ on:
   workflow_dispatch:
 
 jobs:
-  fleet:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run format:check
-      - run: bun run lint -- --max-warnings 0
+      - run: bun run check && bun run lint -- --max-warnings 0
+
+  fleet:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - run: bun install --frozen-lockfile
       - run: bun test ./test
 
   web:
