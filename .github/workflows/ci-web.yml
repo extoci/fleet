@@ -9,6 +9,9 @@ on:
       - "install.sh"
       - "install.ps1"
       - ".github/workflows/ci-web.yml"
+      - "!**/*.md"
+      - "!LICENSE"
+      - "!AGENTS.md"
   pull_request:
     paths:
       - "web/**"
@@ -16,11 +19,14 @@ on:
       - "install.sh"
       - "install.ps1"
       - ".github/workflows/ci-web.yml"
+      - "!**/*.md"
+      - "!LICENSE"
+      - "!AGENTS.md"
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   web-checks:

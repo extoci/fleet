@@ -7,6 +7,10 @@ on:
       - "**"
       - "!web/**"
       - "web/public/**"
+      - "!**/*.md"
+      - "!docs/**"
+      - "!LICENSE"
+      - "!AGENTS.md"
       - "!.github/workflows/ci-web.yml"
       - "!.github/workflows/release.yml"
   pull_request:
@@ -14,13 +18,17 @@ on:
       - "**"
       - "!web/**"
       - "web/public/**"
+      - "!**/*.md"
+      - "!docs/**"
+      - "!LICENSE"
+      - "!AGENTS.md"
       - "!.github/workflows/ci-web.yml"
       - "!.github/workflows/release.yml"
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   checks:
