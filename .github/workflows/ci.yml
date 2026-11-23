@@ -53,9 +53,32 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun test ./test
 
-  web:
+  web-checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+        id: bun-cache
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.bun-cache.outputs.dir }}
+          key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-web-
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run typecheck && bun run format:check && bun run lint -- --max-warnings 0
+      - run: bun test
+
+  web-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: web
@@ -76,12 +99,28 @@ jobs:
           key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-web-
       - run: bun install --frozen-lockfile
-      - run: bun run check
-      - run: bun run typecheck
-      - run: bun run format:check
-      - run: bun run lint -- --max-warnings 0
-      - run: bun test
-      - run: bun run build
-      - run: bun run test:production
-      - run: bun run build:vercel
-      - run: bun run test:vercel
+      - run: bun run build && bun run test:production
+
+  web-vercel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+        id: bun-cache
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.bun-cache.outputs.dir }}
+          key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-web-
+      - run: bun install --frozen-lockfile
+      - run: bun run build:vercel && bun run test:vercel
