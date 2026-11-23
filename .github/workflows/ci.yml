@@ -37,8 +37,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
+          # Separate key: lint pulls bun@canary into the cache, keep it out of the shared one
+          key: ${{ runner.os }}-bun-checks-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
       - run: bun run check && bun run lint -- --max-warnings 0
 
@@ -61,6 +61,5 @@ jobs:
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - run: bun test --parallel ./test

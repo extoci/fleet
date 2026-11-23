@@ -40,8 +40,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
-          key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-web-
+          # Separate key: lint pulls bun@canary into the cache, keep it out of the shared one
+          key: ${{ runner.os }}-bun-web-checks-${{ hashFiles('web/bun.lock') }}
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run typecheck && bun run format:check && bun run lint -- --max-warnings 0
@@ -68,7 +68,6 @@ jobs:
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
           key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-web-
       - run: bun install --frozen-lockfile
       - run: bun run build && bun run test:production
 
@@ -93,6 +92,5 @@ jobs:
         with:
           path: ${{ steps.bun-cache.outputs.dir }}
           key: ${{ runner.os }}-bun-web-${{ hashFiles('web/bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-web-
       - run: bun install --frozen-lockfile
       - run: bun run build:vercel && bun run test:vercel
