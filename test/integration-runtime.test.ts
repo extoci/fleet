@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "bun:test";
 import { authority, mobileProfile } from "../src/certificates.ts";
 import { exportData, restoreData } from "../src/data.ts";
-import { Peers } from "../src/peers.ts";
+import { type PeerRecord, Peers, peerRequest } from "../src/peers.ts";
 import { start } from "../src/server.ts";
 import { type FleetConfig, read, secret, write } from "../src/state.ts";
 import {
@@ -256,10 +256,32 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   });
   const node = await start(nodeHome, { nodePort: 0, adminPort: 0 });
   nodeRef.current = node;
-  assert.equal(read<unknown[]>(path.join(home, "peers.json"), []).length, 1);
+  const registeredPeers = read<PeerRecord[]>(path.join(home, "peers.json"), []);
+  assert.equal(registeredPeers.length, 1);
   assert.equal(
     Object.keys(read<Record<string, unknown>>(path.join(home, "node-invites.json"), {})).length,
     0,
+  );
+  const aliasTarget = "http://service.example.test/";
+  await assert.rejects(
+    runCli(home, "alias", "remote-notes", aliasTarget),
+    /belongs to a Fleet app/,
+  );
+  await runCli(home, "alias", "media", aliasTarget);
+  const [registered] = registeredPeers;
+  await assert.rejects(
+    peerRequest(
+      {
+        address: "127.0.0.1",
+        port: gateway.httpsPort,
+        ca,
+        token: registered.token,
+        route: "/__fleet/peers/register",
+      },
+      "register",
+      { ...registered, apps: [...registered.apps, { id: randomUUID(), name: "media" }] },
+    ),
+    /The name media is already in use in Fleet/,
   );
   const auth = await signin(gateway, ca, "remote-notes");
   const response = await request(

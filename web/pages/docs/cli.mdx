@@ -49,6 +49,18 @@ fleet unregister notes
 - `fleet register DIR` registers an existing Fleet app checkout.
 - `fleet unregister NAME` removes the app's route while preserving its source files and database. The name remains bound to its original app ID so a browser origin isn't silently reused by a different app.
 
+## Redirecting to an existing service
+
+Run this on the Fleet gateway:
+
+```sh
+fleet alias media "https://service.example.test:7337/dashboard"
+```
+
+Open `https://media.fleet` or select `media` in Fleet Gate. After Gate sign-in, Fleet redirects your browser to the configured URL. The browser connects to the service directly, so it needs access to the destination. Only the gateway needs to run Fleet.
+
+Use a full HTTP or HTTPS URL and a name that does not belong to a Fleet app. Run `fleet alias NAME URL` again to change the destination. Run `fleet unregister NAME` to remove the alias. Both take effect without restarting Fleet.
+
 ## Agent instructions
 
 ```sh
@@ -68,7 +80,7 @@ fleet inspect NAME
 fleet logs NAME
 ```
 
-- `fleet open [NAME]` (run on the gateway) signs your local browser in through Fleet Gate and opens the app — or opens your app index at `https://gate.fleet` if no name is given.
+- `fleet open [NAME]` signs your local browser in through Fleet Gate and opens the app or alias. Run it on the gateway. With no name, it opens `https://gate.fleet`.
 - `fleet list --json` returns all registered apps and their build/worker status.
 - `fleet inspect NAME` shows build revision, exported queries/mutations/jobs, and scheduled job state.
 - `fleet logs NAME` prints the last 100 lines of build output, server `ctx.log` messages, and browser client errors.

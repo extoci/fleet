@@ -30,10 +30,11 @@ import {
   type RunningInfo,
   read,
   register,
+  registerAlias,
   root,
   secret,
+  unregister,
   validateName,
-  withStateLock,
   write,
 } from "./state.ts";
 
@@ -247,7 +248,7 @@ async function main(): Promise<void> {
     return;
   }
   if (
-    ["gate", "phone", "open", "invite"].includes(command) &&
+    ["gate", "phone", "open", "invite", "alias"].includes(command) &&
     configuration(home)?.mode === "node"
   ) {
     throw new Error("Run this command on your Fleet gateway. This computer hosts app checkouts.");
@@ -385,6 +386,17 @@ async function main(): Promise<void> {
       values.json
         ? { ...app, url: `https://${app.name}.fleet` }
         : formatNotice("ok", `Registered ${app.name}.`, `https://${app.name}.fleet`),
+    );
+    return;
+  }
+  if (command === "alias") {
+    if (args.length !== 2) throw new Error("Usage: fleet alias NAME URL");
+    const alias = registerAlias(home, args[0], args[1]);
+    const url = `https://${alias.name}.fleet`;
+    out(
+      values.json
+        ? { ...alias, url }
+        : formatNotice("ok", `Saved alias ${url}`, `Redirects to ${alias.target}`),
     );
     return;
   }
@@ -553,15 +565,10 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "unregister") {
-    withStateLock(home, () => {
-      const file = path.join(home, "apps.json");
-      const apps = read<RegisteredApp[]>(file, []);
-      if (!apps.some((a) => a.name === args[0])) throw new Error("Unknown app.");
-      write(
-        file,
-        apps.filter((a) => a.name !== args[0]),
-      );
-    });
+    if (unregister(home, args[0]) === "alias") {
+      out(values.json ? "Alias removed." : formatNotice("ok", `Removed alias ${args[0]}.`));
+      return;
+    }
     out(
       values.json
         ? "App route removed. Source and data are retained."
