@@ -79,9 +79,12 @@ const readCache = new Map<string, { stamp: string; value: unknown }>();
 // Skip the file read and parse while the inode, mtime, and size are unchanged.
 // The return value is shared. Copy it before making changes.
 export function readShared<T>(file: string, fallback: T): T {
-  const stat = fs.statSync(file, { throwIfNoEntry: false });
-  if (!stat?.isFile()) return fallback;
-  const stamp = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+  const stat = fs.statSync(file, { bigint: true, throwIfNoEntry: false });
+  if (!stat?.isFile()) {
+    readCache.delete(file);
+    return fallback;
+  }
+  const stamp = `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
   const cached = readCache.get(file);
   if (cached?.stamp === stamp) return cached.value as T;
   const value = JSON.parse(fs.readFileSync(file, "utf8")) as T;
@@ -160,8 +163,9 @@ export function register(home: string, directory: string): AppManifest {
   return withStateLock(home, () => registerUnlocked(home, directory));
 }
 
-export function readAliases(home: string): FleetAlias[] {
-  return readShared<FleetAlias[]>(path.join(home, "aliases.json"), []);
+export function readAliases(home: string, { shared = false } = {}): FleetAlias[] {
+  const file = path.join(home, "aliases.json");
+  return shared ? readShared<FleetAlias[]>(file, []) : read<FleetAlias[]>(file, []);
 }
 
 export function registerAlias(home: string, name: string, destination: string): FleetAlias {
@@ -185,10 +189,11 @@ export function registerAlias(home: string, name: string, destination: string): 
       throw new Error(`${name} belongs to a Fleet app. Choose another alias name.`);
     }
     const alias = { name, target: target.href };
-    write(path.join(home, "aliases.json"), [
-      ...readAliases(home).filter((a) => a.name !== name),
-      alias,
-    ]);
+    const aliases = readAliases(home);
+    const index = aliases.findIndex((entry) => entry.name === name);
+    if (index === -1) aliases.push(alias);
+    else aliases[index] = alias;
+    write(path.join(home, "aliases.json"), aliases);
     return alias;
   });
 }

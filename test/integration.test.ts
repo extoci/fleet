@@ -37,7 +37,17 @@ test("gateway aliases resolve over DNS and redirect through Gate without a daemo
     `https://gate.fleet:${daemon.httpsPort}/__fleet/login?app=media`,
   );
   assert.equal(signedOut.text, "");
-  const auth = await signin(daemon, ca, "media");
+
+  const { url } = await runCli<{ url: string }>(home, "open", "media");
+  const open = new URL(url);
+  assert.equal(open.origin, `https://gate.fleet:${daemon.httpsPort}`);
+  const claim = await request(daemon, ca, open.hostname, open.pathname + open.search);
+  assert.equal(claim.status, 303);
+  assert.equal(claim.headers.location, "/__fleet/login?app=media");
+  assert.equal(claim.text, "");
+  const gateCookie = claim.headers["set-cookie"]?.[0].split(";")[0];
+  assert.ok(gateCookie);
+  const auth = await signin(daemon, ca, "media", gateCookie);
   const index = await request(daemon, ca, "gate.fleet", "/", { cookie: auth.gateCookie });
   assert.equal(index.status, 200);
   assert.ok(index.text.includes(`href="https://${host}:${daemon.httpsPort}"`));
@@ -48,6 +58,10 @@ test("gateway aliases resolve over DNS and redirect through Gate without a daemo
   assert.equal(redirect.headers.location, target);
   assert.equal(redirect.headers["cache-control"], "no-store");
   assert.equal(redirect.text, "");
+  const post = await request(daemon, ca, host, "/", { ...auth, method: "POST" });
+  assert.equal(post.status, 405);
+  assert.equal(post.headers.allow, "GET, HEAD");
+  assert.equal(post.text, "Use GET or HEAD.");
 
   await assert.rejects(runCli(home, "alias", "notes", target), /belongs to a Fleet app/);
   const conflict = path.join(home, "conflict");
@@ -57,7 +71,7 @@ test("gateway aliases resolve over DNS and redirect through Gate without a daemo
     runCli(home, "alias", "media", "file:///tmp/service"),
     /Use a full HTTP or HTTPS URL/,
   );
-  const updatedTarget = "http://service.example.test:8080/";
+  const updatedTarget = target.replace(":7337/", ":7338/");
   await runCli(home, "alias", "media", updatedTarget);
   const updated = await request(daemon, ca, host, "/", { ...auth, method: "HEAD" });
   assert.equal(updated.status, 302);
@@ -66,6 +80,8 @@ test("gateway aliases resolve over DNS and redirect through Gate without a daemo
 
   await runCli(home, "unregister", "media");
   await assert.rejects(resolve4(host), { code: "ENOTFOUND" });
+  await runCli(home, "unregister", "notes");
+  await assert.rejects(runCli(home, "alias", "notes", target), /belongs to a Fleet app/);
 });
 
 test("bundled server code can dynamically require a Node builtin from CommonJS", async () => {

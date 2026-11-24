@@ -346,7 +346,8 @@ export async function start(home: string, options: StartOptions = {}) {
   const appFor = (name: string): LocalAppState | PeerAppView | undefined =>
     runtime.find(name) || peers.find(name);
   const appList = () => [...runtime.list(), ...peers.list()];
-  const aliasFor = (name: string) => readAliases(home).find((alias) => alias.name === name);
+  const aliases = () => readAliases(home, { shared: true });
+  const aliasFor = (name: string) => aliases().find((alias) => alias.name === name);
   const routeExists = (name: string) => Boolean(aliasFor(name) || appFor(name));
 
   let announceTimer: ReturnType<typeof setInterval> | undefined;
@@ -579,7 +580,7 @@ export async function start(home: string, options: StartOptions = {}) {
           peer: "peer" in a ? a.peer : undefined,
           online: "online" in a ? a.online : undefined,
         }));
-        for (const alias of readAliases(home)) {
+        for (const alias of aliases()) {
           apps.push({ name: alias.name, url: originFor(alias.name), running: false, alias: true });
         }
         if (url.pathname === "/phone") {
@@ -1000,7 +1001,7 @@ export async function start(home: string, options: StartOptions = {}) {
               new Set([
                 "gate.fleet",
                 ...appList().map((app) => `${app.name}.fleet`),
-                ...readAliases(home).map((alias) => `${alias.name}.fleet`),
+                ...aliases().map((alias) => `${alias.name}.fleet`),
               ]),
           }),
         );

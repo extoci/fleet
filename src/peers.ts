@@ -262,7 +262,7 @@ export class Peers {
       ]);
       for (const app of apps) {
         if (occupied.has(app.name)) {
-          throw new Error(`The app name ${app.name} is already in use on another computer.`);
+          throw new Error(`The name ${app.name} is already in use in Fleet.`);
         }
         occupied.add(app.name);
       }
@@ -274,7 +274,7 @@ export class Peers {
       };
       await peerRequest(target, "probe");
       withStateLock(this.home, () => {
-        const latest = this.all();
+        const latest = read<PeerRecord[]>(path.join(this.home, "peers.json"), []);
         const namesFile = path.join(this.home, "names.json");
         const names = read<Record<string, string>>(namesFile, {});
         const occupiedNow = new Set([
@@ -288,9 +288,7 @@ export class Peers {
             occupiedNow.has(app.name) ||
             (names[app.name] && names[app.name] !== app.id)
           ) {
-            throw new Error(
-              `The app name ${app.name} already belongs to another app. Choose a new name.`,
-            );
+            throw new Error(`The name ${app.name} is unavailable. Choose another app name.`);
           }
           names[app.name] = app.id;
         }
