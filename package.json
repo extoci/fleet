@@ -1,6 +1,6 @@
 {
   "name": "@extoci/fleet",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "Personal apps on your own computers, open from every device on your tailnet",
   "type": "module",
   "packageManager": "bun@1.4.5",
