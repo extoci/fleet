@@ -31,6 +31,8 @@ test("help includes jobs as a fleet call operation kind and fleet agent pointer"
   assert.match(stdout, /fleet agent \[--install\]/);
   assert.match(stdout, /fleet gate sessions/);
   assert.match(stdout, /fleet gate revoke ID/);
+  assert.match(stdout, /fleet peers/);
+  assert.match(stdout, /fleet peers remove ID/);
   assert.match(stdout, /Agents: fleet agent/);
 });
 

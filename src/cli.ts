@@ -20,7 +20,9 @@ import {
   formatInit,
   formatInspect,
   formatNotice,
+  formatPeerList,
   formatPhoneSetup,
+  type PeerComputerItem,
   formatSetup,
   shortenHome,
 } from "./cli-ui.ts";
@@ -250,7 +252,7 @@ async function main(): Promise<void> {
     return;
   }
   if (
-    ["gate", "phone", "open", "invite", "alias"].includes(command) &&
+    ["gate", "phone", "open", "invite", "alias", "peers"].includes(command) &&
     configuration(home)?.mode === "node"
   ) {
     throw new Error("Run this command on your Fleet gateway. This computer hosts app checkouts.");
@@ -439,6 +441,26 @@ async function main(): Promise<void> {
   if (command === "list") {
     const apps = await rpc<AppListItem[]>("list");
     out(values.json ? apps : formatAppList(apps));
+    return;
+  }
+  if (command === "peers") {
+    if (args[0] === "remove") {
+      if (!args[1]) throw new Error("Usage: fleet peers remove ID");
+      const result = await rpc<{ removed: boolean; id: string }>("peerRemove", { id: args[1] });
+      out(
+        values.json
+          ? result
+          : formatNotice(
+              "ok",
+              `Removed Fleet computer ${result.id}.`,
+              "Its app routes are now unavailable.",
+            ),
+      );
+      return;
+    }
+    if (args.length) throw new Error("Usage: fleet peers [--json] or fleet peers remove ID");
+    const computers = await rpc<PeerComputerItem[]>("peers");
+    out(values.json ? computers : formatPeerList(computers));
     return;
   }
   if (command === "open") {

@@ -27,6 +27,21 @@ export interface AppListItem {
   jobsState?: Record<string, unknown>;
 }
 
+export interface PeerComputerItem {
+  id: string;
+  address: string;
+  port: number;
+  online: boolean;
+  seen: number;
+  apps: Array<{
+    id: string;
+    name: string;
+    revision: string | null;
+    running: boolean;
+    error: string | null;
+  }>;
+}
+
 export interface GateSessionItem {
   id: string;
   host: string;
@@ -282,6 +297,8 @@ const HELP_GROUPS: HelpGroup[] = [
       ["fleet phone", "Connect an iPhone with a QR code"],
       ["fleet phone off", "Remove Fleet's temporary setup route"],
       ["fleet invite --output FILE", "Connect another computer with app checkouts"],
+      ["fleet peers", "List enrolled computers and their apps"],
+      ["fleet peers remove ID", "Remove a retired computer"],
       ["fleet profile --output FILE", "Export the public iPhone profile"],
     ],
   },
@@ -555,6 +572,40 @@ export function formatGateCode(code: string, opts: UiOptions = {}): string {
     `  ${s.dim("Sign in at")}    ${s.violet("https://gate.fleet")}`,
     `  ${s.dim("Expires in")}    ${s.muted("10 minutes")}`,
   ].join("\n");
+}
+
+export function formatPeerList(peers: PeerComputerItem[], opts: UiOptions = {}): string {
+  const color = opts.color ?? supportsColor();
+  const s = makeStyle(color);
+  const online = peers.filter((peer) => peer.online).length;
+  const lines = [
+    brandHeader(
+      `${peers.length} ${peers.length === 1 ? "computer" : "computers"} · ${online} online`,
+      { color },
+    ),
+    "",
+  ];
+  if (!peers.length) {
+    lines.push(`  ${s.muted("No other computers enrolled.")}`);
+    lines.push(
+      `  ${s.dim("Connect one with")} ${s.violet("fleet invite --output FILE")}${s.dim(".")}`,
+    );
+    return lines.join("\n");
+  }
+  for (const peer of peers) {
+    const state = peer.online ? s.ok("online") : s.dim("offline");
+    lines.push(`  ${s.text(peer.id)}  ${state}  ${s.dim(`${peer.address}:${peer.port}`)}`);
+    if (!peer.apps.length) {
+      lines.push(`    ${s.dim("no apps")}`);
+      continue;
+    }
+    for (const app of peer.apps) {
+      const appState = app.error ? s.err("error") : app.running ? s.ok("running") : s.dim("idle");
+      const revision = app.revision ? s.dim(app.revision.slice(0, 8)) : s.dim("not built");
+      lines.push(`    ${s.text(app.name)}  ${appState}  ${revision}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 export function formatGateSessions(sessions: GateSessionItem[], opts: UiOptions = {}): string {

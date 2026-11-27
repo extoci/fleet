@@ -157,6 +157,7 @@ interface BuildMeta {
   operations: OperationMap;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasCss: boolean;
 }
 
 interface PendingCall {
@@ -182,6 +183,7 @@ export interface LocalAppState extends RegisteredApp {
   operations?: OperationMap;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasCss: boolean;
   watcher?: fs.FSWatcher | null;
   rebuild?: ReturnType<typeof setTimeout> | null;
   auditFiles?: string[];
@@ -203,6 +205,7 @@ export interface AppSummary {
   jobs: JobSpec[];
   head: HeadMetadata;
   hasPublic: boolean;
+  hasCss: boolean;
 }
 
 interface JobRecord {
@@ -285,6 +288,12 @@ export class Runtime {
           operations: last?.operations,
           head: last?.head || {},
           hasPublic: last?.hasPublic || false,
+          hasCss:
+            last?.hasCss ??
+            Boolean(
+              last &&
+              fs.existsSync(path.join(this.home, "builds", app.id, last.revision, "app.css")),
+            ),
         };
         try {
           state.watcher = fs.watch(app.directory, { recursive: true }, (_event, name) => {
@@ -368,6 +377,7 @@ export class Runtime {
       jobs: a.jobs || [],
       head: a.head,
       hasPublic: a.hasPublic,
+      hasCss: a.hasCss,
     }));
   }
 
@@ -487,6 +497,7 @@ export class Runtime {
           operations,
           head: headMetadata(current),
           hasPublic: publicFiles.length > 0,
+          hasCss: clientBuffers.some((output) => output.name === "app.css"),
         };
         write(path.join(this.home, "builds", app.id, "current.json"), next);
         this.unload(app);
@@ -527,6 +538,9 @@ export class Runtime {
             app.operations = last.operations;
             app.head = last.head || {};
             app.hasPublic = last.hasPublic || false;
+            app.hasCss =
+              last.hasCss ??
+              fs.existsSync(path.join(this.home, "builds", app.id, last.revision, "app.css"));
           }
         }
         return Boolean(app.revision);

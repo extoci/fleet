@@ -717,10 +717,66 @@ export async function start(home: string, options: StartOptions = {}) {
       }
       if (["/app.js", "/app.css"].includes(url.pathname)) {
         if (isPeerApp(app)) {
+          const head = request.method === "HEAD";
+          const currentTag = `"${app.revision}"`;
+          if (request.headers["if-none-match"] === currentTag) {
+            send(
+              response,
+              304,
+              undefined,
+              url.pathname.endsWith(".css") ? "text/css" : "text/javascript",
+              {
+                "Cache-Control":
+                  url.searchParams.get("v") === app.revision
+                    ? "private, max-age=31536000, immutable"
+                    : "private, no-cache",
+                ETag: currentTag,
+                Vary: "Accept-Encoding",
+              },
+            );
+            return;
+          }
+          const accepted = encodings(request.headers["accept-encoding"]);
+          const encoding = accepted.has("br") ? "br" : accepted.has("gzip") ? "gzip" : undefined;
           const asset = (await peers.call(app, "asset", {
             file: url.pathname.slice(1),
-          })) as { status: number; data: string; type: string };
-          send(response, asset.status, Buffer.from(asset.data, "base64"), asset.type);
+            encoding,
+            head,
+            ifNoneMatch: request.headers["if-none-match"],
+          })) as {
+            status: number;
+            data: string;
+            type: string;
+            encoding?: string;
+            revision?: string;
+            etag?: string;
+          };
+          const revision = asset.revision || app.revision || "";
+          const tag = asset.etag || `"${revision}"`;
+          const caching = {
+            "Cache-Control":
+              revision && url.searchParams.get("v") === revision
+                ? "private, max-age=31536000, immutable"
+                : "private, no-cache",
+            ETag: tag,
+            Vary: "Accept-Encoding",
+          };
+          if (asset.status === 304) {
+            send(response, 304, undefined, asset.type, caching);
+            return;
+          }
+          send(
+            response,
+            asset.status,
+            head ? undefined : Buffer.from(asset.data, "base64"),
+            asset.type,
+            asset.status === 200
+              ? {
+                  ...caching,
+                  ...(asset.encoding ? { "Content-Encoding": asset.encoding } : {}),
+                }
+              : {},
+          );
           return;
         }
         const file = app.buildDir ? path.join(app.buildDir, url.pathname.slice(1)) : "";
@@ -794,9 +850,9 @@ export async function start(home: string, options: StartOptions = {}) {
           }
         }
       }
-      const hasCss =
-        isPeerApp(app) ||
-        Boolean(app.buildDir && appAsset(app, path.join(app.buildDir, "app.css")));
+      const hasCss = isPeerApp(app)
+        ? app.hasCss
+        : Boolean(app.buildDir && appAsset(app, path.join(app.buildDir, "app.css")));
       send(
         response,
         200,
@@ -886,6 +942,19 @@ export async function start(home: string, options: StartOptions = {}) {
       }
       if (method === "invite") {
         json(response, 200, peers.invite({ ...config!, httpsPort }, authority(home).pem));
+        return;
+      }
+      if (method === "peers") {
+        json(response, 200, peers.computers());
+        return;
+      }
+      if (method === "peerRemove") {
+        const id = typeof args.id === "string" ? args.id : "";
+        if (!/^[0-9a-f-]{36}$/i.test(id) || !peers.remove(id)) {
+          json(response, 404, { error: "Unknown Fleet computer." });
+          return;
+        }
+        json(response, 200, { removed: true, id });
         return;
       }
       if (method === "pair") {
@@ -1109,12 +1178,26 @@ export async function start(home: string, options: StartOptions = {}) {
                 typeof args.file === "string" &&
                 ["app.js", "app.css"].includes(args.file)
               ) {
+                const type = args.file.endsWith(".css") ? "text/css" : "text/javascript";
+                const revision = app.revision || "";
+                const etag = `"${revision}"`;
+                if (args.ifNoneMatch === etag) {
+                  json(response, 200, { status: 304, type, data: "", revision, etag });
+                  return;
+                }
                 const file = app.buildDir ? path.join(app.buildDir, args.file) : "";
-                const data = file ? appAsset(app, file) : undefined;
+                const requested =
+                  args.encoding === "br" || args.encoding === "gzip" ? args.encoding : "";
+                const suffix = requested === "br" ? "br" : requested === "gzip" ? "gz" : "";
+                const compressed = suffix && file ? appAsset(app, `${file}.${suffix}`) : undefined;
+                const data = compressed || (file ? appAsset(app, file) : undefined);
                 json(response, 200, {
                   status: data ? 200 : 404,
-                  type: args.file.endsWith(".css") ? "text/css" : "text/javascript",
-                  data: data?.toString("base64") ?? "",
+                  type,
+                  data: args.head === true ? "" : (data?.toString("base64") ?? ""),
+                  ...(compressed ? { encoding: requested } : {}),
+                  revision,
+                  etag,
                 });
                 return;
               }
