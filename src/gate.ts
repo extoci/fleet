@@ -12,9 +12,56 @@ export const sameSecret = (a: unknown, b: unknown): boolean =>
 
 const cookieName = "__Host-fleet";
 
+export interface GateSessionInfo {
+  id: string;
+  host: string;
+  createdAt: string;
+  lastSeen: string;
+  userAgent: string;
+}
+
+interface StoredGateSession extends Partial<GateSessionInfo> {
+  host: string;
+  expires: number;
+}
+
 interface GateState {
   codes: Record<string, { expires: number }>;
-  sessions: Record<string, { host: string; expires: number }>;
+  sessions: Record<string, StoredGateSession>;
+}
+
+function userAgentSummary(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "Unknown device";
+  const ua = Array.from(value)
+    .filter((char) => {
+      const code = char.codePointAt(0)!;
+      return code > 31 && code !== 127;
+    })
+    .join("")
+    .slice(0, 512);
+  const system = /iphone/i.test(ua)
+    ? "iPhone"
+    : /ipad/i.test(ua)
+      ? "iPad"
+      : /android/i.test(ua)
+        ? "Android"
+        : /mac os x|macintosh/i.test(ua)
+          ? "macOS"
+          : /windows/i.test(ua)
+            ? "Windows"
+            : /linux/i.test(ua)
+              ? "Linux"
+              : "unknown system";
+  const browser = /edg\//i.test(ua)
+    ? "Edge"
+    : /firefox\//i.test(ua)
+      ? "Firefox"
+      : /(?:chrome|chromium)\//i.test(ua)
+        ? "Chrome"
+        : /safari\//i.test(ua)
+          ? "Safari"
+          : "Browser";
+  return `${browser} on ${system}`.slice(0, 80);
 }
 
 export class Gate {
@@ -83,14 +130,20 @@ export class Gate {
     return true;
   }
 
-  session(host: string): { token: string; cookie: string } {
+  session(host: string, userAgent?: string): { token: string; cookie: string } {
     this.prune();
     if (Object.keys(this.state.sessions).length >= 2048) {
       throw new Error("Device session limit reached. Revoke old sessions with fleet gate reset.");
     }
     const token = secret();
-    this.state.sessions[digest(token)] = {
+    const key = digest(token);
+    const now = new Date().toISOString();
+    this.state.sessions[key] = {
+      id: key.slice(0, 12),
       host,
+      createdAt: now,
+      lastSeen: now,
+      userAgent: userAgentSummary(userAgent),
       expires: Date.now() + 30 * 86400_000,
     };
     this.save();
@@ -100,15 +153,92 @@ export class Gate {
     };
   }
 
-  authorized(request: IncomingMessage, host: string): boolean {
+  token(request: IncomingMessage): string | null {
     const token = request.headers.cookie
       ?.split(";")
       .map((c) => c.trim())
       .find((c) => c.startsWith(`${cookieName}=`))
       ?.slice(cookieName.length + 1);
-    if (!token || token.length > 128) return false;
-    const session = this.state.sessions[digest(token)];
-    return Boolean(session && session.host === host && session.expires > Date.now());
+    return token && token.length <= 128 ? token : null;
+  }
+
+  normalizeSession(key: string, session: StoredGateSession): boolean {
+    let changed = false;
+    if (!session.id) {
+      session.id = key.slice(0, 12);
+      changed = true;
+    }
+    if (!session.createdAt) {
+      session.createdAt = new Date().toISOString();
+      changed = true;
+    }
+    if (!session.lastSeen) {
+      session.lastSeen = session.createdAt;
+      changed = true;
+    }
+    if (!session.userAgent) {
+      session.userAgent = "Unknown device";
+      changed = true;
+    }
+    return changed;
+  }
+
+  authorized(request: IncomingMessage, host: string): boolean {
+    const token = this.token(request);
+    if (!token) return false;
+    const key = digest(token);
+    const session = this.state.sessions[key];
+    if (!session || session.host !== host || session.expires <= Date.now()) return false;
+    const migrated = this.normalizeSession(key, session);
+    const lastSeen = Date.parse(session.lastSeen || "");
+    if (!Number.isFinite(lastSeen) || Date.now() - lastSeen > 60_000) {
+      session.lastSeen = new Date().toISOString();
+      this.save();
+    } else if (migrated) {
+      this.save();
+    }
+    return true;
+  }
+
+  sessions(): GateSessionInfo[] {
+    let migrated = false;
+    const sessions: GateSessionInfo[] = [];
+    for (const [key, session] of Object.entries(this.state.sessions)) {
+      if (session.expires <= Date.now()) continue;
+      migrated = this.normalizeSession(key, session) || migrated;
+      sessions.push({
+        id: session.id!,
+        host: session.host,
+        createdAt: session.createdAt!,
+        lastSeen: session.lastSeen!,
+        userAgent: session.userAgent!,
+      });
+    }
+    if (migrated) this.save();
+    return sessions.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen));
+  }
+
+  revoke(id: string): boolean {
+    let changed = false;
+    for (const [key, session] of Object.entries(this.state.sessions)) {
+      this.normalizeSession(key, session);
+      if (session.id === id) {
+        delete this.state.sessions[key];
+        changed = true;
+      }
+    }
+    if (changed) this.save();
+    return changed;
+  }
+
+  revokeRequest(request: IncomingMessage): boolean {
+    const token = this.token(request);
+    if (!token) return false;
+    const key = digest(token);
+    if (!this.state.sessions[key]) return false;
+    delete this.state.sessions[key];
+    this.save();
+    return true;
   }
 
   ticket(host: string, lifetime = 30_000): string {

@@ -155,17 +155,23 @@ export async function signin(
   ca: string,
   name = "notes",
   gateCookie?: string,
+  options: { userAgent?: string } = {},
 ) {
+  const headers: Record<string, string> = options.userAgent
+    ? { "User-Agent": options.userAgent }
+    : {};
   if (!gateCookie) {
     const response = await request(daemon, ca, "gate.fleet", `/__fleet/login?app=${name}`, {
       method: "POST",
       data: `code=${daemon.gate.pair()}`,
+      headers,
     });
     assert.equal(response.status, 303);
     gateCookie = response.headers["set-cookie"]?.[0].split(";")[0];
   }
   const login = await request(daemon, ca, "gate.fleet", `/__fleet/login?app=${name}`, {
     cookie: gateCookie,
+    headers,
   });
   assert.equal(login.status, 303);
   const location = login.headers.location!;
@@ -174,6 +180,7 @@ export async function signin(
     ca,
     `${name}.fleet`,
     new URL(location).pathname + new URL(location).search,
+    { headers },
   );
   assert.equal(claim.status, 303);
   return {

@@ -50,7 +50,7 @@ These commands are normal app work and need no extra authorization — the daemo
 
 Run app commands on the computer that holds the checkout — \`fleet init\`, \`fleet register\`, \`fleet logs\`, and \`fleet backup\` operate on local apps.
 
-Do not run other \`fleet\` subcommands (\`alias\`, \`setup\`, \`daemon\`, \`gate\`, \`phone\`, \`invite\`, \`profile\`, \`restore\`, \`unregister\`, \`update\`, \`uninstall\`) or edit files under the Fleet home directory (\`~/.fleet/v2\`, or \`$FLEET_V2_HOME\`/\`$FLEET_HOME\`) unless explicitly asked. If a command reports that Fleet is not running, tell the user — do not start the daemon or run setup yourself.
+Do not run other \`fleet\` subcommands (\`alias\`, \`setup\`, \`daemon\`, \`gate\`, \`phone\`, \`invite\`, \`profile\`, \`restore\`, \`unregister\`, \`update\`, \`uninstall\`) or edit files under the Fleet home directory (\`~/.fleet/v2\`, or \`$FLEET_V2_HOME\`/\`$FLEET_HOME\`) unless explicitly asked. When explicitly asked to manage sign-ins, \`fleet gate sessions [--json]\` lists session IDs, hosts, devices, and timestamps, and \`fleet gate revoke ID\` revokes one session without affecting others. If a command reports that Fleet is not running, tell the user — do not start the daemon or run setup yourself.
 
 When asked to link to an existing web service, run \`fleet alias NAME URL\` on the Fleet gateway. Open \`https://NAME.fleet\` to sign in and go to the configured URL. The browser needs access to that service. Use \`fleet unregister NAME\` to remove the alias.
 

@@ -29,6 +29,8 @@ test("help includes jobs as a fleet call operation kind and fleet agent pointer"
   const { stdout } = await exec(process.execPath, [cli, "--help"]);
   assert.match(stdout, /fleet call APP queries\|mutations\|jobs OP \[JSON\]/);
   assert.match(stdout, /fleet agent \[--install\]/);
+  assert.match(stdout, /fleet gate sessions/);
+  assert.match(stdout, /fleet gate revoke ID/);
   assert.match(stdout, /Agents: fleet agent/);
 });
 

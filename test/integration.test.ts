@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import fs from "node:fs";
 import http, { type ServerResponse } from "node:http";
@@ -351,6 +351,73 @@ test("client error reports require Gate and a matching origin, and fit within lo
   assert.match(reports[0], /Client error: Startup failed newline$/);
   assert.doesNotMatch(lines.join("\n"), /anonymous|wrong origin|rate limited/);
   assert.equal(daemon.runtime.find("notes")?.worker, null);
+});
+
+test("logout and gate session revocation invalidate only the copied session", async () => {
+  const { daemon, ca, home } = await fixture();
+  const userAgent =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  const first = await signin(daemon, ca, "notes", undefined, { userAgent });
+  const second = await signin(daemon, ca, "notes", undefined, { userAgent });
+  const logout = await request(daemon, ca, "gate.fleet", "/__fleet/logout", {
+    cookie: first.gateCookie,
+    method: "POST",
+    data: "",
+  });
+  assert.equal(logout.status, 303);
+  assert.equal(logout.text, "");
+  const copiedGate = await request(daemon, ca, "gate.fleet", "/", {
+    cookie: first.gateCookie,
+  });
+  assert.equal(copiedGate.status, 303);
+  assert.equal(copiedGate.text, "");
+  assert.match(String(copiedGate.headers.location), /__fleet\/login/);
+
+  const digestId = (cookie: string) =>
+    createHash("sha256").update(cookie.split("=", 2)[1]).digest("hex").slice(0, 12);
+  const firstAppSession = digestId(first.cookie);
+  const sessions = await runCli<
+    Array<{
+      id: string;
+      host: string;
+      createdAt: string;
+      lastSeen: string;
+      userAgent: string;
+    }>
+  >(home, "gate", "sessions");
+  assert.equal(sessions.length, 3);
+  const target = sessions.find((session) => session.id === firstAppSession);
+  assert.ok(target);
+  assert.equal(target.host, "notes.fleet");
+  assert.equal(target.userAgent, "Chrome on macOS");
+  assert.ok(Date.parse(target.createdAt));
+  assert.ok(Date.parse(target.lastSeen));
+
+  const revoked = await runCli<{ revoked: boolean; id: string }>(
+    home,
+    "gate",
+    "revoke",
+    firstAppSession,
+  );
+  assert.deepEqual(revoked, { revoked: true, id: firstAppSession });
+  const rejected = await request(daemon, ca, "notes.fleet", "/__fleet/api/queries/notes", {
+    cookie: first.cookie,
+    method: "POST",
+    data: "null",
+  });
+  assert.equal(rejected.status, 401);
+  assert.deepEqual(JSON.parse(rejected.text), { error: "Sign in through Fleet Gate." });
+  const other = await request(daemon, ca, "notes.fleet", "/__fleet/api/queries/notes", {
+    cookie: second.cookie,
+    method: "POST",
+    data: "null",
+  });
+  assert.equal(other.status, 200);
+  assert.deepEqual(JSON.parse(other.text), { value: [] });
+  assert.equal(
+    (await request(daemon, ca, "gate.fleet", "/", { cookie: second.gateCookie })).status,
+    200,
+  );
 });
 
 test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation work together", async () => {
