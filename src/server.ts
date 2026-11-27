@@ -24,7 +24,7 @@ import {
 } from "./pages.ts";
 import { type PeerAppView, Peers, peerRequest } from "./peers.ts";
 import { turnOffPhoneRoute } from "./platform.ts";
-import { type LocalAppState, Runtime } from "./runtime.ts";
+import { type AppSummary, type LocalAppState, Runtime } from "./runtime.ts";
 import { acquire, type FleetConfig, hostname, read, readAliases, secret, write } from "./state.ts";
 
 class BodyLimitError extends Error {}
@@ -346,6 +346,16 @@ export async function start(home: string, options: StartOptions = {}) {
   const appFor = (name: string): LocalAppState | PeerAppView | undefined =>
     runtime.find(name) || peers.find(name);
   const appList = () => [...runtime.list(), ...peers.list()];
+  const inspectApp = (app: AppSummary | PeerAppView) => {
+    const jobs = read<Record<string, unknown>>(path.join(home, "jobs.json"), {});
+    return {
+      ...app,
+      jobsState: Object.fromEntries(
+        Object.entries(jobs).filter(([key]) => key.startsWith(`${app.id}/`)),
+      ),
+      url: `${originFor(app.name)}`,
+    };
+  };
   const aliases = () => readAliases(home, { shared: true });
   const aliasFor = (name: string) => aliases().find((alias) => alias.name === name);
   const routeExists = (name: string) => Boolean(aliasFor(name) || appFor(name));
@@ -1000,6 +1010,21 @@ export async function start(home: string, options: StartOptions = {}) {
           path: `/setup/${setupToken}`,
           expires: setupExpires,
         });
+        return;
+      }
+      if (method === "inspect") {
+        const app = appFor(String(args.app || ""));
+        if (!app) {
+          json(response, 404, { error: "Unknown app." });
+          return;
+        }
+        if (args.wait === true && !isPeerApp(app)) await runtime.settleBuild(app);
+        const current = appList().find((item) => item.id === app.id);
+        if (!current) {
+          json(response, 404, { error: "Unknown app." });
+          return;
+        }
+        json(response, 200, inspectApp(current));
         return;
       }
       if (method === "call") {

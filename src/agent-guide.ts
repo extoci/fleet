@@ -7,7 +7,7 @@ export function agentContract(name: string): string {
 
 This directory is the app — Fleet registered it in place. Edit client/index.tsx, client/style.css, and server/index.ts. Fleet builds and updates the app automatically. Do not start Vite or a separate app server.
 
-Use fleet list --json, fleet inspect ${name}, and fleet logs ${name} to inspect the running app. Exercise operations with fleet call ${name} KIND OP [JSON] — KIND is queries, mutations, or jobs — e.g. fleet call ${name} queries notes for reads. Quote JSON arguments for your shell.
+Use fleet list --json, fleet inspect ${name} --wait, and fleet logs ${name} to inspect the running app. Use fleet check ${name} to typecheck edits against fleet.d.ts. Exercise operations with fleet call ${name} KIND OP [JSON] — KIND is queries, mutations, or jobs — e.g. fleet call ${name} queries notes for reads. Quote JSON arguments for your shell.
 
 The server exports queries, mutations, and jobs. See fleet.d.ts for FleetCtx and FleetDb. Store persistent JSON in ctx.db. The data is outside the checkout and survives rebuilds. Queries cannot write.
 
@@ -27,9 +27,9 @@ Fleet Gate handles sign-in. Do not add a separate login system.
 
 Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
 
-fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet call, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations and jobs write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
+fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet check, fleet call, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations and jobs write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
 
-You are done when fleet inspect ${name} reports a new revision with no error (rebuilds take a few seconds) and, if an operation changed, fleet call exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.
+You are done when fleet inspect ${name} --wait reports a new revision with no error and, if an operation changed, fleet call exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.
 `;
 }
 
@@ -45,10 +45,10 @@ When asked to create a Fleet "app", "file", "folder", or "project", scaffold a d
 These commands are normal app work and need no extra authorization — the daemon picks up newly registered apps automatically:
 
 - \`fleet agent\`, \`fleet --help\`, \`fleet --version\`, \`fleet doctor\`
-- \`fleet init\`, \`fleet register\`, \`fleet list\`, \`fleet inspect\`, \`fleet logs\`
+- \`fleet init\`, \`fleet register\`, \`fleet list\`, \`fleet inspect\`, \`fleet logs\`, \`fleet check\`
 - \`fleet call\` and \`fleet backup --output FILE\` on the app you are working on (mutations and jobs write real app data)
 
-Run app commands on the computer that holds the checkout — \`fleet init\`, \`fleet register\`, \`fleet logs\`, and \`fleet backup\` operate on local apps.
+Run app commands on the computer that holds the checkout — \`fleet init\`, \`fleet register\`, \`fleet logs\`, \`fleet check\`, and \`fleet backup\` operate on local apps. \`fleet inspect NAME --wait\` waits for the current rebuild to settle; \`fleet logs NAME -n LINES\` chooses the line count, \`fleet logs NAME -f\` follows new lines, and \`fleet logs --daemon\` reads daemon diagnostics.
 
 Do not run other \`fleet\` subcommands (\`alias\`, \`setup\`, \`daemon\`, \`gate\`, \`phone\`, \`invite\`, \`peers\`, \`profile\`, \`restore\`, \`unregister\`, \`update\`, \`uninstall\`) or edit files under the Fleet home directory (\`~/.fleet/v2\`, or \`$FLEET_V2_HOME\`/\`$FLEET_HOME\`) unless explicitly asked. When explicitly asked to manage sign-ins, \`fleet gate sessions [--json]\` lists session IDs, hosts, devices, and timestamps, and \`fleet gate revoke ID\` revokes one session without affecting others. When explicitly asked to manage computers, \`fleet peers [--json]\` lists enrolled computers and \`fleet peers remove ID\` retires one. If a command reports that Fleet is not running, tell the user — do not start the daemon or run setup yourself.
 
@@ -58,7 +58,7 @@ When asked to link to an existing web service, run \`fleet alias NAME URL\` on t
 
 1. Run \`fleet init DIR\` (for example \`fleet init notes\`) to create and register the app directory, or \`fleet init\` inside the directory that should be the app.
 2. Note the current revision with \`fleet inspect NAME\`, then edit \`client/index.tsx\`, \`client/style.css\`, and \`server/index.ts\`. Fleet rebuilds on save and keeps serving the last good build if a rebuild fails.
-3. Give the rebuild a few seconds, then check \`fleet inspect NAME\` reports a new revision with no error (\`fleet logs NAME\` shows build output). Exercise any changed operation with \`fleet call NAME KIND OP [JSON]\`.
+3. Run \`fleet inspect NAME --wait\` until it reports a new revision with no error (\`fleet logs NAME\` shows build output). Run \`fleet check NAME\` after type-level edits, and exercise any changed operation with \`fleet call NAME KIND OP [JSON]\`.
 4. Stop there and report \`https://NAME.fleet\`. Run extra audits, browser passes, or data recounts only if asked.
 
 Each initialized app contains \`AGENTS.md\` and \`fleet.d.ts\` — read them before editing. \`AGENTS.md\` carries this contract:

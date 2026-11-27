@@ -551,6 +551,19 @@ export class Runtime {
     return app.building;
   }
 
+  async settleBuild(app: LocalAppState): Promise<boolean> {
+    let result = Boolean(app.revision);
+    for (let attempt = 0; attempt < 10; attempt++) {
+      if (app.rebuild) {
+        clearTimeout(app.rebuild);
+        app.rebuild = null;
+      }
+      result = await this.build(app);
+      if (!app.dirty && !app.rebuild) return result;
+    }
+    return result;
+  }
+
   validate(modulePath: string): Promise<OperationMap> {
     return new Promise((resolve, reject) => {
       const worker = new Worker(new URL("./validate-worker.ts", import.meta.url), {

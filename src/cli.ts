@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
+import { parseArgs, promisify } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { agentContract, agentGuide, installAgentSkill } from "./agent-guide.ts";
 import {
@@ -42,6 +44,8 @@ import {
   write,
 } from "./state.ts";
 
+const execFileAsync = promisify(execFile);
+
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
@@ -51,6 +55,10 @@ const { values, positionals } = parseArgs({
     version: { type: "boolean", short: "v" },
     install: { type: "boolean" },
     foreground: { type: "boolean" },
+    wait: { type: "boolean" },
+    follow: { type: "boolean", short: "f" },
+    daemon: { type: "boolean" },
+    lines: { type: "string", short: "n" },
     local: { type: "boolean" },
     forwarded: { type: "boolean" },
     "https-port": { type: "string" },
@@ -176,6 +184,116 @@ function createApp(directory: string, name: string): AppManifest {
     fs.appendFileSync(ignore, "\n.env.fleet.server\n");
   }
   return register(home, directory);
+}
+
+function sourceFiles(directory: string): string[] {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    if (!fs.existsSync(dir)) return;
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (item.name.startsWith(".") || ["node_modules", "dist", "target"].includes(item.name)) {
+        continue;
+      }
+      const file = path.join(dir, item.name);
+      if (item.isDirectory()) walk(file);
+      else if (/\.(?:[cm]?ts|tsx)$/.test(item.name)) files.push(file);
+    }
+  };
+  walk(directory);
+  return files.sort();
+}
+
+interface CheckResult {
+  name: string;
+  directory: string;
+  ok: boolean;
+  errors: string[];
+  output: string;
+}
+
+async function checkAppTypes(app: RegisteredApp): Promise<CheckResult> {
+  const declarations = path.join(app.directory, "fleet.d.ts");
+  if (!fs.existsSync(declarations)) {
+    throw new Error(`${app.name} is missing fleet.d.ts. Run fleet init in the app directory.`);
+  }
+  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+  const modules = path.join(packageRoot, "node_modules");
+  const preact = path.join(modules, "preact");
+  if (!fs.existsSync(preact)) {
+    throw new Error("Fleet's Preact dependency is missing. Reinstall Fleet.");
+  }
+  const files = [
+    declarations,
+    ...sourceFiles(path.join(app.directory, "server")),
+    ...sourceFiles(path.join(app.directory, "client")),
+  ];
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-check-"));
+  try {
+    const assets = path.join(temp, "assets.d.ts");
+    fs.writeFileSync(
+      assets,
+      ["*.css", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "*.woff", "*.woff2"]
+        .map((pattern) => `declare module "${pattern}";`)
+        .join("\n"),
+    );
+    const config = path.join(temp, "tsconfig.json");
+    fs.writeFileSync(
+      config,
+      JSON.stringify({
+        compilerOptions: {
+          strict: false,
+          noEmit: true,
+          target: "ES2022",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          jsx: "react-jsx",
+          jsxImportSource: "preact",
+          lib: ["ES2022", "DOM", "DOM.Iterable"],
+          types: ["node", "bun"],
+          typeRoots: [path.join(modules, "@types")],
+          paths: {
+            preact: [preact],
+            "preact/*": [path.join(preact, "*")],
+            react: [path.join(preact, "compat")],
+            "react-dom": [path.join(preact, "compat")],
+            "react-dom/client": [path.join(preact, "compat", "client")],
+            "react/jsx-runtime": [path.join(preact, "jsx-runtime")],
+            "react/jsx-dev-runtime": [path.join(preact, "jsx-dev-runtime")],
+          },
+        },
+        files: [...files, assets],
+      }),
+    );
+    let output = "";
+    let code = 0;
+    try {
+      const result = await execFileAsync(
+        process.execPath,
+        ["check", "--no-script", "-p", config, "--pretty=false"],
+        { cwd: app.directory, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+      output = `${result.stdout}${result.stderr}`.trim();
+    } catch (error) {
+      const failure = error as {
+        code?: number;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      code = typeof failure.code === "number" ? failure.code : 1;
+      output = `${failure.stdout || ""}${failure.stderr || ""}`.trim() || failure.message || "";
+    }
+    const errors = output.split(/\r?\n/).filter((line) => /error TS\d+:/.test(line));
+    return {
+      name: app.name,
+      directory: app.directory,
+      ok: code === 0 && errors.length === 0,
+      errors,
+      output,
+    };
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 }
 
 async function phone(): Promise<void> {
@@ -474,33 +592,96 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "inspect") {
-    const apps = await rpc<AppListItem[]>("list");
-    const app = apps.find((a) => a.name === args[0]);
-    if (!app) throw new Error("Unknown app.");
-    const full: AppListItem = {
-      ...app,
-      jobsState: read(path.join(home, "jobs.json"), {}),
-      url: `https://${app.name}.fleet`,
-    };
+    if (!args[0]) throw new Error("Usage: fleet inspect NAME [--wait]");
+    const full = await rpc<AppListItem>("inspect", { app: args[0], wait: values.wait === true });
     out(values.json ? full : formatInspect(full));
     return;
   }
   if (command === "logs") {
+    const lineCount = values.lines === undefined ? 100 : Number(values.lines);
+    if (!Number.isInteger(lineCount) || lineCount < 1) {
+      throw new Error("Usage: fleet logs NAME [-n LINES] [-f] or fleet logs --daemon");
+    }
+    let name = args[0] || "";
+    let file = "";
+    if (values.daemon) {
+      if (args.length) throw new Error("fleet logs --daemon does not take an app name.");
+      name = "daemon";
+      const serviceLog = path.join(home, "daemon.log");
+      file = fs.existsSync(serviceLog) ? serviceLog : path.join(home, "logs", "daemon.log");
+    } else {
+      const app = read<RegisteredApp[]>(path.join(home, "apps.json"), []).find(
+        (a) => a.name === name,
+      );
+      if (!app) throw new Error("Unknown app.");
+      file = path.join(home, "logs", `${app.id}.log`);
+    }
+    const readLog = () => {
+      try {
+        return fs.readFileSync(file, "utf8");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        return "";
+      }
+    };
+    const text = readLog();
+    const lines = text
+      ? text
+          .replace(/\r?\n$/, "")
+          .split("\n")
+          .slice(-lineCount)
+      : [];
+    if (!values.follow) {
+      out(values.json ? { name, lines } : lines.join("\n"));
+      return;
+    }
+    process.stdout.write(lines.join("\n"));
+    if (lines.length && !lines[lines.length - 1].endsWith("\n")) process.stdout.write("\n");
+    let size = Buffer.byteLength(text);
+    let writing = false;
+    const timer = setInterval(() => {
+      if (writing) return;
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(file);
+      } catch {
+        return;
+      }
+      if (stat.size < size) size = 0;
+      if (stat.size === size) return;
+      writing = true;
+      const stream = fs.createReadStream(file, { start: size, encoding: "utf8" });
+      stream.on("data", (chunk) => process.stdout.write(String(chunk)));
+      stream.on("end", () => {
+        size = stat.size;
+        writing = false;
+      });
+      stream.on("error", () => {
+        writing = false;
+      });
+    }, 250);
+    await new Promise<void>((resolve) => {
+      process.once("SIGINT", () => {
+        clearInterval(timer);
+        resolve();
+      });
+    });
+    return;
+  }
+  if (command === "check") {
     const app = read<RegisteredApp[]>(path.join(home, "apps.json"), []).find(
       (a) => a.name === args[0],
     );
     if (!app) throw new Error("Unknown app.");
-    let text = "";
-    try {
-      text = fs.readFileSync(path.join(home, "logs", `${app.id}.log`), "utf8");
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    const result = await checkAppTypes(app);
+    if (values.json) {
+      out(result);
+    } else if (result.ok) {
+      out(formatNotice("ok", `Typecheck passed for ${app.name}.`));
+    } else {
+      out(`Typecheck failed for ${app.name}.\n${result.output}`);
     }
-    out(
-      values.json
-        ? { name: app.name, lines: text.trim().split("\n").slice(-100) }
-        : text.split("\n").slice(-100).join("\n"),
-    );
+    if (!result.ok) process.exitCode = 1;
     return;
   }
   if (command === "call") {
