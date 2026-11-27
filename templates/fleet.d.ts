@@ -26,6 +26,7 @@ declare module "fleet/client" {
     options?: { keepalive?: boolean },
   ): Promise<T>;
 
+  /** Refreshes on pushed data changes, visibility, and reconnect. Positive pollMs opts into polling. */
   export function useQuery<T = unknown>(
     name: string,
     input?: unknown,

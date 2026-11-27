@@ -174,6 +174,7 @@ export interface LocalAppState extends RegisteredApp {
   building: Promise<boolean> | null;
   warming: Promise<Worker> | null;
   generation: number;
+  dataVersion: number;
   dirty: boolean;
   revision?: string;
   buildDir: string | null;
@@ -206,6 +207,7 @@ export interface AppSummary {
   head: HeadMetadata;
   hasPublic: boolean;
   hasCss: boolean;
+  dataVersion: number;
 }
 
 interface JobRecord {
@@ -232,6 +234,7 @@ export class Runtime {
   terminations: Map<string, Promise<number>>;
   runningJobs: Map<string, Promise<void>>;
   revisionListeners: Set<(app: LocalAppState) => void>;
+  dataListeners: Set<(app: LocalAppState) => void>;
   timer: ReturnType<typeof setInterval>;
 
   constructor(home: string, { idleMs = 30_000, pollMs = 1500 } = {}) {
@@ -243,6 +246,7 @@ export class Runtime {
     this.terminations = new Map();
     this.runningJobs = new Map();
     this.revisionListeners = new Set();
+    this.dataListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e: unknown) => this.log("daemon", formatBuildError(e))),
       pollMs,
@@ -281,6 +285,10 @@ export class Runtime {
           building: null,
           warming: null,
           generation: 0,
+          dataVersion:
+            readShared<Record<string, number>>(path.join(this.home, "data-versions.json"), {})[
+              app.id
+            ] || 0,
           dirty: true,
           revision: last?.revision,
           buildDir: last ? path.join(this.home, "builds", app.id, last.revision) : null,
@@ -358,6 +366,23 @@ export class Runtime {
     };
   }
 
+  onData(listener: (app: LocalAppState) => void): () => void {
+    this.dataListeners.add(listener);
+    return () => {
+      this.dataListeners.delete(listener);
+    };
+  }
+
+  dataChanged(app: LocalAppState): void {
+    app.dataVersion++;
+    const file = path.join(this.home, "data-versions.json");
+    write(file, {
+      ...readShared<Record<string, number>>(file, {}),
+      [app.id]: app.dataVersion,
+    });
+    for (const listener of this.dataListeners) listener(app);
+  }
+
   find(name: string): LocalAppState | undefined {
     this.sync();
     return [...this.apps.values()].find((a) => a.name === name);
@@ -378,6 +403,7 @@ export class Runtime {
       head: a.head,
       hasPublic: a.hasPublic,
       hasCss: a.hasCss,
+      dataVersion: a.dataVersion,
     }));
   }
 
@@ -631,6 +657,7 @@ export class Runtime {
             ready?: boolean;
             operations?: OperationMap;
             log?: string;
+            data?: boolean;
             id?: string;
             error?: string;
             value?: unknown;
@@ -643,6 +670,8 @@ export class Runtime {
               resolve();
             } else if (message.log) {
               this.log(app.id, message.log);
+            } else if (message.data) {
+              this.dataChanged(app);
             } else if (message.id) {
               const pending = app.pending.get(message.id);
               if (pending) {

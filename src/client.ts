@@ -16,17 +16,76 @@ export async function call<T = unknown>(
     location.reload();
     throw new Error("Connect this browser through Fleet Gate.");
   }
-  const result = (await response.json()) as { value?: T; error?: string };
+  const text = await response.text();
+  let result: { value?: T; error?: string };
+  try {
+    result = JSON.parse(text) as { value?: T; error?: string };
+  } catch {
+    if (!response.ok) {
+      const detail = text.trim().replace(/\s+/g, " ").slice(0, 200);
+      throw new Error(detail || `The app request failed with status ${response.status}.`);
+    }
+    throw new Error("The app returned an invalid response.");
+  }
   if (!response.ok) throw new Error(result.error || "The app request failed.");
   return result.value as T;
 }
 
 const listeners = new Set<{ name: string; refresh: () => Promise<void> }>();
 
+function refreshQueries(): void {
+  for (const listener of [...listeners]) void listener.refresh();
+}
+
+interface FleetPageState {
+  revision?: string | null;
+  events?: EventSource;
+}
+
+function fleetEvents(): EventSource {
+  const target = window as Window & { __fleet?: FleetPageState };
+  if (!target.__fleet?.events) {
+    target.__fleet = {
+      ...target.__fleet,
+      events: new EventSource("/__fleet/events"),
+    };
+  }
+  return target.__fleet.events!;
+}
+
+let wiredSource: EventSource | null = null;
+let sourceWasOpen = false;
+let visibilityWired = false;
+
+function wireEvents(): void {
+  const source = fleetEvents();
+  if (!visibilityWired) {
+    visibilityWired = true;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") refreshQueries();
+    });
+  }
+  if (wiredSource === source) return;
+  wiredSource = source;
+  sourceWasOpen = source.readyState === 1;
+  source.addEventListener("open", () => {
+    if (sourceWasOpen) refreshQueries();
+    sourceWasOpen = true;
+  });
+  source.addEventListener("message", (event) => {
+    try {
+      const state = JSON.parse(event.data) as { type?: string };
+      if (state.type === "data") refreshQueries();
+    } catch {
+      // Keepalive comments and malformed intermediary frames carry no data.
+    }
+  });
+}
+
 export function useQuery<T = unknown>(
   name: string,
   input: unknown = null,
-  { pollMs = 10_000 }: { pollMs?: number | false } = {},
+  { pollMs = false }: { pollMs?: number | false } = {},
 ): { data: T | undefined; error: Error | null } {
   const [state, setState] = useState<{ data: T | undefined; error: Error | null }>({
     data: undefined,
@@ -54,6 +113,7 @@ export function useQuery<T = unknown>(
     };
     const listener = { name, refresh };
     listeners.add(listener);
+    wireEvents();
     void refresh();
     const timer =
       pollMs && pollMs > 0

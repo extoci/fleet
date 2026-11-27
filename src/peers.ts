@@ -37,6 +37,7 @@ export interface PeerAppRecord {
   hasPublic: boolean;
   hasCss: boolean;
   operations: Record<string, string[]>;
+  dataVersion: number;
 }
 
 export interface PeerRecord extends PeerTarget {
@@ -154,16 +155,25 @@ export class Peers {
   runtime: Runtime;
   allowLoopback: boolean;
   pending: Map<string, boolean>;
+  dataListeners: Set<(app: PeerAppRecord) => void>;
 
   constructor(home: string, runtime: Runtime, { allowLoopback = false } = {}) {
     this.home = home;
     this.runtime = runtime;
     this.allowLoopback = allowLoopback;
     this.pending = new Map();
+    this.dataListeners = new Set();
   }
 
   all(): PeerRecord[] {
     return readShared<PeerRecord[]>(path.join(this.home, "peers.json"), []);
+  }
+
+  onData(listener: (app: PeerAppRecord) => void): () => void {
+    this.dataListeners.add(listener);
+    return () => {
+      this.dataListeners.delete(listener);
+    };
   }
 
   computers(): PeerComputerView[] {
@@ -301,6 +311,10 @@ export class Peers {
               ),
             ]),
         ),
+        dataVersion:
+          typeof a.dataVersion === "number" && Number.isFinite(a.dataVersion)
+            ? Math.max(0, Math.floor(a.dataVersion))
+            : 0,
       }));
       const occupied = new Set([
         ...this.runtime.list().map((a) => a.name),
@@ -349,6 +363,12 @@ export class Peers {
         const invites = read<Record<string, number>>(path.join(this.home, "node-invites.json"), {});
         delete invites[inviteKey];
         write(path.join(this.home, "node-invites.json"), invites);
+      }
+      for (const app of apps) {
+        const previous = old?.apps.find((item) => item.id === app.id);
+        if (previous && previous.dataVersion !== app.dataVersion) {
+          for (const listener of this.dataListeners) listener(app);
+        }
       }
       return { registered: true };
     } finally {

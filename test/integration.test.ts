@@ -11,7 +11,15 @@ import { spyOn, test } from "bun:test";
 import type { OperationKind } from "../src/app-definition.ts";
 import { start } from "../src/server.ts";
 import { read, write } from "../src/state.ts";
-import { cleanups, fixture, request, runCli, signin, until } from "./integration-helpers.ts";
+import {
+  cleanups,
+  fixture,
+  request,
+  runCli,
+  signin,
+  streamEvents,
+  until,
+} from "./integration-helpers.ts";
 
 test("gateway aliases resolve over DNS and redirect through Gate without a daemon restart", async () => {
   const { home, daemon, ca } = await fixture({ noDns: false });
@@ -427,6 +435,40 @@ test("logout and gate session revocation invalidate only the copied session", as
     (await request(daemon, ca, "gate.fleet", "/", { cookie: second.gateCookie })).status,
     200,
   );
+});
+
+test("data commits push over events while an open event stream still lets workers idle", async () => {
+  const { daemon, ca, home } = await fixture();
+  const auth = await signin(daemon, ca);
+  const stream = await streamEvents(daemon, ca, "notes.fleet", auth);
+  try {
+    assert.equal(stream.status, 200);
+    await until(() => stream.events.length > 0, 1000);
+    assert.equal(stream.events[0]?.type, "state");
+    assert.equal(stream.events[0]?.dataVersion, 0);
+    const started = Date.now();
+    const mutation = await request(daemon, ca, "notes.fleet", "/__fleet/api/mutations/addNote", {
+      ...auth,
+      method: "POST",
+      data: JSON.stringify({ text: "Push invalidation" }),
+    });
+    assert.equal(mutation.status, 200, mutation.text);
+    await until(
+      () => stream.events.some((event) => event.type === "data" && event.dataVersion === 1),
+      1000,
+    );
+    assert.ok(Date.now() - started < 1000);
+    const app = daemon.runtime.find("notes")!;
+    assert.equal(app.dataVersion, 1);
+    assert.equal(
+      read<Record<string, number>>(path.join(home, "data-versions.json"), {})[app.id],
+      1,
+    );
+    assert.ok(app.worker);
+    await until(() => !app.worker, 3000);
+  } finally {
+    stream.close();
+  }
 });
 
 test("Gate, cached frontend, persistent data, idle unload, CSRF, and revocation work together", async () => {
