@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "bun:test";
 import { authority, mobileProfile } from "../src/certificates.ts";
 import { exportData, restoreData } from "../src/data.ts";
+import { listQuery } from "../src/kv-range.ts";
 import { type PeerRecord, Peers, peerRequest } from "../src/peers.ts";
 import { start } from "../src/server.ts";
 import { type FleetConfig, read, secret, write } from "../src/state.ts";
@@ -92,7 +93,7 @@ test("live builds retain the previous app on build failure and keep data across 
 function readJob(home: string, appId: string) {
   const jobs = JSON.parse(fs.readFileSync(path.join(home, "jobs.json"), "utf8")) as Record<
     string,
-    { lastRun?: string; due: number; runId?: string }
+    { lastRun?: string; due: number; runId?: string; failures?: number; error?: string }
   >;
   return jobs[`${appId}/dailyCheck`];
 }
@@ -155,6 +156,171 @@ test("a shorter job interval moves the next run forward but keeps retry due date
   assert.equal(after[nextKey].lastRun, before[nextKey].lastRun);
   assert.deepEqual(after[retryKey], before[retryKey]);
   assert.equal(app.worker, null);
+});
+
+test("a slow job does not block another app's job or idle unload", async () => {
+  const { daemon, home, project } = await fixture({ pollMs: 3_600_000 });
+  const slowApp = daemon.runtime.find("notes")!;
+  write(
+    path.join(project, "server", "index.ts"),
+    `
+    export default {
+      jobs: {
+        async dailyCheck(ctx) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          ctx.db.set("slowDone", true);
+        },
+      },
+    };
+  `,
+  );
+  write(path.join(project, "fleet.json"), {
+    ...read<Record<string, unknown>>(path.join(project, "fleet.json"), {}),
+    jobs: [{ name: "dailyCheck", everySeconds: 300 }],
+  });
+
+  const fastProject = path.join(home, "fast");
+  execFileSync(process.execPath, [cli, "init", fastProject, "--json"], {
+    env: { ...process.env, FLEET_V2_HOME: home },
+    stdio: "pipe",
+  });
+  write(
+    path.join(fastProject, "server", "index.ts"),
+    `
+    export default {
+      jobs: {
+        dailyCheck(ctx) {
+          ctx.db.set("fastDone", true);
+        },
+      },
+    };
+  `,
+  );
+  write(path.join(fastProject, "fleet.json"), {
+    ...read<Record<string, unknown>>(path.join(fastProject, "fleet.json"), {}),
+    jobs: [{ name: "dailyCheck", everySeconds: 300 }],
+  });
+  const fastApp = daemon.runtime.find("fast")!;
+  await Promise.all([daemon.runtime.build(slowApp), daemon.runtime.build(fastApp)]);
+  const due = Date.now() - 1;
+  write(path.join(home, "jobs.json"), {
+    [`${slowApp.id}/dailyCheck`]: { due },
+    [`${fastApp.id}/dailyCheck`]: { due },
+  });
+
+  const started = Date.now();
+  await daemon.runtime.tick();
+  assert.ok(Date.now() - started < 500);
+  await until(() => readJob(home, fastApp.id)?.lastRun);
+  assert.equal(readJob(home, slowApp.id)?.lastRun, undefined);
+  assert.ok(fastApp.worker);
+  fastApp.lastUsed = Date.now() - 1000;
+  await daemon.runtime.tick();
+  assert.equal(fastApp.worker, null);
+  assert.ok(slowApp.worker);
+}, 10_000);
+
+test("failing jobs back off exponentially, cap retries, and reset after success", async () => {
+  const { daemon, home, project } = await fixture({ pollMs: 3_600_000 });
+  const app = daemon.runtime.find("notes")!;
+  write(
+    path.join(project, "server", "index.ts"),
+    `
+    export default {
+      mutations: {
+        succeed(ctx) {
+          ctx.db.set("succeed", true);
+        },
+      },
+      jobs: {
+        dailyCheck(ctx) {
+          if (!ctx.db.get("succeed")) throw new Error("not yet");
+          ctx.db.set("done", true);
+        },
+      },
+    };
+  `,
+  );
+  write(path.join(project, "fleet.json"), {
+    ...read<Record<string, unknown>>(path.join(project, "fleet.json"), {}),
+    jobs: [{ name: "dailyCheck", everySeconds: 300 }],
+  });
+  await daemon.runtime.build(app);
+  const jobsFile = path.join(home, "jobs.json");
+  const key = `${app.id}/dailyCheck`;
+  const patchJob = (patch: Record<string, unknown>) => {
+    const jobs = read<Record<string, Record<string, unknown>>>(jobsFile, {});
+    jobs[key] = { ...jobs[key], ...patch };
+    write(jobsFile, jobs);
+  };
+  write(jobsFile, { [key]: { due: Date.now() - 1 } });
+
+  await daemon.runtime.tick();
+  await until(() => readJob(home, app.id)?.failures === 1);
+  const first = readJob(home, app.id)!;
+  assert.ok(first.runId);
+  assert.ok(first.due - Date.now() > 20_000);
+  assert.ok(first.due - Date.now() <= 30_000);
+
+  patchJob({ due: Date.now() - 1 });
+  await daemon.runtime.tick();
+  await until(() => readJob(home, app.id)?.failures === 2);
+  const second = readJob(home, app.id)!;
+  assert.equal(second.runId, first.runId);
+  assert.ok(second.due - Date.now() > 50_000);
+  assert.ok(second.due - Date.now() <= 60_000);
+
+  patchJob({ due: Date.now() - 1, failures: 5 });
+  await daemon.runtime.tick();
+  await until(() => readJob(home, app.id)?.failures === 6);
+  const capped = readJob(home, app.id)!;
+  assert.equal(capped.runId, first.runId);
+  assert.ok(capped.due - Date.now() > 850_000);
+  assert.ok(capped.due - Date.now() <= 900_000);
+
+  await daemon.runtime.call(app, "mutations", "succeed", null);
+  patchJob({ due: Date.now() - 1 });
+  await daemon.runtime.tick();
+  await until(() => readJob(home, app.id)?.lastRun);
+  const reset = readJob(home, app.id)!;
+  assert.equal(reset.failures, undefined);
+  assert.equal(reset.error, undefined);
+  assert.equal(reset.runId, undefined);
+}, 10_000);
+
+test("ctx.db.list prefix scans use the primary key index with exact range semantics", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const rows = [
+      ["a", 1],
+      ["aa", 2],
+      ["ab", 3],
+      ["aé", 4],
+      ["b", 5],
+      ["", 6],
+    ];
+    for (const [key, value] of rows) {
+      db.prepare("INSERT INTO kv VALUES (?,?)").run(key, JSON.stringify(value));
+    }
+    const query = listQuery("a");
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(...query.params) as Array<{
+      detail: string;
+    }>;
+    assert.match(plan[0].detail, /^SEARCH kv USING INDEX sqlite_autoindex_kv_1/);
+    const matches = db.prepare(query.sql).all(...query.params) as Array<{ key: string }>;
+    assert.deepEqual(
+      matches.map((row) => row.key),
+      ["a", "aa", "ab", "aé"],
+    );
+    const all = listQuery("");
+    assert.deepEqual(
+      (db.prepare(all.sql).all(...all.params) as Array<{ key: string }>).map((row) => row.key),
+      ["", "a", "aa", "ab", "aé", "b"],
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test("data snapshots are consistent and restoring requires the daemon to be stopped", async () => {

@@ -1,6 +1,7 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { loadApp, type OperationKind, operationKinds, operationNames } from "./app-definition.ts";
+import { listQuery } from "./kv-range.ts";
 
 interface WorkerInit {
   module: string;
@@ -93,10 +94,12 @@ async function run(message: WorkerMessage): Promise<void> {
           return Number(result.changes) > 0;
         },
         list: (prefix = "") => {
-          const rows = statement(
-            db,
-            "SELECT key,value FROM kv WHERE substr(key,1,?)=? ORDER BY key LIMIT 1000",
-          ).all(key(prefix).length, prefix) as Array<{ key: string; value: string }>;
+          const validPrefix = key(prefix);
+          const query = listQuery(validPrefix);
+          const rows = statement(db, query.sql).all(...query.params) as Array<{
+            key: string;
+            value: string;
+          }>;
           return rows.map((row) => ({ key: row.key, value: JSON.parse(row.value) }));
         },
       },
