@@ -33,6 +33,10 @@ test("help includes jobs as a fleet call operation kind and fleet agent pointer"
   assert.match(stdout, /fleet gate revoke ID/);
   assert.match(stdout, /fleet peers/);
   assert.match(stdout, /fleet peers remove ID/);
+  assert.match(stdout, /fleet inspect NAME \[--wait\]/);
+  assert.match(stdout, /fleet logs NAME \[-n LINES\] \[-f\]/);
+  assert.match(stdout, /fleet logs --daemon/);
+  assert.match(stdout, /fleet check NAME/);
   assert.match(stdout, /Agents: fleet agent/);
 });
 
@@ -41,7 +45,7 @@ test("fleet agent prints the shared contract and installs SKILL.md", async () =>
   assert.match(stdout, /A Fleet app is a directory anywhere on this computer/);
   assert.match(stdout, /scaffold a directory with `fleet init`/);
   assert.match(stdout, /## Fleet app/);
-  assert.match(stdout, /You are done when fleet inspect NAME reports a new revision/);
+  assert.match(stdout, /You are done when fleet inspect NAME --wait reports a new revision/);
 
   const { stdout: jsonOut } = await exec(process.execPath, [cli, "agent", "--json"]);
   const parsed = JSON.parse(jsonOut) as { guide: string };
@@ -127,7 +131,7 @@ test("init writes public source and agent guidance while keeping Fleet state and
   assert.match(agents, /list\(prefix\) returns up to 1,000 items/);
   assert.match(agents, /rolls back all ctx.db writes/);
   assert.match(agents, /call\(kind, name, input\)/);
-  assert.match(agents, /You are done when fleet inspect notes reports a new revision/);
+  assert.match(agents, /You are done when fleet inspect notes --wait reports a new revision/);
 
   fs.unlinkSync(types);
   await init(app);
@@ -140,6 +144,93 @@ test("init writes public source and agent guidance while keeping Fleet state and
   await init(existing);
   await init(existing);
   assert.equal(fs.readFileSync(existingTypes, "utf8"), "// Custom types\n");
+});
+
+test("fleet logs supports line counts, daemon logs, and following appended lines", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-logs-"));
+  cleanups.push(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const home = path.join(temporary, "state");
+  const app = path.join(temporary, "notes");
+  await exec(process.execPath, [cli, "--home", home, "init", app]);
+  const manifest = JSON.parse(fs.readFileSync(path.join(app, "fleet.json"), "utf8")) as {
+    id: string;
+  };
+  fs.mkdirSync(path.join(home, "logs"), { recursive: true });
+  const log = path.join(home, "logs", `${manifest.id}.log`);
+  fs.writeFileSync(log, `${Array.from({ length: 150 }, (_, i) => `line${i + 1}`).join("\n")}\n`);
+  const limited = await exec(process.execPath, [
+    cli,
+    "--home",
+    home,
+    "logs",
+    "notes",
+    "-n",
+    "3",
+    "--json",
+  ]);
+  assert.deepEqual(JSON.parse(limited.stdout), {
+    name: "notes",
+    lines: ["line148", "line149", "line150"],
+  });
+
+  fs.writeFileSync(path.join(home, "daemon.log"), "daemon one\ndaemon two\n");
+  const daemon = await exec(process.execPath, [
+    cli,
+    "--home",
+    home,
+    "logs",
+    "--daemon",
+    "-n",
+    "1",
+    "--json",
+  ]);
+  assert.deepEqual(JSON.parse(daemon.stdout), { name: "daemon", lines: ["daemon two"] });
+
+  const child = execFile(process.execPath, [cli, "--home", home, "logs", "notes", "-n", "1", "-f"]);
+  let followed = "";
+  child.stdout?.on("data", (chunk) => {
+    followed += String(chunk);
+  });
+  const deadline = Date.now() + 5000;
+  while (!followed.includes("line150") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  fs.appendFileSync(log, "line151\n");
+  while (!followed.includes("line151") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  child.kill();
+  await new Promise((resolve) => child.once("exit", resolve));
+  assert.match(followed, /line150/);
+  assert.match(followed, /line151/);
+});
+
+test("fleet check passes the starter app and reports type errors as JSON", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-v2-check-"));
+  cleanups.push(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const home = path.join(temporary, "state");
+  const app = path.join(temporary, "notes");
+  await exec(process.execPath, [cli, "--home", home, "init", app]);
+  const passing = await exec(process.execPath, [cli, "--home", home, "check", "notes", "--json"]);
+  const passed = JSON.parse(passing.stdout) as { ok: boolean; errors: string[] };
+  assert.equal(passed.ok, true);
+  assert.deepEqual(passed.errors, []);
+
+  fs.appendFileSync(path.join(app, "server", "index.ts"), "\nconst bad: string = 1;\n");
+  const failure = await exec(process.execPath, [
+    cli,
+    "--home",
+    home,
+    "check",
+    "notes",
+    "--json",
+  ]).then(
+    () => assert.fail("fleet check succeeded for a type error"),
+    (error: { stdout?: string }) => error,
+  );
+  const result = JSON.parse(String(failure.stdout)) as { ok: boolean; errors: string[] };
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0], /server\/index\.ts\(\d+,\d+\): error TS2322/);
 });
 
 async function setupLocal() {

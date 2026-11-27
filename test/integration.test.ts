@@ -254,11 +254,18 @@ test("queries read committed data while an async mutation waits, including on ro
 
 test("inspect reports the current build operations before the worker starts", async () => {
   const { daemon, home, project } = await fixture({ pollMs: 3_600_000 });
+  const owned = daemon.runtime.find("notes")!;
+  write(path.join(home, "jobs.json"), {
+    [`${owned.id}/dailyCheck`]: { due: 1, lastRun: "2026-01-01T00:00:00.000Z" },
+    "another-app/dailyCheck": { due: 2 },
+  });
   const initial = await runCli<{
     revision: string;
     running: boolean;
     operations: Record<string, string[]>;
+    jobsState: Record<string, unknown>;
   }>(home, "inspect", "notes");
+  assert.deepEqual(Object.keys(initial.jobsState), [`${owned.id}/dailyCheck`]);
   assert.deepEqual(initial.operations.queries, ["notes"]);
   assert.equal(initial.running, false);
 
@@ -274,13 +281,15 @@ test("inspect reports the current build operations before the worker starts", as
   `,
   );
   const app = daemon.runtime.find("notes")!;
-  await until(() => app.revision !== initial.revision && !app.building);
   const expected = { queries: ["count"], mutations: ["reset"], jobs: ["check"] };
   const updated = await runCli<{
     revision: string;
     running: boolean;
+    error: string | null;
     operations: Record<string, string[]>;
-  }>(home, "inspect", "notes");
+  }>(home, "inspect", "notes", "--wait");
+  assert.notEqual(updated.revision, initial.revision);
+  assert.equal(updated.error, null);
   assert.equal(updated.running, false);
   assert.deepEqual(updated.operations, expected);
   assert.deepEqual(
