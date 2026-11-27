@@ -463,7 +463,7 @@ export async function start(home: string, options: StartOptions = {}) {
             );
             return;
           }
-          const session = gate.session(host);
+          const session = gate.session(host, request.headers["user-agent"]);
           redirect(
             response,
             `/__fleet/login?app=${encodeURIComponent(destination)}`,
@@ -509,7 +509,7 @@ export async function start(home: string, options: StartOptions = {}) {
               );
             }
             phoneRouteClosed = routeClosed;
-            redirect(response, "/phone", gate.session(host).cookie);
+            redirect(response, "/phone", gate.session(host, request.headers["user-agent"]).cookie);
             return;
           }
           if (gate.authorized(request, host)) {
@@ -531,7 +531,7 @@ export async function start(home: string, options: StartOptions = {}) {
         redirect(
           response,
           isGate ? `/__fleet/login?app=${encodeURIComponent(destination)}` : "/",
-          gate.session(host).cookie,
+          gate.session(host, request.headers["user-agent"]).cookie,
         );
         return;
       }
@@ -559,6 +559,7 @@ export async function start(home: string, options: StartOptions = {}) {
         return;
       }
       if (url.pathname === "/__fleet/logout" && request.method === "POST") {
+        gate.revokeRequest(request);
         redirect(
           response,
           `${originFor("gate")}/__fleet/login`,
@@ -900,6 +901,19 @@ export async function start(home: string, options: StartOptions = {}) {
         json(response, 200, {
           url: `${originFor("gate")}/__fleet/claim?ticket=${gate.ticket("gate.fleet")}&app=${encodeURIComponent(appName)}`,
         });
+        return;
+      }
+      if (method === "gateSessions") {
+        json(response, 200, gate.sessions());
+        return;
+      }
+      if (method === "gateRevoke") {
+        const id = typeof args.id === "string" ? args.id : "";
+        if (!/^[0-9a-f]{12}$/.test(id) || !gate.revoke(id)) {
+          json(response, 404, { error: "Unknown Gate session." });
+          return;
+        }
+        json(response, 200, { revoked: true, id });
         return;
       }
       if (method === "reset") {

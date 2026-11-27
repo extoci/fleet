@@ -14,6 +14,8 @@ import {
   formatDoctor,
   formatError,
   formatGateCode,
+  formatGateSessions,
+  type GateSessionItem,
   formatHelp,
   formatInit,
   formatInspect,
@@ -520,6 +522,25 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "gate") {
+    if (args[0] === "sessions") {
+      const sessions = await rpc<GateSessionItem[]>("gateSessions");
+      out(values.json ? sessions : formatGateSessions(sessions));
+      return;
+    }
+    if (args[0] === "revoke") {
+      if (!args[1]) throw new Error("Usage: fleet gate revoke ID");
+      const result = await rpc<{ revoked: boolean; id: string }>("gateRevoke", { id: args[1] });
+      out(
+        values.json
+          ? result
+          : formatNotice(
+              "ok",
+              `Revoked Gate session ${result.id}.`,
+              "Other sessions remain signed in.",
+            ),
+      );
+      return;
+    }
     if (args[0] === "reset") {
       const result = await rpc("reset");
       out(values.json ? result : formatNotice("ok", "Disconnected all signed-in browsers."));

@@ -27,6 +27,14 @@ export interface AppListItem {
   jobsState?: Record<string, unknown>;
 }
 
+export interface GateSessionItem {
+  id: string;
+  host: string;
+  createdAt: string;
+  lastSeen: string;
+  userAgent: string;
+}
+
 export interface DoctorCheck {
   check: string;
   ok: boolean | null;
@@ -268,6 +276,8 @@ const HELP_GROUPS: HelpGroup[] = [
     items: [
       ["fleet setup --install", "Set up this computer and start Fleet at boot"],
       ["fleet gate", "Create a device sign-in code"],
+      ["fleet gate sessions", "List signed-in browser sessions"],
+      ["fleet gate revoke ID", "Revoke one signed-in browser session"],
       ["fleet gate reset", "Disconnect all signed-in browsers"],
       ["fleet phone", "Connect an iPhone with a QR code"],
       ["fleet phone off", "Remove Fleet's temporary setup route"],
@@ -545,6 +555,40 @@ export function formatGateCode(code: string, opts: UiOptions = {}): string {
     `  ${s.dim("Sign in at")}    ${s.violet("https://gate.fleet")}`,
     `  ${s.dim("Expires in")}    ${s.muted("10 minutes")}`,
   ].join("\n");
+}
+
+export function formatGateSessions(sessions: GateSessionItem[], opts: UiOptions = {}): string {
+  const color = opts.color ?? supportsColor();
+  const s = makeStyle(color);
+  const lines = [
+    brandHeader(sessions.length === 1 ? "1 gate session" : `${sessions.length} gate sessions`, {
+      color,
+    }),
+    "",
+  ];
+  if (!sessions.length) {
+    lines.push(`  ${s.muted("No signed-in browsers.")}`);
+    return lines.join("\n");
+  }
+  const rows = sessions.map((session) => ({
+    id: s.text(session.id),
+    host: s.violet(session.host),
+    device: s.text(session.userAgent),
+    seen: s.dim(session.lastSeen.slice(0, 16).replace("T", " ")),
+  }));
+  const idW = Math.max(4, ...rows.map((row) => visibleLength(row.id))) + 2;
+  const hostW = Math.max(8, ...rows.map((row) => visibleLength(row.host))) + 2;
+  const deviceW = Math.max(10, ...rows.map((row) => visibleLength(row.device))) + 2;
+  lines.push(
+    `  ${padRight(s.dim("ID"), idW)}${padRight(s.dim("HOST"), hostW)}${padRight(s.dim("DEVICE"), deviceW)}${s.dim("LAST SEEN")}`,
+  );
+  lines.push(`  ${s.dim("─".repeat(Math.min(76, idW + hostW + deviceW + 16)))}`);
+  for (const row of rows) {
+    lines.push(
+      `  ${padRight(row.id, idW)}${padRight(row.host, hostW)}${padRight(row.device, deviceW)}${row.seen}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export function formatPhoneSetup(
