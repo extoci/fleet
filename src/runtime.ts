@@ -210,6 +210,14 @@ interface JobRecord {
   runId?: string;
   lastRun?: string;
   error?: string;
+  failures?: number;
+}
+
+const jobRetryBaseMs = 30_000;
+const jobRetryCapMs = 15 * 60_000;
+
+function jobRetryDelay(failures: number): number {
+  return Math.min(jobRetryBaseMs * 2 ** Math.max(0, failures - 1), jobRetryCapMs);
 }
 
 export class Runtime {
@@ -219,6 +227,7 @@ export class Runtime {
   closed: boolean;
   ticking: boolean;
   terminations: Map<string, Promise<number>>;
+  runningJobs: Map<string, Promise<void>>;
   revisionListeners: Set<(app: LocalAppState) => void>;
   timer: ReturnType<typeof setInterval>;
 
@@ -229,6 +238,7 @@ export class Runtime {
     this.closed = false;
     this.ticking = false;
     this.terminations = new Map();
+    this.runningJobs = new Map();
     this.revisionListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e: unknown) => this.log("daemon", formatBuildError(e))),
@@ -689,6 +699,57 @@ export class Runtime {
     }
   }
 
+  finishJob(key: string, runId: string, update: (old: JobRecord) => JobRecord): void {
+    const jobsFile = path.join(this.home, "jobs.json");
+    const state = { ...readShared<Record<string, JobRecord>>(jobsFile, {}) };
+    const old = state[key];
+    if (!old || old.runId !== runId) return;
+    state[key] = update(old);
+    write(jobsFile, state);
+  }
+
+  async runJob(app: LocalAppState, job: JobSpec, key: string, runId: string): Promise<void> {
+    try {
+      await this.call(app, "jobs", job.name, null, { id: "owner" }, runId);
+      this.finishJob(key, runId, () => ({
+        due: Date.now() + job.everySeconds * 1000,
+        lastRun: new Date().toISOString(),
+      }));
+      this.log(app.id, `Job ${job.name} completed`);
+    } catch (error) {
+      const message = formatBuildError(error);
+      this.finishJob(key, runId, (old) => {
+        const failures = (old.failures || 0) + 1;
+        return {
+          ...old,
+          due: Date.now() + jobRetryDelay(failures),
+          error: message,
+          failures,
+        };
+      });
+      this.log(app.id, `Job ${job.name} failed: ${message}`);
+    }
+  }
+
+  startJob(app: LocalAppState, job: JobSpec, key: string, runId: string): void {
+    const running = this.runJob(app, job, key, runId).catch((error: unknown) => {
+      this.log("daemon", `Job state update failed: ${formatBuildError(error)}`);
+    });
+    this.runningJobs.set(key, running);
+    const clear = () => {
+      if (this.runningJobs.get(key) === running) this.runningJobs.delete(key);
+    };
+    running.then(clear, clear);
+  }
+
+  hasRunningJob(app: LocalAppState): boolean {
+    const prefix = `${app.id}/`;
+    for (const key of this.runningJobs.keys()) {
+      if (key.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
   async tick(): Promise<void> {
     if (this.ticking || this.closed) return;
     this.ticking = true;
@@ -702,22 +763,17 @@ export class Runtime {
       // Builds are independent per app — start them together so boot rebuilds
       // overlap instead of serializing on the save-to-serve path. Apps with a
       // debounced rebuild pending are left alone.
-      const building = new Map<LocalAppState, Promise<void>>();
       for (const app of this.apps.values()) {
         if (!app.rebuild) {
-          building.set(
-            app,
-            this.build(app).then(
-              () => undefined,
-              (error: unknown) => {
-                app.buildError = formatBuildError(error);
-              },
-            ),
+          void this.build(app).then(
+            () => undefined,
+            (error: unknown) => {
+              app.buildError = formatBuildError(error);
+            },
           );
         }
       }
       for (const app of this.apps.values()) {
-        await building.get(app);
         for (const job of app.jobs || []) {
           const key = `${app.id}/${job.name}`;
           const old = state[key];
@@ -728,6 +784,7 @@ export class Runtime {
             dirty = true;
             continue;
           }
+          if (this.runningJobs.has(key)) continue;
           if (old.due > now) {
             if (!old.runId && old.due > nextDue) {
               state[key] = { ...old, due: nextDue };
@@ -740,28 +797,13 @@ export class Runtime {
           // with the same runId after restart. External effects need idempotency.
           state[key] = { ...old, runId };
           write(jobsFile, state);
-          try {
-            await this.call(app, "jobs", job.name, null, { id: "owner" }, runId);
-            state[key] = {
-              due: Date.now() + job.everySeconds * 1000,
-              lastRun: new Date().toISOString(),
-            };
-            this.log(app.id, `Job ${job.name} completed`);
-          } catch (error) {
-            const message = formatBuildError(error);
-            state[key] = {
-              ...state[key],
-              due: Date.now() + 30_000,
-              error: message,
-            };
-            this.log(app.id, `Job ${job.name} failed: ${message}`);
-          }
-          dirty = true;
+          this.startJob(app, job, key, runId);
         }
         if (
           app.worker &&
           !app.warming &&
           !app.pending.size &&
+          !this.hasRunningJob(app) &&
           Date.now() - app.lastUsed > this.idleMs
         ) {
           this.unload(app);
@@ -773,6 +815,10 @@ export class Runtime {
     }
   }
 
+  async settleBuilds(): Promise<void> {
+    await Promise.allSettled([...this.apps.values()].map((app) => app.building).filter(Boolean));
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     clearInterval(this.timer);
@@ -782,6 +828,7 @@ export class Runtime {
       this.unload(app);
     }
     await Promise.allSettled([...this.apps.values()].map((app) => app.building).filter(Boolean));
+    await Promise.allSettled(this.runningJobs.values());
     await Promise.allSettled(this.terminations.values());
     while (this.ticking) {
       await new Promise((resolve) => setTimeout(resolve, 10));

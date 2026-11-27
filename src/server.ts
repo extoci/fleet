@@ -1161,8 +1161,12 @@ export async function start(home: string, options: StartOptions = {}) {
       }, 3000);
       announceTimer.unref();
       await runtime.tick();
+      await runtime.settleBuilds();
+      await runtime.tick();
       await announce();
     } else {
+      await runtime.tick();
+      await runtime.settleBuilds();
       await runtime.tick();
     }
     return { ...running, dnsPort: dnsServers[0]?.port, runtime, gate, close: cleanup };
