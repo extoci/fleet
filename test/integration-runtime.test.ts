@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import zlib from "node:zlib";
 import { test } from "bun:test";
 import { authority, mobileProfile } from "../src/certificates.ts";
 import { exportData, restoreData } from "../src/data.ts";
@@ -376,6 +377,8 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
     title: "Remote notes",
     icon: "/icon.png",
   });
+  const remoteClient = path.join(project, "client", "index.tsx");
+  write(remoteClient, fs.readFileSync(remoteClient, "utf8").replace("import './style.css';\n", ""));
   // Use an asset too large for the peer JSON response limit.
   const icon = Buffer.alloc(6_100_000, 42);
   write(path.join(project, "public", "icon.png"), icon);
@@ -435,6 +438,8 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   );
   await runCli(home, "alias", "media", aliasTarget);
   const [registered] = registeredPeers;
+  const peerRevision = registered.apps.find((app) => app.name === "remote-notes")?.revision;
+  assert.ok(peerRevision);
   await assert.rejects(
     peerRequest(
       {
@@ -474,6 +479,31 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   const bundle = await request(gateway, ca, "remote-notes.fleet", "/app.js", auth);
   assert.equal(bundle.status, 200);
   assert.ok(bundle.text.length > 1000);
+  assert.match(String(bundle.headers["cache-control"]), /no-cache/);
+  const versionedPath = `/app.js?v=${peerRevision}`;
+  const compressed = await request(gateway, ca, "remote-notes.fleet", versionedPath, {
+    ...auth,
+    headers: { "Accept-Encoding": "gzip, br" },
+  });
+  assert.equal(compressed.status, 200);
+  assert.equal(compressed.headers["content-encoding"], "br");
+  assert.equal(compressed.headers["cache-control"], "private, max-age=31536000, immutable");
+  assert.equal(compressed.headers.etag, `"${peerRevision}"`);
+  assert.equal(zlib.brotliDecompressSync(compressed.raw).toString(), bundle.text);
+  const gzipped = await request(gateway, ca, "remote-notes.fleet", versionedPath, {
+    ...auth,
+    headers: { "Accept-Encoding": "gzip, br;q=0" },
+  });
+  assert.equal(gzipped.status, 200);
+  assert.equal(gzipped.headers["content-encoding"], "gzip");
+  assert.equal(zlib.gunzipSync(gzipped.raw).toString(), bundle.text);
+  const unchanged = await request(gateway, ca, "remote-notes.fleet", versionedPath, {
+    ...auth,
+    headers: { "If-None-Match": String(compressed.headers.etag) },
+  });
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.text, "");
+  assert.equal(unchanged.headers["cache-control"], "private, max-age=31536000, immutable");
   const asset = await request(gateway, ca, "remote-notes.fleet", "/icon.png", auth);
   assert.equal(asset.status, 200);
   assert.deepEqual(asset.raw, icon);
@@ -494,6 +524,7 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
   const page = await request(gateway, ca, "remote-notes.fleet", "/watch/123", auth);
   assert.match(page.text, /<title>Remote notes<\/title>/);
   assert.match(page.text, /<link rel="icon" href="\/icon.png">/);
+  assert.doesNotMatch(page.text, /<link rel="stylesheet" href="\/app\.css/);
   const inspect = await runCli<{ operations: Record<string, string[]> }>(
     home,
     "inspect",
@@ -511,9 +542,33 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
       line.endsWith("Client error: Remote crash"),
     ),
   );
+  const computers = await runCli<
+    Array<{
+      id: string;
+      online: boolean;
+      address: string;
+      port: number;
+      apps: Array<{ name: string; running: boolean; revision: string | null }>;
+    }>
+  >(home, "peers");
+  assert.equal(computers.length, 1);
+  assert.equal(computers[0].id, registered.id);
+  assert.equal(computers[0].online, true);
+  assert.equal(computers[0].apps[0].name, "remote-notes");
+  assert.equal(computers[0].apps[0].revision, peerRevision);
+  assert.equal("token" in computers[0], false);
+  assert.equal("ca" in computers[0], false);
   const nodeApp = node.runtime.find("remote-notes")!;
   assert.ok(fs.existsSync(path.join(nodeHome, "data", nodeApp.id, "app.sqlite")));
   assert.equal(fs.existsSync(path.join(home, "data", nodeApp.id)), false);
+  await node.close();
+  nodeRef.current = undefined;
+  assert.deepEqual(await runCli(home, "peers", "remove", registered.id), {
+    removed: true,
+    id: registered.id,
+  });
+  assert.deepEqual(await runCli(home, "peers"), []);
+  assert.equal(read<PeerRecord[]>(path.join(home, "peers.json"), []).length, 0);
 });
 
 test("the phone setup delivers only the profile, signs in at gate.fleet/phone, and turns off setup automatically", async () => {

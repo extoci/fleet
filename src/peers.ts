@@ -35,6 +35,7 @@ export interface PeerAppRecord {
   error: string | null;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasCss: boolean;
   operations: Record<string, string[]>;
 }
 
@@ -42,6 +43,21 @@ export interface PeerRecord extends PeerTarget {
   id: string;
   apps: PeerAppRecord[];
   seen: number;
+}
+
+export interface PeerComputerView {
+  id: string;
+  address: string;
+  port: number;
+  online: boolean;
+  seen: number;
+  apps: Array<{
+    id: string;
+    name: string;
+    revision: string | null;
+    running: boolean;
+    error: string | null;
+  }>;
 }
 
 export interface PeerAppView extends PeerAppRecord {
@@ -150,6 +166,36 @@ export class Peers {
     return readShared<PeerRecord[]>(path.join(this.home, "peers.json"), []);
   }
 
+  computers(): PeerComputerView[] {
+    return this.all().map((peer) => ({
+      id: peer.id,
+      address: peer.address,
+      port: peer.port,
+      online: Date.now() - peer.seen < 15_000,
+      seen: peer.seen,
+      apps: peer.apps.map((app) => ({
+        id: app.id,
+        name: app.name,
+        revision: app.revision,
+        running: app.running,
+        error: app.error,
+      })),
+    }));
+  }
+
+  remove(id: string): boolean {
+    return withStateLock(this.home, () => {
+      const file = path.join(this.home, "peers.json");
+      const peers = read<PeerRecord[]>(file, []);
+      if (!peers.some((peer) => peer.id === id)) return false;
+      write(
+        file,
+        peers.filter((peer) => peer.id !== id),
+      );
+      return true;
+    });
+  }
+
   list(): PeerAppView[] {
     return this.all().flatMap((peer) =>
       peer.apps.map((app) => ({
@@ -242,6 +288,7 @@ export class Peers {
         error: typeof a.error === "string" ? a.error : null,
         head: headMetadata(a.head),
         hasPublic: a.hasPublic === true,
+        hasCss: a.hasCss !== false,
         operations: Object.fromEntries(
           operationKinds
             .filter((kind) =>
