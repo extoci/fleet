@@ -656,29 +656,58 @@ export async function start(home: string, options: StartOptions = {}) {
           "Cache-Control": "no-store",
           Connection: "keep-alive",
         });
-        response.write(`data: ${JSON.stringify({ revision: app.revision })}\n\n`);
-        let revision = app.revision;
-        const update = () => {
-          if (revision === app.revision) return false;
-          revision = app.revision;
-          response.write(`data: ${JSON.stringify({ revision })}\n\n`);
+        const current = () => (isPeerApp(app) ? (peers.find(app.name) ?? app) : app);
+        const revisionFor = () => current().revision ?? null;
+        const dataVersionFor = () => current().dataVersion || 0;
+        const emit = (type: "state" | "revision" | "data") => {
+          response.write(
+            `data: ${JSON.stringify({
+              type,
+              revision: revisionFor(),
+              dataVersion: dataVersionFor(),
+            })}\n\n`,
+          );
+        };
+        emit("state");
+        let revision = revisionFor();
+        let dataVersion = dataVersionFor();
+        const update = (type?: "revision" | "data") => {
+          const nextRevision = revisionFor();
+          const nextDataVersion = dataVersionFor();
+          if (nextRevision === revision && nextDataVersion === dataVersion) return false;
+          const kind = type || (nextRevision !== revision ? "revision" : "data");
+          revision = nextRevision;
+          dataVersion = nextDataVersion;
+          emit(kind);
           return true;
         };
-        // Local builds are pushed as soon as they finish; peer apps are polled.
-        const stop = runtime.onRevision((built) => {
-          if (built === app && gate.authorized(request, host)) update();
+        const authorizedUpdate = (type: "revision" | "data") => {
+          if (gate.authorized(request, host)) update(type);
+        };
+        // Local builds and commits are pushed immediately. Peer announcements
+        // carry peer data versions, while the interval remains a fallback for
+        // peer revisions and sign-in expiry.
+        const stopRevision = runtime.onRevision((built) => {
+          if (built === app) authorizedUpdate("revision");
+        });
+        const stopLocalData = runtime.onData((changed) => {
+          if (changed === app) authorizedUpdate("data");
+        });
+        const stopPeerData = peers.onData((changed) => {
+          if (isPeerApp(app) && changed.id === app.id) authorizedUpdate("data");
         });
         const interval = setInterval(() => {
           if (!gate.authorized(request, host)) {
             response.end();
             return;
           }
-          if (app.peer) app.revision = peers.find(app.name)?.revision ?? null;
           if (!update()) response.write(": keepalive\n\n");
         }, 1500);
         eventClients.add(response);
         response.once("close", () => {
-          stop();
+          stopRevision();
+          stopLocalData();
+          stopPeerData();
           clearInterval(interval);
           eventClients.delete(response);
         });
@@ -866,7 +895,7 @@ export async function start(home: string, options: StartOptions = {}) {
       send(
         response,
         200,
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${appHead(app)}${hasCss ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}</head><body><div id="app"></div>${clientErrorReporter}<script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');events.onmessage=e=>{if(JSON.parse(e.data).revision!==revision)location.reload()};</script></body></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${appHead(app)}${hasCss ? `<link rel="stylesheet" href="/app.css?v=${app.revision}">` : ""}</head><body><div id="app"></div>${clientErrorReporter}<script type="module" src="/app.js?v=${app.revision}"></script><script>const revision=${JSON.stringify(app.revision)};const events=new EventSource('/__fleet/events');window.__fleet={revision,events};events.onmessage=e=>{const state=JSON.parse(e.data);if(state.revision&&state.revision!==revision)location.reload()};</script></body></html>`,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1245,8 +1274,13 @@ export async function start(home: string, options: StartOptions = {}) {
         options.nodePort ?? config.nodePort ?? 42174,
         nodeHost,
       );
+      let announceAgain = false;
       const announce = async () => {
-        if (announcing || closed) return;
+        if (closed) return;
+        if (announcing) {
+          announceAgain = true;
+          return;
+        }
         announcing = true;
         try {
           await peerRequest(
@@ -1276,8 +1310,15 @@ export async function start(home: string, options: StartOptions = {}) {
           );
         } finally {
           announcing = false;
+          if (announceAgain) {
+            announceAgain = false;
+            void announce();
+          }
         }
       };
+      runtime.onData(() => {
+        void announce();
+      });
       announceTimer = setInterval(() => {
         void announce();
       }, 3000);

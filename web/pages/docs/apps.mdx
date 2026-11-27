@@ -97,7 +97,7 @@ render(<App />, document.getElementById('app'));
 
 Client helpers give you fine-grained control when you need it:
 
-- `useQuery(name, input?, { pollMs? })` returns `{ data, error }` and polls every 10 seconds while the tab is visible. Pass `{ pollMs: false }` or `{ pollMs: 0 }` to disable polling.
+- `useQuery(name, input?, { pollMs? })` returns `{ data, error }` and refreshes immediately when Fleet pushes a data-change event, when the tab becomes visible, and when the event stream reconnects. It does not poll by default; pass a positive `pollMs` only when an app explicitly needs interval polling.
 - `useMutation(name, { invalidate? })` refreshes all active queries by default. Pass `{ invalidate: ['notes'] }` to refresh specific queries or `{ invalidate: false }` to skip refreshing.
 - `call(kind, name, input?, { keepalive? })` invokes an operation directly without refetching queries — handy with `{ keepalive: true }` for small writes on page unload.
 

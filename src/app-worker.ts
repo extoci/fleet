@@ -123,6 +123,7 @@ async function run(message: WorkerMessage): Promise<void> {
     if (transaction) {
       db.exec("COMMIT");
       transaction = false;
+      parentPort?.postMessage({ data: true });
     }
     parentPort?.postMessage({ id, value: JSON.parse(encoded) });
   } catch (error) {

@@ -19,7 +19,7 @@ To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs ar
 
 Import useQuery, useMutation, and call from fleet/client. Fleet provides Preact. Do not install Preact in the app. useQuery returns { data, error } — data starts as undefined and error as null. Use call(kind, name, input) — kind is queries or mutations — to write without refetching all queries.
 
-useQuery(name, input, { pollMs }) polls every 10 seconds while the page is visible by default. Set pollMs to false or 0 to stop interval polling. useMutation(name, { invalidate }) refreshes all active queries by default. Set invalidate to an array of query names or to false to skip the refresh. Pass { keepalive: true } as the fourth argument to call for a small write during page unload.
+useQuery refreshes immediately when Fleet pushes a data-change event, when the tab becomes visible, and when the event stream reconnects; it does not poll on an interval by default. Pass useQuery(name, input, { pollMs }) with a positive interval only when an app explicitly needs polling. useMutation(name, { invalidate }) refreshes all active queries by default. Set invalidate to an array of query names or to false to skip the local refresh. Pass { keepalive: true } as the fourth argument to call for a small write during page unload.
 
 Put static files in public/. Set title, themeColor, icon, or manifest in fleet.json to change the HTML head — never change name or id. Use paths from the site root, such as /icon.svg, for icon and manifest.
 

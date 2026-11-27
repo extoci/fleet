@@ -254,7 +254,7 @@ if (useState !== preactUseState || reactRender !== compatRender)
       ) => {
         const url = String(route);
         win.requests.push({ route: url, keepalive: options?.keepalive });
-        if (win.delayPoll && url.endsWith("/defaultPoll")) {
+        if (win.delayPoll && url.endsWith("/timedPoll")) {
           win.delayPoll = false;
           return new Promise((resolve) => {
             win.finishPoll = () => resolve(Response.json({ value: "stale" }));
@@ -270,7 +270,8 @@ if (useState !== preactUseState || reactRender !== compatRender)
       import { render } from "preact";
       import { call, useMutation, useQuery } from "fleet/client";
       function App() {
-        const { data } = useQuery("defaultPoll");
+        const { data } = useQuery("timedPoll", null, { pollMs: 10_000 });
+        useQuery("defaultPoll");
         useQuery("noPoll", null, { pollMs: false });
         useQuery("zeroPoll", null, { pollMs: 0 });
         const selective = useMutation("selective", { invalidate: ["noPoll"] });
@@ -294,22 +295,29 @@ if (useState !== preactUseState || reactRender !== compatRender)
           route.split("/").at(-1),
         ),
       );
-    assert.deepEqual(await requestNames(), ["defaultPoll", "noPoll", "zeroPoll"]);
+    assert.deepEqual(await requestNames(), ["timedPoll", "defaultPoll", "noPoll", "zeroPoll"]);
     await page.evaluate(() => {
       (window as unknown as { delayPoll: boolean }).delayPoll = true;
     });
     await page.clock.fastForward(10_000);
-    assert.deepEqual(await requestNames(), ["defaultPoll", "noPoll", "zeroPoll", "defaultPoll"]);
+    assert.deepEqual(await requestNames(), [
+      "timedPoll",
+      "defaultPoll",
+      "noPoll",
+      "zeroPoll",
+      "timedPoll",
+    ]);
 
     await page.getByRole("button", { name: "Selective" }).click();
     await page.getByRole("button", { name: "Quiet" }).click();
     await page.getByRole("button", { name: "All" }).click();
     await page.getByRole("button", { name: "Leaving" }).click();
-    assert.deepEqual((await requestNames()).slice(4), [
+    assert.deepEqual((await requestNames()).slice(5), [
       "selective",
       "noPoll",
       "quiet",
       "all",
+      "timedPoll",
       "defaultPoll",
       "noPoll",
       "zeroPoll",
@@ -326,6 +334,31 @@ if (useState !== preactUseState || reactRender !== compatRender)
         keepalive: true,
       },
     );
+    const activeQueries = ["timedPoll", "defaultPoll", "noPoll", "zeroPoll"];
+    const expectRefresh = async (dispatch: string) => {
+      await page.evaluate((source) => {
+        const win = window as unknown as {
+          requests: Array<{ route: string }>;
+          __fleet: { events: EventSource };
+        };
+        win.requests.length = 0;
+        if (source === "data") {
+          win.__fleet.events.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({ type: "data", dataVersion: 1 }),
+            }),
+          );
+        } else if (source === "visibility") {
+          document.dispatchEvent(new Event("visibilitychange"));
+        } else {
+          win.__fleet.events.dispatchEvent(new Event("open"));
+        }
+      }, dispatch);
+      assert.deepEqual(await requestNames(), activeQueries);
+    };
+    await expectRefresh("data");
+    await expectRefresh("visibility");
+    await expectRefresh("reconnect");
     await page.evaluate(async () => {
       (window as unknown as { finishPoll?: () => void }).finishPoll?.();
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));

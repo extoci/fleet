@@ -20,6 +20,7 @@ import {
   request,
   runCli,
   signin,
+  streamEvents,
   until,
   wait,
 } from "./integration-helpers.ts";
@@ -476,6 +477,32 @@ test("one Gate and gateway serve apps from another computer with a pinned root a
     (JSON.parse(query.text) as { value: Array<{ text: string }> }).value[0].text,
     "Stored on the checkout computer",
   );
+  const stream = await streamEvents(gateway, ca, "remote-notes.fleet", auth);
+  try {
+    await until(() => stream.events.length > 0, 1000);
+    const nodeVersion = node.runtime.find("remote-notes")!.dataVersion;
+    const pushed = await request(
+      gateway,
+      ca,
+      "remote-notes.fleet",
+      "/__fleet/api/mutations/addNote",
+      {
+        ...auth,
+        method: "POST",
+        data: JSON.stringify({ text: "Peer push invalidation" }),
+      },
+    );
+    assert.equal(pushed.status, 200, pushed.text);
+    await until(
+      () =>
+        stream.events.some(
+          (event) => event.type === "data" && Number(event.dataVersion) >= nodeVersion + 1,
+        ),
+      2000,
+    );
+  } finally {
+    stream.close();
+  }
   const bundle = await request(gateway, ca, "remote-notes.fleet", "/app.js", auth);
   assert.equal(bundle.status, 200);
   assert.ok(bundle.text.length > 1000);

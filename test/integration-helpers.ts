@@ -150,6 +150,66 @@ export async function fixture(daemonOptions: StartOptions = {}) {
   return { home, project, daemon, ca: authority(home).pem };
 }
 
+export function streamEvents(
+  daemon: { httpsPort: number },
+  ca: string,
+  host: string,
+  { cookie }: { cookie?: string } = {},
+): Promise<{
+  status: number;
+  events: Array<Record<string, unknown>>;
+  close: () => void;
+}> {
+  return new Promise((resolve, reject) => {
+    const events: Array<Record<string, unknown>> = [];
+    let buffered = "";
+    const req = https.request(
+      {
+        host: "127.0.0.1",
+        port: daemon.httpsPort,
+        servername: host,
+        ca,
+        path: "/__fleet/events",
+        method: "GET",
+        headers: {
+          Host: `${host}:${daemon.httpsPort}`,
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+      },
+      (res) => {
+        res.on("data", (chunk: Buffer) => {
+          buffered += chunk.toString();
+          const frames = buffered.split("\n\n");
+          buffered = frames.pop() || "";
+          for (const frame of frames) {
+            const data = frame
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trimStart())
+              .join("\n");
+            if (!data) continue;
+            try {
+              events.push(JSON.parse(data) as Record<string, unknown>);
+            } catch {
+              // Keepalives are comments and do not parse as event data.
+            }
+          }
+        });
+        resolve({
+          status: res.statusCode ?? 0,
+          events,
+          close: () => req.destroy(),
+        });
+      },
+    );
+    req.setTimeout(10000, () => req.destroy(new Error("Test event stream timed out.")));
+    req.on("error", (error) => {
+      if ((error as NodeJS.ErrnoException).code !== "ECONNRESET") reject(error);
+    });
+    req.end();
+  });
+}
+
 export async function signin(
   daemon: Awaited<ReturnType<typeof start>>,
   ca: string,
