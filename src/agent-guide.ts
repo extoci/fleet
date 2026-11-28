@@ -29,6 +29,10 @@ Fleet Gate handles sign-in. Do not add a separate login system.
 
 Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
 
+Keep this app in git (initialize a repo here if it is not already inside one) and make small, granular commits as you complete working changes.
+
+First-time setup: ask the user if they want to publish this repo (private by default) to their git host (e.g. GitHub). Once they answer (and after setting up the remote if they say yes), remove this "First-time setup" paragraph from this app's AGENTS.md.
+
 fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet check, fleet call, fleet emit, fleet events, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations, jobs, and emitted events write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
 
 You are done when fleet inspect ${name} --wait reports a new revision with no error and, if an operation changed, fleet call or fleet emit exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.

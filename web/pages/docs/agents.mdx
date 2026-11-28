@@ -58,6 +58,10 @@ After an edit, your agent should verify two things before reporting `https://<ap
 
 For changes that touch stored data or visual behavior you want double-checked, ask explicitly for a browser pass or data check.
 
+## Keep each app in git
+
+The generated `AGENTS.md` instructs your agent to keep each app in its own git repository (unless it already lives inside one) and make small, granular commits after working changes. On first-time setup, it asks whether you want to publish the repository as private to your git host (such as GitHub), then removes that prompt from the app's `AGENTS.md` once you answer.
+
 ## Back up before risky edits
 
 Before changing how an app stores data, take a consistent SQLite snapshot:

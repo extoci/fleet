@@ -48,6 +48,11 @@ test("fleet agent prints the shared contract and installs SKILL.md", async () =>
   assert.match(stdout, /A Fleet app is a directory anywhere on this computer/);
   assert.match(stdout, /scaffold a directory with `fleet init`/);
   assert.match(stdout, /## Fleet app/);
+  assert.match(stdout, /Keep this app in git/);
+  assert.match(
+    stdout,
+    /First-time setup: ask the user if they want to publish this repo \(private by default\)/,
+  );
   assert.match(stdout, /You are done when fleet inspect NAME --wait reports a new revision/);
 
   const { stdout: jsonOut } = await exec(process.execPath, [cli, "agent", "--json"]);
@@ -134,12 +139,22 @@ test("init writes public source and agent guidance while keeping Fleet state and
   assert.match(agents, /list\(prefix\) returns up to 1,000 items/);
   assert.match(agents, /rolls back all ctx.db writes/);
   assert.match(agents, /call\(kind, name, input\)/);
+  assert.match(agents, /Keep this app in git/);
+  assert.match(
+    agents,
+    /First-time setup: ask the user if they want to publish this repo \(private by default\)/,
+  );
   assert.match(agents, /You are done when fleet inspect notes --wait reports a new revision/);
 
   fs.unlinkSync(types);
   await init(app);
   assert.match(fs.readFileSync(types, "utf8"), /interface FleetCtx/);
   assert.equal(fs.readFileSync(path.join(app, "AGENTS.md"), "utf8"), agents);
+  const withoutFirstTime = agents.replace(/\nFirst-time setup:[^\n]+\n/, "\n");
+  assert.notEqual(withoutFirstTime, agents);
+  fs.writeFileSync(path.join(app, "AGENTS.md"), withoutFirstTime);
+  await init(app);
+  assert.equal(fs.readFileSync(path.join(app, "AGENTS.md"), "utf8"), withoutFirstTime);
   const existing = path.join(temporary, "existing");
   fs.mkdirSync(existing);
   const existingTypes = path.join(existing, "fleet.d.ts");
