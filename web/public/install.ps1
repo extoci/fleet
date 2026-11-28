@@ -145,6 +145,7 @@ try {
   Write-Host ''
   Write-Host 'Next steps:'
   Write-Host '  fleet setup --install'
+  Write-Host '  fleet agent --install'
   Write-Host '  fleet init notes'
   Write-Host '  fleet open notes'
 } finally {

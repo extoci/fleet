@@ -33,6 +33,8 @@ fleet update
 
 Fleet checks GitHub for a newer stable release and verifies its checksum before installing it. If the background service is running, Fleet restarts it and may ask for administrator access. Your apps, databases, and device access carry over.
 
+After updating, run `fleet agent --install` on any machine where you installed the global `SKILL.md` so coding agents get the latest Fleet guidance.
+
 If you have Fleet 2.0.0, run the [installer](/docs/quickstart) once and then run `fleet setup --install` to refresh your background service. If you run Fleet in the foreground, stop the daemon before updating.
 
 ## Creating and managing apps

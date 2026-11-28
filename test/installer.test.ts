@@ -77,7 +77,12 @@ unixTest("install.sh verifies checksums and installs a working fleet command", (
     FLEET_NO_INSTALL_BUN: "1",
   };
 
-  execFileSync("sh", [path.join(repoRoot, "install.sh")], { env, stdio: "pipe" });
+  const installOut = execFileSync("sh", [path.join(repoRoot, "install.sh")], {
+    env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.match(installOut, /fleet agent --install/);
   const installedFleet = path.join(binDir, "fleet");
   assert.ok(fs.existsSync(installedFleet));
   assert.equal(
@@ -192,6 +197,7 @@ globalThis.fetch = async (url) => {
     updated: true,
     previous: pkg.version,
     version: nextVersion,
+    hint: "Run fleet agent --install to refresh any installed agent skill.",
   });
   assert.equal(version(), `Fleet ${nextVersion}`);
   assert.equal(fs.readFileSync(restarts, "utf8"), `${pkg.version}\n${nextVersion}\n`);
@@ -201,5 +207,38 @@ globalThis.fetch = async (url) => {
     previous: nextVersion,
     version: nextVersion,
   });
+
+  // Human-readable output includes the agent skill refresh tip after an update.
+  const humanVersion = `${major}.${minor}.${patch + 2}`;
+  fs.writeFileSync(
+    path.join(bundleDir, "package.json"),
+    JSON.stringify({ ...pkg, version: humanVersion }),
+  );
+  pack();
+  fs.writeFileSync(
+    preload,
+    `
+globalThis.fetch = async (url) => {
+  if (url === "https://api.github.com/repos/extoci/fleet/releases/latest") {
+    return Response.json({ tag_name: "v${humanVersion}" });
+  }
+  const origin = "https://github.com/extoci/fleet/releases/download/v${humanVersion}";
+  if (url === origin + "/fleet.tar.gz") return new Response(Bun.file(${JSON.stringify(archive)}));
+  if (url === origin + "/fleet.tar.gz.sha256") return new Response(Bun.file(${JSON.stringify(checksumFile)}));
+  throw new Error("Unexpected download " + url);
+};`,
+  );
+  const humanOut = execFileSync(
+    process.execPath,
+    ["--preload", preload, cli, "update", "--home", home],
+    {
+      env: { ...process.env, NO_COLOR: "1" },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 25_000,
+    },
+  );
+  assert.match(humanOut, new RegExp(`Updated Fleet from ${nextVersion} to ${humanVersion}\\.`));
+  assert.match(humanOut, /Run fleet agent --install to refresh any installed agent skill\./);
   assert.ok(!fs.existsSync(`${runtime}.update`));
 }, 30_000);

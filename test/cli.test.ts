@@ -48,6 +48,10 @@ test("fleet agent prints the shared contract and installs SKILL.md", async () =>
   assert.match(stdout, /A Fleet app is a directory anywhere on this computer/);
   assert.match(stdout, /scaffold a directory with `fleet init`/);
   assert.match(stdout, /## Fleet app/);
+  assert.match(
+    stdout,
+    /When explicitly asked to update Fleet, run `fleet update`, then run `fleet agent --install`/,
+  );
   assert.match(stdout, /Keep this app in git/);
   assert.match(
     stdout,
