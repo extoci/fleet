@@ -289,7 +289,7 @@ test("inspect reports the current build operations before the worker starts", as
   `,
   );
   const app = daemon.runtime.find("notes")!;
-  const expected = { queries: ["count"], mutations: ["reset"], jobs: ["check"] };
+  const expected = { queries: ["count"], mutations: ["reset"], jobs: ["check"], events: [] };
   const updated = await runCli<{
     revision: string;
     running: boolean;

@@ -5,17 +5,29 @@ interface FleetDb {
   list<T = unknown>(prefix?: string): Array<{ key: string; value: T }>;
 }
 
+interface FleetEvent {
+  readonly id: string;
+  readonly topic: string;
+  readonly source: string;
+  readonly at: string;
+  readonly depth: number;
+}
+
 interface FleetCtx {
   user: { id: string };
   db: FleetDb;
   env: Readonly<Record<string, string | undefined>>;
   log(...values: unknown[]): void;
+  emit(topic: string, payload?: unknown): void;
   runId?: string;
+  event?: FleetEvent;
+  eventId?: string;
 }
 
 declare module "fleet/server" {
   export type FleetCtx = globalThis.FleetCtx;
   export type FleetDb = globalThis.FleetDb;
+  export type FleetEvent = globalThis.FleetEvent;
 }
 
 declare module "fleet/client" {

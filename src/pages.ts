@@ -380,3 +380,43 @@ export const unavailablePage = (gateUrl = "", options: PageOptions = {}): string
       ...options,
     },
   );
+
+export const servicePage = (
+  params: {
+    name: string;
+    revision?: string | null;
+    operations?: {
+      queries?: string[];
+      mutations?: string[];
+      jobs?: string[];
+      events?: string[];
+    };
+  },
+  gateUrl = "",
+  options: PageOptions = {},
+): string => {
+  const groups = [
+    ["Queries", params.operations?.queries ?? []],
+    ["Mutations", params.operations?.mutations ?? []],
+    ["Jobs", params.operations?.jobs ?? []],
+    ["Events", params.operations?.events ?? []],
+  ] as const;
+  const rows = groups
+    .filter(([, items]) => items.length > 0)
+    .map(
+      ([label, items]) =>
+        `<li class="app-row"><span class="app-name">${label}</span><span class="app-status">${items.map((item) => `<code>${escape(item)}</code>`).join(" ")}</span></li>`,
+    )
+    .join("");
+  const summary = rows
+    ? `<ul class="app-list">${rows}</ul>`
+    : '<p class="empty">No server operations exported yet.</p>';
+  return page(
+    params.name,
+    `<h1>${escape(params.name)} <span>service</span></h1><p>Headless Fleet service with no browser UI. Call it with <code>fleet call ${escape(params.name)}</code> or trigger it with <code>fleet emit</code>.</p>${summary}${gateUrl ? `<div class="actions" style="margin-top:24px"><a class="text-link" href="${escape(gateUrl)}">All apps</a></div>` : ""}`,
+    {
+      brandHref: gateUrl || undefined,
+      ...options,
+    },
+  );
+};

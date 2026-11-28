@@ -7,6 +7,7 @@ import {
   offlinePage,
   phoneConnectedPage,
   phoneSetupPage,
+  servicePage,
   unavailablePage,
   wakePage,
 } from "../src/pages.ts";
@@ -171,4 +172,21 @@ test("phoneConnectedPage, wakePage, offlinePage, and unavailablePage render expe
 
   const unavailable = unavailablePage("https://gate.fleet");
   assert.match(unavailable, /This app <span>is unavailable\.<\/span>/);
+
+  const svc = servicePage(
+    {
+      name: "notify",
+      operations: {
+        queries: ["recent"],
+        mutations: ["ping"],
+        events: ["alert.*", "workout.logged"],
+      },
+    },
+    "https://gate.fleet",
+  );
+  assert.match(svc, /<h1>notify <span>service<\/span><\/h1>/);
+  assert.match(svc, /Headless Fleet service/);
+  assert.match(svc, /<code>alert\.\*<\/code>/);
+  assert.match(svc, /<code>workout\.logged<\/code>/);
+  assert.match(svc, /href="https:\/\/gate\.fleet"/);
 });

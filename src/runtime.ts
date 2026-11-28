@@ -10,6 +10,22 @@ import zlib from "node:zlib";
 import type { BunPlugin } from "bun";
 import type { OperationKind, OperationMap } from "./app-definition.ts";
 import {
+  type EmittedEvent,
+  type EmitResult,
+  type EventDelivery,
+  type EventHistoryEntry,
+  type EventMeta,
+  type EventStore,
+  encodeEventPayload,
+  eventRetryDelay,
+  MAX_EVENT_ATTEMPTS,
+  MAX_EVENT_DEPTH,
+  MAX_PENDING_EVENTS,
+  MAX_RECENT_EVENTS,
+  matchesEventPattern,
+  validateEventTopic,
+} from "./events.ts";
+import {
   type HeadMetadata,
   headMetadata,
   type JobSpec,
@@ -157,6 +173,7 @@ interface BuildMeta {
   operations: OperationMap;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasClient: boolean;
   hasCss: boolean;
 }
 
@@ -184,6 +201,7 @@ export interface LocalAppState extends RegisteredApp {
   operations?: OperationMap;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasClient: boolean;
   hasCss: boolean;
   watcher?: fs.FSWatcher | null;
   rebuild?: ReturnType<typeof setTimeout> | null;
@@ -206,6 +224,7 @@ export interface AppSummary {
   jobs: JobSpec[];
   head: HeadMetadata;
   hasPublic: boolean;
+  hasClient: boolean;
   hasCss: boolean;
   dataVersion: number;
 }
@@ -225,6 +244,27 @@ function jobRetryDelay(failures: number): number {
   return Math.min(jobRetryBaseMs * 2 ** Math.max(0, failures - 1), jobRetryCapMs);
 }
 
+export interface PublishedEvent {
+  event: EventMeta;
+  payload: unknown;
+}
+
+export interface EventStatusView {
+  subscriptions: Array<{ pattern: string; app: string }>;
+  pending: Array<{
+    id: string;
+    eventId: string;
+    topic: string;
+    source: string;
+    targetApp: string;
+    handler: string;
+    failures: number;
+    due: string;
+    error?: string;
+  }>;
+  recent: EventHistoryEntry[];
+}
+
 export class Runtime {
   home: string;
   idleMs: number;
@@ -233,8 +273,10 @@ export class Runtime {
   ticking: boolean;
   terminations: Map<string, Promise<number>>;
   runningJobs: Map<string, Promise<void>>;
+  runningEvents: Map<string, Promise<void>>;
   revisionListeners: Set<(app: LocalAppState) => void>;
   dataListeners: Set<(app: LocalAppState) => void>;
+  publishListeners: Set<(published: PublishedEvent) => void>;
   timer: ReturnType<typeof setInterval>;
 
   constructor(home: string, { idleMs = 30_000, pollMs = 1500 } = {}) {
@@ -245,8 +287,10 @@ export class Runtime {
     this.ticking = false;
     this.terminations = new Map();
     this.runningJobs = new Map();
+    this.runningEvents = new Map();
     this.revisionListeners = new Set();
     this.dataListeners = new Set();
+    this.publishListeners = new Set();
     this.timer = setInterval(
       () => this.tick().catch((e: unknown) => this.log("daemon", formatBuildError(e))),
       pollMs,
@@ -296,6 +340,12 @@ export class Runtime {
           operations: last?.operations,
           head: last?.head || {},
           hasPublic: last?.hasPublic || false,
+          hasClient:
+            last?.hasClient ??
+            Boolean(
+              last &&
+              fs.existsSync(path.join(this.home, "builds", app.id, last.revision, "app.js")),
+            ),
           hasCss:
             last?.hasCss ??
             Boolean(
@@ -373,6 +423,13 @@ export class Runtime {
     };
   }
 
+  onPublish(listener: (published: PublishedEvent) => void): () => void {
+    this.publishListeners.add(listener);
+    return () => {
+      this.publishListeners.delete(listener);
+    };
+  }
+
   dataChanged(app: LocalAppState): void {
     app.dataVersion++;
     const file = path.join(this.home, "data-versions.json");
@@ -402,6 +459,7 @@ export class Runtime {
       jobs: a.jobs || [],
       head: a.head,
       hasPublic: a.hasPublic,
+      hasClient: a.hasClient,
       hasCss: a.hasCss,
       dataVersion: a.dataVersion,
     }));
@@ -434,17 +492,21 @@ export class Runtime {
       app.checked = stamp;
       const dir = path.join(this.home, "builds", app.id, stamp);
       try {
+        const clientEntry = path.join(app.directory, "client", "index.tsx");
+        const hasClient = fs.existsSync(clientEntry);
         const [client, server] = await Promise.all([
-          Bun.build({
-            entrypoints: [path.join(app.directory, "client", "index.tsx")],
-            target: "browser",
-            format: "esm",
-            minify: true,
-            metafile: true,
-            naming: "app.[ext]",
-            plugins: [fleetClientPlugin],
-            jsx: { runtime: "automatic", importSource: "preact" },
-          }),
+          hasClient
+            ? Bun.build({
+                entrypoints: [clientEntry],
+                target: "browser",
+                format: "esm",
+                minify: true,
+                metafile: true,
+                naming: "app.[ext]",
+                plugins: [fleetClientPlugin],
+                jsx: { runtime: "automatic", importSource: "preact" },
+              })
+            : Promise.resolve(null),
           Bun.build({
             entrypoints: [path.join(app.directory, "server", "index.ts")],
             target: "bun",
@@ -453,20 +515,22 @@ export class Runtime {
             naming: "server.mjs",
           }),
         ]);
-        for (const result of [client, server]) {
+        for (const result of client ? [client, server] : [server]) {
           if (!result.success) {
             const detail = result.logs.map((log) => log.message).join("\n");
             throw new Error(detail || "App build failed.");
           }
         }
-        // Never replace the current build until both halves compile and the
+        // Never replace the current build until all halves compile and the
         // backend module loads. Validation runs without opening the app data.
-        const clientBuffers = await Promise.all(
-          client.outputs.map(async (output) => ({
-            name: path.basename(output.path),
-            bytes: Buffer.from(await output.arrayBuffer()),
-          })),
-        );
+        const clientBuffers = client
+          ? await Promise.all(
+              client.outputs.map(async (output) => ({
+                name: path.basename(output.path),
+                bytes: Buffer.from(await output.arrayBuffer()),
+              })),
+            )
+          : [];
         const serverBuffers = await Promise.all(
           server.outputs.map(async (output) => ({
             name: path.basename(output.path),
@@ -503,12 +567,13 @@ export class Runtime {
         ]);
         if (this.closed) return false;
         const metaInputs = [
-          ...Object.keys(client.metafile?.inputs ?? {}),
+          ...Object.keys(client?.metafile?.inputs ?? {}),
           ...Object.keys(server.metafile?.inputs ?? {}),
         ].map((file) => path.resolve(file));
         const buildInputs = [
           path.join(app.directory, "fleet.json"),
           path.join(app.directory, ".env.fleet.server"),
+          clientEntry,
           ...metaInputs,
         ].filter(
           (file) =>
@@ -523,6 +588,7 @@ export class Runtime {
           operations,
           head: headMetadata(current),
           hasPublic: publicFiles.length > 0,
+          hasClient,
           hasCss: clientBuffers.some((output) => output.name === "app.css"),
         };
         write(path.join(this.home, "builds", app.id, "current.json"), next);
@@ -564,6 +630,9 @@ export class Runtime {
             app.operations = last.operations;
             app.head = last.head || {};
             app.hasPublic = last.hasPublic || false;
+            app.hasClient =
+              last.hasClient ??
+              fs.existsSync(path.join(this.home, "builds", app.id, last.revision, "app.js"));
             app.hasCss =
               last.hasCss ??
               fs.existsSync(path.join(this.home, "builds", app.id, last.revision, "app.css"));
@@ -639,6 +708,7 @@ export class Runtime {
         workerData: {
           module: pathToFileURL(path.join(app.buildDir, "server.mjs")).href,
           database,
+          appName: app.name,
           env: fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, "utf8")) : {},
         },
         resourceLimits: { maxOldGenerationSizeMb: 128 },
@@ -658,6 +728,8 @@ export class Runtime {
             operations?: OperationMap;
             log?: string;
             data?: boolean;
+            emitted?: EmittedEvent[];
+            depth?: number;
             id?: string;
             error?: string;
             value?: unknown;
@@ -672,6 +744,12 @@ export class Runtime {
               this.log(app.id, message.log);
             } else if (message.data) {
               this.dataChanged(app);
+              if (message.emitted?.length) {
+                const depth = message.depth ?? 0;
+                for (const item of message.emitted) {
+                  this.emitEvent(app.name, item.topic, item.payload, depth);
+                }
+              }
             } else if (message.id) {
               const pending = app.pending.get(message.id);
               if (pending) {
@@ -712,6 +790,7 @@ export class Runtime {
     input: unknown,
     user: { id: string } = { id: "owner" },
     runId?: string,
+    event?: EventMeta,
   ): Promise<unknown> {
     const worker = await this.wake(app);
     if (app.worker !== worker) {
@@ -730,10 +809,10 @@ export class Runtime {
           );
           this.unload(app);
         },
-        kind === "jobs" ? 30_000 : 15_000,
+        kind === "jobs" || kind === "events" ? 30_000 : 15_000,
       );
       app.pending.set(id, { resolve, reject, timer });
-      worker.postMessage({ id, kind, name, input, user, runId });
+      worker.postMessage({ id, kind, name, input, user, runId, event });
     });
   }
 
@@ -806,6 +885,225 @@ export class Runtime {
     return false;
   }
 
+  hasRunningEvent(app: LocalAppState): boolean {
+    const prefix = `${app.id}/`;
+    for (const key of this.runningEvents.keys()) {
+      if (key.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  readEventStore(): EventStore {
+    const file = path.join(this.home, "events.json");
+    const raw = readShared<Partial<EventStore>>(file, {});
+    return {
+      pending: Array.isArray(raw.pending) ? [...raw.pending] : [],
+      recent: Array.isArray(raw.recent) ? [...raw.recent] : [],
+    };
+  }
+
+  writeEventStore(store: EventStore): void {
+    write(path.join(this.home, "events.json"), {
+      pending: store.pending.slice(-MAX_PENDING_EVENTS),
+      recent: store.recent.slice(0, MAX_RECENT_EVENTS),
+    });
+  }
+
+  enqueueLocalEvent(event: EventMeta, payload: unknown): Array<{ app: string; handler: string }> {
+    this.sync();
+    const targets: Array<{ app: string; handler: string }> = [];
+    const deliveries: Array<{ app: LocalAppState; delivery: EventDelivery }> = [];
+    const now = Date.now();
+    for (const app of this.apps.values()) {
+      const patterns = app.operations?.events || [];
+      for (const handler of patterns) {
+        if (!matchesEventPattern(handler, event.topic)) continue;
+        const delivery: EventDelivery = {
+          id: randomUUID(),
+          eventId: event.id,
+          topic: event.topic,
+          source: event.source,
+          payload,
+          at: event.at,
+          depth: event.depth,
+          targetAppId: app.id,
+          targetAppName: app.name,
+          handler,
+          due: now,
+          failures: 0,
+        };
+        targets.push({ app: app.name, handler });
+        deliveries.push({ app, delivery });
+      }
+    }
+    if (!deliveries.length) return targets;
+    const store = this.readEventStore();
+    for (const { delivery } of deliveries) store.pending.push(delivery);
+    this.writeEventStore(store);
+    if (!this.closed) {
+      for (const { app, delivery } of deliveries) this.startEventDelivery(app, delivery);
+    }
+    return targets;
+  }
+
+  emitEvent(
+    source: string,
+    rawTopic: string,
+    rawPayload: unknown = null,
+    depth = 0,
+    options: { notifyPeers?: boolean; eventId?: string; at?: string } = {},
+  ): EmitResult {
+    const topic = validateEventTopic(rawTopic);
+    const payload = encodeEventPayload(rawPayload);
+    const eventId = options.eventId || randomUUID();
+    const at = options.at || new Date().toISOString();
+    if (depth >= MAX_EVENT_DEPTH) {
+      const reason = `Max event hop depth (${MAX_EVENT_DEPTH}) reached.`;
+      this.log("daemon", `Dropped event ${topic} from ${source}: ${reason}`);
+      const store = this.readEventStore();
+      store.recent.unshift({
+        eventId,
+        topic,
+        source,
+        targetApp: "*",
+        handler: "*",
+        status: "dropped",
+        at,
+        finishedAt: new Date().toISOString(),
+        attempts: 0,
+        error: reason,
+      });
+      this.writeEventStore(store);
+      return { eventId, topic, source, at, matched: 0, dropped: true, targets: [] };
+    }
+    const event: EventMeta = { id: eventId, topic, source, at, depth };
+    const targets = this.enqueueLocalEvent(event, payload);
+    if (options.notifyPeers !== false) {
+      for (const listener of this.publishListeners) listener({ event, payload });
+    }
+    return { eventId, topic, source, at, matched: targets.length, targets };
+  }
+
+  eventsStatus(): EventStatusView {
+    this.sync();
+    const subscriptions: Array<{ pattern: string; app: string }> = [];
+    for (const app of this.apps.values()) {
+      for (const pattern of app.operations?.events || []) {
+        subscriptions.push({ pattern, app: app.name });
+      }
+    }
+    subscriptions.sort((a, b) => a.pattern.localeCompare(b.pattern) || a.app.localeCompare(b.app));
+    const store = this.readEventStore();
+    return {
+      subscriptions,
+      pending: store.pending.map((item) => ({
+        id: item.id,
+        eventId: item.eventId,
+        topic: item.topic,
+        source: item.source,
+        targetApp: item.targetAppName,
+        handler: item.handler,
+        failures: item.failures,
+        due: new Date(item.due).toISOString(),
+        ...(item.error ? { error: item.error } : {}),
+      })),
+      recent: store.recent,
+    };
+  }
+
+  finishEventDelivery(
+    deliveryId: string,
+    update: (delivery: EventDelivery, store: EventStore) => void,
+  ): void {
+    const store = this.readEventStore();
+    const index = store.pending.findIndex((item) => item.id === deliveryId);
+    if (index === -1) return;
+    const delivery = store.pending[index];
+    update(delivery, store);
+    this.writeEventStore(store);
+  }
+
+  async runEventDelivery(app: LocalAppState, delivery: EventDelivery): Promise<void> {
+    const event: EventMeta = {
+      id: delivery.eventId,
+      topic: delivery.topic,
+      source: delivery.source,
+      at: delivery.at,
+      depth: delivery.depth,
+    };
+    try {
+      await this.call(
+        app,
+        "events",
+        delivery.handler,
+        delivery.payload,
+        { id: "owner" },
+        undefined,
+        event,
+      );
+      this.finishEventDelivery(delivery.id, (current, store) => {
+        store.pending = store.pending.filter((item) => item.id !== current.id);
+        store.recent.unshift({
+          eventId: current.eventId,
+          topic: current.topic,
+          source: current.source,
+          targetApp: current.targetAppName,
+          handler: current.handler,
+          status: "delivered",
+          at: current.at,
+          finishedAt: new Date().toISOString(),
+          attempts: current.failures + 1,
+        });
+      });
+      this.log(app.id, `Event ${delivery.topic} (${delivery.handler}) delivered`);
+    } catch (error) {
+      const message = formatBuildError(error);
+      this.finishEventDelivery(delivery.id, (current, store) => {
+        const failures = current.failures + 1;
+        if (failures >= MAX_EVENT_ATTEMPTS) {
+          store.pending = store.pending.filter((item) => item.id !== current.id);
+          store.recent.unshift({
+            eventId: current.eventId,
+            topic: current.topic,
+            source: current.source,
+            targetApp: current.targetAppName,
+            handler: current.handler,
+            status: "failed",
+            at: current.at,
+            finishedAt: new Date().toISOString(),
+            attempts: failures,
+            error: message,
+          });
+        } else {
+          store.pending = store.pending.map((item) =>
+            item.id === current.id
+              ? {
+                  ...item,
+                  failures,
+                  due: Date.now() + eventRetryDelay(failures),
+                  error: message,
+                }
+              : item,
+          );
+        }
+      });
+      this.log(app.id, `Event ${delivery.topic} (${delivery.handler}) failed: ${message}`);
+    }
+  }
+
+  startEventDelivery(app: LocalAppState, delivery: EventDelivery): void {
+    const key = `${app.id}/${delivery.id}`;
+    if (this.runningEvents.has(key)) return;
+    const running = this.runEventDelivery(app, delivery).catch((error: unknown) => {
+      this.log("daemon", `Event delivery update failed: ${formatBuildError(error)}`);
+    });
+    this.runningEvents.set(key, running);
+    const clear = () => {
+      if (this.runningEvents.get(key) === running) this.runningEvents.delete(key);
+    };
+    running.then(clear, clear);
+  }
+
   async tick(): Promise<void> {
     if (this.ticking || this.closed) return;
     this.ticking = true;
@@ -855,17 +1153,46 @@ export class Runtime {
           write(jobsFile, state);
           this.startJob(app, job, key, runId);
         }
+      }
+      if (dirty) write(jobsFile, state);
+
+      const eventStore = this.readEventStore();
+      if (eventStore.pending.length) {
+        const now = Date.now();
+        let pruned = false;
+        const kept: EventDelivery[] = [];
+        const due: Array<{ app: LocalAppState; delivery: EventDelivery }> = [];
+        for (const delivery of eventStore.pending) {
+          const app = this.apps.get(delivery.targetAppId);
+          if (!app) {
+            pruned = true;
+            continue;
+          }
+          kept.push(delivery);
+          if (
+            delivery.due <= now &&
+            !this.runningEvents.has(`${app.id}/${delivery.id}`) &&
+            app.operations?.events?.includes(delivery.handler)
+          ) {
+            due.push({ app, delivery });
+          }
+        }
+        if (pruned) this.writeEventStore({ ...eventStore, pending: kept });
+        for (const { app, delivery } of due) this.startEventDelivery(app, delivery);
+      }
+
+      for (const app of this.apps.values()) {
         if (
           app.worker &&
           !app.warming &&
           !app.pending.size &&
           !this.hasRunningJob(app) &&
+          !this.hasRunningEvent(app) &&
           Date.now() - app.lastUsed > this.idleMs
         ) {
           this.unload(app);
         }
       }
-      if (dirty) write(jobsFile, state);
     } finally {
       this.ticking = false;
     }
@@ -873,6 +1200,12 @@ export class Runtime {
 
   async settleBuilds(): Promise<void> {
     await Promise.allSettled([...this.apps.values()].map((app) => app.building).filter(Boolean));
+  }
+
+  async settleEvents(): Promise<void> {
+    while (this.runningEvents.size) {
+      await Promise.allSettled([...this.runningEvents.values()]);
+    }
   }
 
   async close(): Promise<void> {
@@ -885,6 +1218,7 @@ export class Runtime {
     }
     await Promise.allSettled([...this.apps.values()].map((app) => app.building).filter(Boolean));
     await Promise.allSettled(this.runningJobs.values());
+    await Promise.allSettled(this.runningEvents.values());
     await Promise.allSettled(this.terminations.values());
     while (this.ticking) {
       await new Promise((resolve) => setTimeout(resolve, 10));
