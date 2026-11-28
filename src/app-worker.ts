@@ -1,11 +1,19 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { loadApp, type OperationKind, operationKinds, operationNames } from "./app-definition.ts";
+import {
+  type EmittedEvent,
+  type EventMeta,
+  encodeEventPayload,
+  MAX_EVENTS_PER_CALL,
+  validateEventTopic,
+} from "./events.ts";
 import { listQuery } from "./kv-range.ts";
 
 interface WorkerInit {
   module: string;
   database: string;
+  appName?: string;
   env?: Record<string, string | undefined>;
 }
 
@@ -16,6 +24,7 @@ interface WorkerMessage {
   input: unknown;
   user: { id: string };
   runId?: string;
+  event?: EventMeta;
 }
 
 const init = workerData as WorkerInit;
@@ -51,7 +60,7 @@ const key = (value: unknown): string => {
 async function run(message: WorkerMessage): Promise<void> {
   let transaction = false;
   try {
-    const { id, kind, name, input, user, runId } = message;
+    const { id, kind, name, input, user, runId, event } = message;
     if (!operationKinds.includes(kind)) {
       throw new Error("Unknown operation kind.");
     }
@@ -61,6 +70,7 @@ async function run(message: WorkerMessage): Promise<void> {
     }
     const writable = kind !== "queries";
     const db = writable ? writeDb : readDb;
+    const emitted: EmittedEvent[] = [];
     const permit = () => {
       if (!writable) {
         throw new Error("Queries cannot change data. Use a mutation.");
@@ -70,6 +80,20 @@ async function run(message: WorkerMessage): Promise<void> {
       user,
       env: Object.freeze(init.env || {}),
       runId,
+      event: event ? Object.freeze({ ...event }) : undefined,
+      eventId: event?.id,
+      emit: (topic: string, payload: unknown = null) => {
+        if (!writable) {
+          throw new Error("Queries cannot emit events. Use a mutation.");
+        }
+        if (emitted.length >= MAX_EVENTS_PER_CALL) {
+          throw new Error(`Cannot emit more than ${MAX_EVENTS_PER_CALL} events in one operation.`);
+        }
+        emitted.push({
+          topic: validateEventTopic(topic),
+          payload: encodeEventPayload(payload),
+        });
+      },
       db: {
         get: (nameKey: string) => {
           const row = statement(db, "SELECT value FROM kv WHERE key=?").get(key(nameKey)) as
@@ -123,7 +147,10 @@ async function run(message: WorkerMessage): Promise<void> {
     if (transaction) {
       db.exec("COMMIT");
       transaction = false;
-      parentPort?.postMessage({ data: true });
+      parentPort?.postMessage({
+        data: true,
+        ...(emitted.length ? { emitted, depth: event ? event.depth + 1 : 0 } : {}),
+      });
     }
     parentPort?.postMessage({ id, value: JSON.parse(encoded) });
   } catch (error) {

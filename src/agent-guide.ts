@@ -5,15 +5,17 @@ import path from "node:path";
 export function agentContract(name: string): string {
   return `## Fleet app
 
-This directory is the app — Fleet registered it in place. Edit client/index.tsx, client/style.css, and server/index.ts. Fleet builds and updates the app automatically. Do not start Vite or a separate app server.
+This directory is the app — Fleet registered it in place. Edit client/index.tsx, client/style.css, and server/index.ts (client/index.tsx is optional for headless microservices created with fleet init --service). Fleet builds and updates the app automatically. Do not start Vite or a separate app server.
 
-Use fleet list --json, fleet inspect ${name} --wait, and fleet logs ${name} to inspect the running app. Use fleet check ${name} to typecheck edits against fleet.d.ts. Exercise operations with fleet call ${name} KIND OP [JSON] — KIND is queries, mutations, or jobs — e.g. fleet call ${name} queries notes for reads. Quote JSON arguments for your shell.
+Use fleet list --json, fleet inspect ${name} --wait, fleet logs ${name}, and fleet events to inspect the running app. Use fleet check ${name} to typecheck edits against fleet.d.ts. Exercise operations with fleet call ${name} KIND OP [JSON] — KIND is queries, mutations, or jobs — e.g. fleet call ${name} queries notes for reads, or publish events with fleet emit TOPIC [JSON]. Quote JSON arguments for your shell.
 
-The server exports queries, mutations, and jobs. See fleet.d.ts for FleetCtx and FleetDb. Store persistent JSON in ctx.db. The data is outside the checkout and survives rebuilds. Queries cannot write.
+The server exports queries, mutations, jobs, and events. See fleet.d.ts for FleetCtx, FleetDb, and FleetEvent. Store persistent JSON in ctx.db. The data is outside the checkout and survives rebuilds. Queries cannot write or emit events.
 
 ctx.db.get returns null for a missing key. ctx.db.delete returns true if it deleted a key. ctx.db.list(prefix) returns up to 1,000 items. Keys are limited to 512 characters; stored values and operation results are limited to 2 MB.
 
-Fleet runs each mutation or job in an implicit SQLite transaction. If the handler throws, Fleet rolls back all ctx.db writes from that call. Return a structured { ok: false, error } result to keep writes that record a failure.
+Fleet runs each mutation, job, or event handler in an implicit SQLite transaction. If the handler throws, Fleet rolls back all ctx.db writes and discards any ctx.emit calls from that run. Return a structured { ok: false, error } result to keep writes that record a failure.
+
+Apps communicate via events: call ctx.emit("topic.name", payload) inside a mutation, job, or event handler (payload up to 512 KB UTF-8 JSON, only published after commit). Subscribe by exporting handlers under events in server/index.ts using exact topics ("workout.logged"), trailing wildcards ("alert.*"), or "*". Fleet wakes sleeping subscribers automatically, retries failed local deliveries with backoff, forwards to online peers, passes ctx.event and ctx.eventId for idempotency, and stops event chains after 5 hops.
 
 To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs array in fleet.json — everySeconds must be an integer of at least 5. Jobs run without a browser. Fleet can retry an interrupted job with the same ctx.runId. Use that ID as the idempotency key for external API requests. App code runs with this computer user's permissions.
 
@@ -27,26 +29,26 @@ Fleet Gate handles sign-in. Do not add a separate login system.
 
 Store server secrets in .env.fleet.server and read them through ctx.env. Git ignores this file. Do not import it into the client.
 
-fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet check, fleet call, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations and jobs write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
+fleet init, fleet register, fleet agent, fleet list, fleet inspect, fleet logs, fleet check, fleet call, fleet emit, fleet events, fleet backup, fleet doctor, --help, and --version are normal app work and need no extra authorization (mutations, jobs, and emitted events write real app data). Every other subcommand — including alias, setup, daemon, gate, phone, invite, profile, restore, unregister, update, and uninstall — and direct edits under the Fleet home directory require explicit owner authorization. If a command reports Fleet is not running, tell the user — do not run fleet setup or fleet daemon yourself.
 
-You are done when fleet inspect ${name} --wait reports a new revision with no error and, if an operation changed, fleet call exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.
+You are done when fleet inspect ${name} --wait reports a new revision with no error and, if an operation changed, fleet call or fleet emit exercises it. Report the change and https://${name}.fleet — no extra audits or browser checks unless asked.
 `;
 }
 
 export function agentGuide(): string {
   return `# Building Fleet apps — instructions for coding agents
 
-A Fleet app is a directory anywhere on this computer — Fleet never copies apps into an internal folder. \`fleet init DIR\` creates and registers a new app directory at DIR. \`fleet init\` (with optional \`--name NAME\`) scaffolds into the current directory without overwriting existing source files. If a directory already contains \`fleet.json\`, \`fleet init DIR\` or \`fleet register DIR\` re-registers it in place.
+A Fleet app is a directory anywhere on this computer — Fleet never copies apps into an internal folder. \`fleet init DIR\` creates and registers a new app directory at DIR. Pass \`--service\` (\`fleet init DIR --service\`) to scaffold a headless microservice with no \`client/\` directory. \`fleet init\` (with optional \`--name NAME\`) scaffolds into the current directory without overwriting existing source files. If a directory already contains \`fleet.json\`, \`fleet init DIR\` or \`fleet register DIR\` re-registers it in place.
 
 The app name comes from the directory basename, sanitized (\`--name NAME\` overrides it for new apps; an existing \`fleet.json\` name wins). \`fleet init --json\` returns the authoritative name and URL.
 
-When asked to create a Fleet "app", "file", "folder", or "project", scaffold a directory with \`fleet init\`. Do not hand-write starter files or create a bootstrap script that copies files elsewhere.
+When asked to create a Fleet "app", "service", "file", "folder", or "project", scaffold a directory with \`fleet init\` (or \`fleet init --service\` for headless backend services). Do not hand-write starter files or create a bootstrap script that copies files elsewhere.
 
 These commands are normal app work and need no extra authorization — the daemon picks up newly registered apps automatically:
 
 - \`fleet agent\`, \`fleet --help\`, \`fleet --version\`, \`fleet doctor\`
-- \`fleet init\`, \`fleet register\`, \`fleet list\`, \`fleet inspect\`, \`fleet logs\`, \`fleet check\`
-- \`fleet call\` and \`fleet backup --output FILE\` on the app you are working on (mutations and jobs write real app data)
+- \`fleet init\`, \`fleet register\`, \`fleet list\`, \`fleet inspect\`, \`fleet logs\`, \`fleet check\`, \`fleet events\`
+- \`fleet call\`, \`fleet emit\`, and \`fleet backup --output FILE\` on the app you are working on (mutations, jobs, and events write real app data)
 
 Run app commands on the computer that holds the checkout — \`fleet init\`, \`fleet register\`, \`fleet logs\`, \`fleet check\`, and \`fleet backup\` operate on local apps. \`fleet inspect NAME --wait\` waits for the current rebuild to settle; \`fleet logs NAME -n LINES\` chooses the line count, \`fleet logs NAME -f\` follows new lines, and \`fleet logs --daemon\` reads daemon diagnostics.
 

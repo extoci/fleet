@@ -58,6 +58,42 @@ A few important details about jobs:
 - If a job is interrupted mid-run, Fleet retries it with the same `ctx.runId` — pass `ctx.runId` as an idempotency key when calling external APIs.
 - Each job run has a 30-second timeout. You can trigger a job manually with `fleet call APP jobs NAME` and check its history with `fleet inspect APP` and `fleet logs APP`.
 
+## Events between apps and services
+
+Apps and headless services can communicate asynchronously through Fleet's built-in event bus. Call `ctx.emit(topic, payload?)` inside any mutation, job, or event handler:
+
+```ts
+mutations: {
+  logWorkout(ctx, input) {
+    ctx.db.set(`workout:${Date.now()}`, input);
+    ctx.emit('workout.logged', { minutes: input.minutes });
+  },
+}
+```
+
+Any other app subscribes by exporting matching handlers under `events` in `server/index.ts`:
+
+```ts
+events: {
+  'workout.logged'(ctx, payload) {
+    ctx.db.set(`entry:${ctx.eventId}`, {
+      source: ctx.event?.source,
+      minutes: payload.minutes,
+    });
+  },
+  'alert.*'(ctx, payload) {
+    ctx.log('Alert', ctx.event?.topic, payload);
+  },
+}
+```
+
+A few important details about events:
+
+- **Transactional publishing:** Events buffered with `ctx.emit` are published only after the handler's SQLite transaction commits. If the handler throws and rolls back, no events are sent.
+- **Wildcards:** Subscribe to exact topics (`workout.logged`), trailing segment prefixes (`alert.*`), or `*` for all topics.
+- **Idle-friendly and durable:** Fleet records event subscriptions at build time, wakes sleeping subscribers automatically, persists pending local deliveries across restarts, retries failed handlers with exponential backoff (up to 5 attempts), and forwards events to online peer computers.
+- **Loop protection & idempotency:** Each emitted event carries a unique `ctx.eventId` (and full `ctx.event` metadata) for idempotency, payloads are capped at 512 KB UTF-8 JSON, and event chains stop after 5 hops.
+
 ## Back up and restore
 
 Take a consistent SQLite snapshot at any time while the app is running (from the computer with the app checkout):

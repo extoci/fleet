@@ -10,9 +10,9 @@ icon: "lucide:code"
 ## Files in an app checkout
 
 - `fleet.json` — app ID, name, scheduled jobs, and optional HTML head settings (`title`, `themeColor`, `icon`, `manifest`).
-- `client/index.tsx` — Preact browser entry point.
+- `client/index.tsx` — optional Preact browser entry point (omit it or use `fleet init --service` for a headless microservice).
 - `client/style.css` — stylesheet imported by the client.
-- `server/index.ts` — server `queries`, `mutations`, and `jobs`.
+- `server/index.ts` — server `queries`, `mutations`, `jobs`, and `events`.
 - `public/` — optional static files served from the app root (for example `/icon.svg` or `/manifest.webmanifest`).
 - `fleet.d.ts` — TypeScript definitions for `fleet/client`, `FleetCtx`, and `FleetDb`.
 - `AGENTS.md` — concise instructions so any coding agent understands how Fleet works.
@@ -22,7 +22,7 @@ Your app name becomes its private origin, like `https://notes.fleet`. Keep the g
 
 ## Server operations
 
-Export a default object from `server/index.ts` with `queries`, `mutations`, and optional `jobs`:
+Export a default object from `server/index.ts` with `queries`, `mutations`, and optional `jobs` and `events`:
 
 ```ts
 export default {
@@ -51,9 +51,10 @@ export default {
 Here is how Fleet runs them:
 
 - **Queries are read-only** and can run concurrently while an async mutation is in flight, reading committed SQLite data.
-- **Mutations and jobs run in SQLite transactions**, serialized per app. If a handler throws, Fleet automatically rolls back every `ctx.db` write from that call.
-- **Every handler receives `ctx`**: `ctx.user.id` (the owner identity), `ctx.db` (`get`, `set`, `delete`, `list`), `ctx.env` (from `.env.fleet.server`), `ctx.log(...)`, and `ctx.runId` (for scheduled jobs).
-- **Keep handlers fast**: browser queries and mutations time out after 15 seconds, and jobs time out after 30 seconds. Always validate `input` on the server.
+- **Mutations, jobs, and event handlers run in SQLite transactions**, serialized per app. If a handler throws, Fleet automatically rolls back every `ctx.db` write and discards any `ctx.emit` calls from that run.
+- **Every handler receives `ctx`**: `ctx.user.id` (the owner identity), `ctx.db` (`get`, `set`, `delete`, `list`), `ctx.env` (from `.env.fleet.server`), `ctx.log(...)`, `ctx.emit(topic, payload?)` (writes/jobs/events only), `ctx.runId` (for scheduled jobs), and `ctx.event` / `ctx.eventId` (for event handlers).
+- **Keep handlers fast**: browser queries and mutations time out after 15 seconds, and jobs and event handlers time out after 30 seconds. Always validate `input` on the server.
+- **Headless services**: `client/index.tsx` is optional. Run `fleet init NAME --service` (or omit `client/index.tsx`) to build a backend-only microservice; opening its `.fleet` URL shows a read-only overview of its exported operations and event subscriptions.
 
 ## Browser client
 

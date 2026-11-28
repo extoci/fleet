@@ -27,7 +27,10 @@ afterEach(async () => {
 
 test("help includes jobs as a fleet call operation kind and fleet agent pointer", async () => {
   const { stdout } = await exec(process.execPath, [cli, "--help"]);
+  assert.match(stdout, /fleet init \[directory\] \[--service\]/);
   assert.match(stdout, /fleet call APP queries\|mutations\|jobs OP \[JSON\]/);
+  assert.match(stdout, /fleet emit TOPIC \[JSON\]/);
+  assert.match(stdout, /fleet events \[--json\]/);
   assert.match(stdout, /fleet agent \[--install\]/);
   assert.match(stdout, /fleet gate sessions/);
   assert.match(stdout, /fleet gate revoke ID/);

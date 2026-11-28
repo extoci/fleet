@@ -1,4 +1,6 @@
-export const operationKinds = ["queries", "mutations", "jobs"] as const;
+import { validateEventPattern } from "./events.ts";
+
+export const operationKinds = ["queries", "mutations", "jobs", "events"] as const;
 export type OperationKind = (typeof operationKinds)[number];
 
 export type OperationHandler = (ctx: unknown, input: unknown) => unknown | Promise<unknown>;
@@ -7,6 +9,7 @@ export interface AppDefinition {
   queries?: Record<string, OperationHandler>;
   mutations?: Record<string, OperationHandler>;
   jobs?: Record<string, OperationHandler>;
+  events?: Record<string, OperationHandler>;
 }
 
 export type OperationMap = Record<OperationKind, string[]>;
@@ -23,10 +26,13 @@ export function operationNames(app: AppDefinition): OperationMap {
   return Object.fromEntries(
     operationKinds.map((kind) => {
       const handlers = app[kind] || {};
-      return [
-        kind,
-        Object.getOwnPropertyNames(handlers).filter((name) => typeof handlers[name] === "function"),
-      ];
+      const names = Object.getOwnPropertyNames(handlers).filter(
+        (name) => typeof handlers[name] === "function",
+      );
+      if (kind === "events") {
+        for (const pattern of names) validateEventPattern(pattern);
+      }
+      return [kind, names];
     }),
   ) as OperationMap;
 }

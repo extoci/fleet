@@ -11,10 +11,12 @@ import { agentContract, agentGuide, installAgentSkill } from "./agent-guide.ts";
 import {
   type AppListItem,
   type DoctorCheck,
+  type EventsStatusItem,
   formatAppList,
   formatDaemonReady,
   formatDoctor,
   formatError,
+  formatEvents,
   formatGateCode,
   formatGateSessions,
   type GateSessionItem,
@@ -59,6 +61,7 @@ const { values, positionals } = parseArgs({
     follow: { type: "boolean", short: "f" },
     daemon: { type: "boolean" },
     lines: { type: "string", short: "n" },
+    service: { type: "boolean" },
     local: { type: "boolean" },
     forwarded: { type: "boolean" },
     "https-port": { type: "string" },
@@ -107,7 +110,11 @@ async function rpc<T = unknown>(
   return result;
 }
 
-function createApp(directory: string, name: string): AppManifest {
+function createApp(
+  directory: string,
+  name: string,
+  { service = false }: { service?: boolean } = {},
+): AppManifest {
   validateName(name);
   const template = fileURLToPath(new URL("../templates/", import.meta.url));
   const copySource = (file: string, source = path.join(template, file)) => {
@@ -140,28 +147,40 @@ function createApp(directory: string, name: string): AppManifest {
     addAgentGuide(app.name);
     return app;
   }
-  const files = [
-    "client/index.tsx",
-    "client/style.css",
-    "server/index.ts",
-    "public/fleet/fonts.css",
-    "public/fleet/wordmark.svg",
-  ];
-  const fonts = ["Geist-Variable.woff2", "GeistPixel-Square.woff2", "geist-font-OFL.txt"];
-  for (const dir of ["public", "public/fleet"]) {
-    const existing = fs.lstatSync(path.join(directory, dir), { throwIfNoEntry: false });
-    if (existing && !existing.isDirectory()) {
-      throw new Error(`${dir} must be a directory to store the Fleet starter assets.`);
+  if (service) {
+    if (fs.existsSync(path.join(directory, "server/index.ts"))) {
+      throw new Error(
+        "server/index.ts already exists. Fleet will not overwrite your source files.",
+      );
     }
-  }
-  for (const file of [...files, ...fonts.map((font) => `public/fleet/${font}`)]) {
-    if (fs.existsSync(path.join(directory, file))) {
-      throw new Error(`${file} already exists. Fleet will not overwrite your source files.`);
+    copySource("server/index.ts", path.join(template, "service/server/index.ts"));
+  } else {
+    const files = [
+      "client/index.tsx",
+      "client/style.css",
+      "server/index.ts",
+      "public/fleet/fonts.css",
+      "public/fleet/wordmark.svg",
+    ];
+    const fonts = ["Geist-Variable.woff2", "GeistPixel-Square.woff2", "geist-font-OFL.txt"];
+    for (const dir of ["public", "public/fleet"]) {
+      const existing = fs.lstatSync(path.join(directory, dir), { throwIfNoEntry: false });
+      if (existing && !existing.isDirectory()) {
+        throw new Error(`${dir} must be a directory to store the Fleet starter assets.`);
+      }
     }
-  }
-  for (const file of files) copySource(file);
-  for (const font of fonts) {
-    copySource(`public/fleet/${font}`, fileURLToPath(new URL(`./assets/${font}`, import.meta.url)));
+    for (const file of [...files, ...fonts.map((font) => `public/fleet/${font}`)]) {
+      if (fs.existsSync(path.join(directory, file))) {
+        throw new Error(`${file} already exists. Fleet will not overwrite your source files.`);
+      }
+    }
+    for (const file of files) copySource(file);
+    for (const font of fonts) {
+      copySource(
+        `public/fleet/${font}`,
+        fileURLToPath(new URL(`./assets/${font}`, import.meta.url)),
+      );
+    }
   }
   fs.writeFileSync(
     configFile,
@@ -494,11 +513,12 @@ async function main(): Promise<void> {
         .replace(/[^a-z0-9-]+/g, "-")
         .replace(/^-|-$/g, "")
         .slice(0, 63);
-    const app = createApp(directory, name);
+    const service = values.service === true;
+    const app = createApp(directory, name, { service });
     out(
       values.json
-        ? { ...app, directory, url: `https://${app.name}.fleet` }
-        : formatInit(app.name, directory),
+        ? { ...app, directory, url: `https://${app.name}.fleet`, service }
+        : formatInit(app.name, directory, { service }),
     );
     return;
   }
@@ -693,6 +713,42 @@ async function main(): Promise<void> {
         input: JSON.parse(args[3] || "null"),
       }),
     );
+    return;
+  }
+  if (command === "emit") {
+    if (!args[0]) throw new Error("Usage: fleet emit TOPIC [JSON]");
+    let payload: unknown = null;
+    if (args[1] !== undefined) {
+      try {
+        payload = JSON.parse(args[1]);
+      } catch {
+        throw new Error("Event payload must be valid JSON.");
+      }
+    }
+    const result = await rpc<{
+      eventId: string;
+      topic: string;
+      matched: number;
+      dropped?: boolean;
+      targets: Array<{ app: string; handler: string }>;
+    }>("emit", { topic: args[0], payload });
+    out(
+      values.json
+        ? result
+        : formatNotice(
+            "ok",
+            `Emitted ${result.topic}`,
+            result.matched
+              ? `Matched ${result.matched} ${result.matched === 1 ? "handler" : "handlers"}: ${result.targets.map((t) => `${t.app} (${t.handler})`).join(", ")}`
+              : "No subscribed apps matched this topic.",
+          ),
+    );
+    return;
+  }
+  if (command === "events") {
+    if (args.length) throw new Error("Usage: fleet events [--json]");
+    const status = await rpc<EventsStatusItem>("events");
+    out(values.json ? status : formatEvents(status));
     return;
   }
   if (command === "backup") {

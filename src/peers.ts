@@ -35,6 +35,7 @@ export interface PeerAppRecord {
   error: string | null;
   head: HeadMetadata;
   hasPublic: boolean;
+  hasClient: boolean;
   hasCss: boolean;
   operations: Record<string, string[]>;
   dataVersion: number;
@@ -210,6 +211,8 @@ export class Peers {
     return this.all().flatMap((peer) =>
       peer.apps.map((app) => ({
         ...app,
+        hasClient: app.hasClient !== false,
+        hasCss: app.hasClient === false ? false : app.hasCss !== false,
         peer: peer.id,
         directory: "(another Fleet computer)",
         online: Date.now() - peer.seen < 15_000,
@@ -298,7 +301,8 @@ export class Peers {
         error: typeof a.error === "string" ? a.error : null,
         head: headMetadata(a.head),
         hasPublic: a.hasPublic === true,
-        hasCss: a.hasCss !== false,
+        hasClient: a.hasClient !== false,
+        hasCss: a.hasClient === false ? false : a.hasCss !== false,
         operations: Object.fromEntries(
           operationKinds
             .filter((kind) =>
@@ -374,6 +378,13 @@ export class Peers {
     } finally {
       if (inviteKey) this.pending.delete(inviteKey);
     }
+  }
+
+  verifyPeer(token: string | undefined, peerId: string | undefined): PeerRecord | undefined {
+    if (!token || !peerId) return undefined;
+    const peer = this.all().find((p) => p.id === peerId);
+    if (!peer || !sameSecret(token, peer.token)) return undefined;
+    return peer;
   }
 
   async call(app: PeerAppView, method: string, args: Record<string, unknown> = {}) {

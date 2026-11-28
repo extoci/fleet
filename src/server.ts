@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type net from "node:net";
@@ -9,6 +10,12 @@ import { fileURLToPath } from "node:url";
 import type { OperationKind } from "./app-definition.ts";
 import { authority, leaf, mobileProfile } from "./certificates.ts";
 import { type DnsServer, startDNS } from "./dns.ts";
+import {
+  type EventMeta,
+  MAX_EVENT_DEPTH,
+  matchesEventPattern,
+  validateEventTopic,
+} from "./events.ts";
 import { Gate, sameSecret } from "./gate.ts";
 import {
   escape,
@@ -19,6 +26,7 @@ import {
   offlinePage,
   phoneConnectedPage,
   phoneSetupPage,
+  servicePage,
   unavailablePage,
   wakePage,
 } from "./pages.ts";
@@ -360,6 +368,73 @@ export async function start(home: string, options: StartOptions = {}) {
   const aliasFor = (name: string) => aliases().find((alias) => alias.name === name);
   const routeExists = (name: string) => Boolean(aliasFor(name) || appFor(name));
 
+  async function forwardEventToPeers(
+    event: EventMeta,
+    payload: unknown,
+    excludePeerId?: string,
+  ): Promise<Array<{ app: string; handler: string }>> {
+    const peerTargets = new Map<string, Array<{ app: string; handler: string }>>();
+    for (const peerApp of peers.list()) {
+      if (!peerApp.online || peerApp.peer === excludePeerId) continue;
+      for (const handler of peerApp.operations.events || []) {
+        if (matchesEventPattern(handler, event.topic)) {
+          const list = peerTargets.get(peerApp.peer) || [];
+          list.push({ app: peerApp.name, handler });
+          peerTargets.set(peerApp.peer, list);
+        }
+      }
+    }
+    const accepted: Array<{ app: string; handler: string }> = [];
+    await Promise.all(
+      [...peerTargets.entries()].map(async ([peerId, targets]) => {
+        const peer = peers.all().find((p) => p.id === peerId);
+        if (!peer) return;
+        try {
+          await peerRequest(peer, "event", { event, payload });
+          accepted.push(...targets);
+        } catch (error) {
+          runtime.log(
+            "daemon",
+            `Peer event ${event.topic} to ${peer.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }),
+    );
+    return accepted;
+  }
+
+  async function forwardEventToGateway(
+    event: EventMeta,
+    payload: unknown,
+  ): Promise<Array<{ app: string; handler: string }>> {
+    if (config?.mode !== "node" || !config.gateway || !config.nodeId || !config.nodeToken) {
+      return [];
+    }
+    try {
+      const result = (await peerRequest(
+        {
+          ...config.gateway,
+          token: config.nodeToken,
+          route: "/__fleet/peers/event",
+        },
+        "event",
+        { peerId: config.nodeId, event, payload },
+      )) as { targets?: Array<{ app: string; handler: string }> };
+      return Array.isArray(result.targets) ? result.targets : [];
+    } catch (error) {
+      runtime.log(
+        "daemon",
+        `Gateway event ${event.topic} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  runtime.onPublish(({ event, payload }) => {
+    if (config.mode === "node") void forwardEventToGateway(event, payload);
+    else void forwardEventToPeers(event, payload);
+  });
+
   let announceTimer: ReturnType<typeof setInterval> | undefined;
   let announcing = false;
   const contexts = new Map<string, { context: tls.SecureContext; expires: number }>();
@@ -442,6 +517,65 @@ export async function start(home: string, options: StartOptions = {}) {
         const token = request.headers.authorization?.replace(/^Bearer /, "");
         const message = JSON.parse(await body(request)) as { args: Record<string, unknown> };
         json(response, 200, await peers.announce(token, message.args));
+        return;
+      }
+      if (isGate && url.pathname === "/__fleet/peers/event" && request.method === "POST") {
+        const token = request.headers.authorization?.replace(/^Bearer /, "");
+        const message = JSON.parse(await body(request)) as {
+          args?: { peerId?: string; event?: EventMeta; payload?: unknown };
+        };
+        const peerId = message.args?.peerId;
+        const sender = peers.verifyPeer(token, peerId);
+        if (!sender) {
+          json(response, 403, { error: "Fleet computer authorization required." });
+          return;
+        }
+        const incoming = message.args?.event;
+        if (
+          !incoming ||
+          typeof incoming.id !== "string" ||
+          !incoming.id ||
+          incoming.id.length > 128 ||
+          typeof incoming.source !== "string" ||
+          !incoming.source ||
+          incoming.source.length > 128 ||
+          typeof incoming.at !== "string" ||
+          incoming.at.length > 64 ||
+          Number.isNaN(Date.parse(incoming.at)) ||
+          typeof incoming.depth !== "number" ||
+          !Number.isInteger(incoming.depth) ||
+          incoming.depth < 0 ||
+          incoming.depth > MAX_EVENT_DEPTH
+        ) {
+          json(response, 400, { error: "Invalid peer event." });
+          return;
+        }
+        const ownsSourceApp = sender.apps.some((peerApp) => peerApp.name === incoming.source);
+        if (!ownsSourceApp && incoming.source !== "cli") {
+          json(response, 403, { error: "Peer is not authorized to emit as that source." });
+          return;
+        }
+        const verifiedSource = ownsSourceApp ? incoming.source : `peer:${sender.id.slice(0, 8)}`;
+        const topic = validateEventTopic(incoming.topic);
+        const result = runtime.emitEvent(
+          verifiedSource,
+          topic,
+          message.args?.payload,
+          incoming.depth,
+          { notifyPeers: false, eventId: incoming.id, at: incoming.at },
+        );
+        const forwarded = !result.dropped
+          ? await forwardEventToPeers(
+              { ...incoming, source: verifiedSource, topic },
+              message.args?.payload,
+              sender.id,
+            )
+          : [];
+        json(response, 200, {
+          ...result,
+          matched: result.matched + forwarded.length,
+          targets: [...result.targets, ...forwarded],
+        });
         return;
       }
       const isClientError = Boolean(app && url.pathname === clientErrorRoute);
@@ -889,6 +1023,21 @@ export async function start(home: string, options: StartOptions = {}) {
           }
         }
       }
+      if (app.hasClient === false) {
+        send(
+          response,
+          200,
+          servicePage(
+            {
+              name: app.name,
+              revision: app.revision,
+              operations: app.operations,
+            },
+            originFor("gate"),
+          ),
+        );
+        return;
+      }
       const hasCss = isPeerApp(app)
         ? app.hasCss
         : Boolean(app.buildDir && appAsset(app, path.join(app.buildDir, "app.css")));
@@ -1056,12 +1205,65 @@ export async function start(home: string, options: StartOptions = {}) {
         json(response, 200, inspectApp(current));
         return;
       }
+      if (method === "emit") {
+        const result = runtime.emitEvent("cli", args.topic as string, args.payload, 0, {
+          notifyPeers: false,
+        });
+        let peerTargets: Array<{ app: string; handler: string }> = [];
+        if (!result.dropped) {
+          const eventMeta: EventMeta = {
+            id: result.eventId,
+            topic: result.topic,
+            source: result.source,
+            at: result.at,
+            depth: 0,
+          };
+          peerTargets =
+            config!.mode === "node"
+              ? await forwardEventToGateway(eventMeta, args.payload)
+              : await forwardEventToPeers(eventMeta, args.payload);
+        }
+        json(response, 200, {
+          ...result,
+          matched: result.matched + peerTargets.length,
+          targets: [...result.targets, ...peerTargets],
+        });
+        return;
+      }
+      if (method === "events") {
+        const status = runtime.eventsStatus();
+        const subscriptions: Array<{ pattern: string; app: string; peer?: string }> = [
+          ...status.subscriptions,
+        ];
+        for (const peerApp of peers.list()) {
+          for (const pattern of peerApp.operations.events || []) {
+            subscriptions.push({ pattern, app: peerApp.name, peer: peerApp.peer });
+          }
+        }
+        subscriptions.sort(
+          (a, b) => a.pattern.localeCompare(b.pattern) || a.app.localeCompare(b.app),
+        );
+        json(response, 200, { ...status, subscriptions });
+        return;
+      }
       if (method === "call") {
         const app = appFor(String(args.app || ""));
         if (!app) {
           json(response, 404, { error: "Unknown app." });
           return;
         }
+        const kind = args.kind as OperationKind;
+        const name = String(args.name || "");
+        const syntheticEvent =
+          kind === "events"
+            ? {
+                id: randomUUID(),
+                topic: name,
+                source: "cli",
+                at: new Date().toISOString(),
+                depth: 0,
+              }
+            : undefined;
         json(
           response,
           200,
@@ -1070,9 +1272,12 @@ export async function start(home: string, options: StartOptions = {}) {
             : {
                 value: await runtime.call(
                   app,
-                  args.kind as OperationKind,
-                  String(args.name || ""),
+                  kind,
+                  name,
                   args.input,
+                  { id: "owner" },
+                  undefined,
+                  syntheticEvent,
                 ),
               },
         );
@@ -1183,6 +1388,39 @@ export async function start(home: string, options: StartOptions = {}) {
               };
               if (method === "probe") {
                 json(response, 200, { id: config.nodeId });
+                return;
+              }
+              if (method === "event") {
+                const incoming = args.event as EventMeta | undefined;
+                if (
+                  !incoming ||
+                  typeof incoming.id !== "string" ||
+                  !incoming.id ||
+                  incoming.id.length > 128 ||
+                  typeof incoming.source !== "string" ||
+                  !incoming.source ||
+                  incoming.source.length > 128 ||
+                  typeof incoming.at !== "string" ||
+                  incoming.at.length > 64 ||
+                  Number.isNaN(Date.parse(incoming.at)) ||
+                  typeof incoming.depth !== "number" ||
+                  !Number.isInteger(incoming.depth) ||
+                  incoming.depth < 0 ||
+                  incoming.depth > MAX_EVENT_DEPTH
+                ) {
+                  json(response, 400, { error: "Invalid peer event." });
+                  return;
+                }
+                const topic = validateEventTopic(incoming.topic);
+                json(
+                  response,
+                  200,
+                  runtime.emitEvent(incoming.source, topic, args.payload, incoming.depth, {
+                    notifyPeers: false,
+                    eventId: incoming.id,
+                    at: incoming.at,
+                  }),
+                );
                 return;
               }
               const app = runtime.find(String(args.app || ""));

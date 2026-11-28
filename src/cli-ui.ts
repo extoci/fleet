@@ -17,14 +17,43 @@ export interface AppListItem {
     queries?: string[];
     mutations?: string[];
     jobs?: string[];
+    events?: string[];
   };
   jobs?: Array<{ name: string; everySeconds?: number }>;
   head?: Record<string, unknown>;
   hasPublic?: boolean;
+  hasClient?: boolean;
   peer?: string;
   online?: boolean;
   url?: string;
   jobsState?: Record<string, unknown>;
+}
+
+export interface EventsStatusItem {
+  subscriptions: Array<{ pattern: string; app: string; peer?: string }>;
+  pending: Array<{
+    id: string;
+    eventId: string;
+    topic: string;
+    source: string;
+    targetApp: string;
+    handler: string;
+    failures: number;
+    due: string;
+    error?: string;
+  }>;
+  recent: Array<{
+    eventId: string;
+    topic: string;
+    source: string;
+    targetApp: string;
+    handler: string;
+    status: "delivered" | "failed" | "dropped";
+    at: string;
+    finishedAt: string;
+    attempts: number;
+    error?: string;
+  }>;
 }
 
 export interface PeerComputerItem {
@@ -268,15 +297,17 @@ const HELP_GROUPS: HelpGroup[] = [
   {
     title: "Apps",
     items: [
-      ["fleet init [directory]", "Create and register an app"],
+      ["fleet init [directory] [--service]", "Create and register an app or headless service"],
       ["fleet agent [--install]", "Print or install coding agent instructions"],
       ["fleet list [--json]", "List apps and runtime state"],
       ["fleet open [NAME]", "Open an app or alias through Gate"],
-      ["fleet inspect NAME [--wait]", "Inspect operations, jobs, and build state"],
+      ["fleet inspect NAME [--wait]", "Inspect operations, jobs, events, and build state"],
       ["fleet logs NAME [-n LINES] [-f]", "Read or follow an app log"],
       ["fleet logs --daemon", "Read the Fleet daemon log"],
       ["fleet check NAME", "Typecheck an app against fleet.d.ts"],
       ["fleet call APP queries|mutations|jobs OP [JSON]", "Run an operation as the owner"],
+      ["fleet emit TOPIC [JSON]", "Publish an event to subscribed apps and services"],
+      ["fleet events [--json]", "List event subscriptions, retries, and history"],
       ["fleet alias NAME URL", "Redirect a .fleet name to a URL"],
       ["fleet unregister NAME", "Remove an app route or alias"],
     ],
@@ -423,6 +454,7 @@ export function formatInspect(app: AppListItem, opts: UiOptions = {}): string {
   lines.push(kv("Directory", s.text(shortenHome(app.directory))));
   lines.push(kv("Revision", app.revision ? s.muted(app.revision) : s.dim("not built yet")));
   if (app.peer) lines.push(kv("Peer", s.muted(app.peer)));
+  if (app.hasClient === false) lines.push(kv("Mode", s.muted("headless service")));
   if (app.hasPublic) lines.push(kv("Static", s.muted("public/")));
 
   if (app.error) {
@@ -436,7 +468,14 @@ export function formatInspect(app: AppListItem, opts: UiOptions = {}): string {
   const queries = app.operations?.queries ?? [];
   const mutations = app.operations?.mutations ?? [];
   const jobNames = app.operations?.jobs ?? [];
-  if (queries.length || mutations.length || jobNames.length || (app.jobs?.length ?? 0) > 0) {
+  const eventNames = app.operations?.events ?? [];
+  if (
+    queries.length ||
+    mutations.length ||
+    jobNames.length ||
+    eventNames.length ||
+    (app.jobs?.length ?? 0) > 0
+  ) {
     lines.push("");
     lines.push(`  ${s.highlight("OPERATIONS", true)}`);
     lines.push(
@@ -464,6 +503,9 @@ export function formatInspect(app: AppListItem, opts: UiOptions = {}): string {
           jobNames.length ? jobNames.map((j) => s.text(j)).join(s.dim(", ")) : s.dim("none"),
         ),
       );
+    }
+    if (eventNames.length) {
+      lines.push(kv("Events", eventNames.map((e) => s.violet(e)).join(s.dim(", "))));
     }
   }
 
@@ -515,19 +557,85 @@ export function formatDoctor(checks: DoctorCheck[], opts: UiOptions = {}): strin
   return lines.join("\n");
 }
 
-export function formatInit(name: string, directory: string, opts: UiOptions = {}): string {
+export function formatInit(
+  name: string,
+  directory: string,
+  opts: UiOptions & { service?: boolean } = {},
+): string {
   const color = opts.color ?? supportsColor();
   const s = makeStyle(color);
+  const label = opts.service
+    ? `Created headless service ${s.bold(name)}`
+    : `Created ${s.bold(name)}`;
+  const editHint = opts.service
+    ? `${s.muted("Edit")} ${s.text("server/index.ts")}${s.muted(" — Fleet rebuilds on save.")}`
+    : `${s.muted("Edit")} ${s.text("client/index.tsx")} ${s.muted("and")} ${s.text("server/index.ts")}${s.muted(" — Fleet rebuilds on save.")}`;
+  const nextHint = opts.service
+    ? `${s.dim("Run")} ${s.violet(`fleet inspect ${name} --wait`)} ${s.dim("then")} ${s.violet("fleet emit service.ping")} ${s.dim("to test it.")}`
+    : `${s.dim("Run")} ${s.violet(`fleet open ${name}`)} ${s.dim("to open it in your browser.")}`;
   return [
     brandHeader("init", { color }),
     "",
-    `  ${s.ok("✓", true)}  Created ${s.bold(name)}`,
+    `  ${s.ok("✓", true)}  ${label}`,
     `     ${padRight(s.dim("URL"), 11)}${s.violet(`https://${name}.fleet`)}`,
     `     ${padRight(s.dim("Directory"), 11)}${s.text(shortenHome(directory))}`,
     "",
-    `  ${s.muted("Edit")} ${s.text("client/index.tsx")} ${s.muted("and")} ${s.text("server/index.ts")}${s.muted(" — Fleet rebuilds on save.")}`,
-    `  ${s.dim("Run")} ${s.violet(`fleet open ${name}`)} ${s.dim("to open it in your browser.")}`,
+    `  ${editHint}`,
+    `  ${nextHint}`,
   ].join("\n");
+}
+
+export function formatEvents(status: EventsStatusItem, opts: UiOptions = {}): string {
+  const color = opts.color ?? supportsColor();
+  const s = makeStyle(color);
+  const subCount = status.subscriptions.length;
+  const summary = `${subCount} ${subCount === 1 ? "subscription" : "subscriptions"} · ${status.pending.length} pending`;
+  const lines = [brandHeader(summary, { color }), ""];
+
+  if (!status.subscriptions.length) {
+    lines.push(`  ${s.muted("No apps are subscribed to events yet.")}`);
+    lines.push(
+      `  ${s.dim("Export an")} ${s.text("events")} ${s.dim("object in")} ${s.text("server/index.ts")}${s.dim(" to subscribe.")}`,
+    );
+  } else {
+    lines.push(`  ${s.highlight("SUBSCRIPTIONS", true)}`);
+    const patternW = Math.max(10, ...status.subscriptions.map((sub) => sub.pattern.length)) + 2;
+    for (const sub of status.subscriptions) {
+      const origin = sub.peer ? ` ${s.dim(`(peer · ${sub.peer.slice(0, 8)})`)}` : "";
+      lines.push(`    ${padRight(s.violet(sub.pattern), patternW)}${s.text(sub.app)}${origin}`);
+    }
+  }
+
+  if (status.pending.length) {
+    lines.push("");
+    lines.push(`  ${s.highlight("PENDING RETRIES", true)}`);
+    for (const item of status.pending) {
+      const detail = item.error ? ` ${s.err(item.error.split("\n")[0])}` : "";
+      lines.push(
+        `    ${s.warn("◐")} ${s.text(item.topic)} ${s.dim("→")} ${s.text(item.targetApp)} ${s.dim(`(attempt ${item.failures + 1})`)}${detail}`,
+      );
+    }
+  }
+
+  if (status.recent.length) {
+    lines.push("");
+    lines.push(`  ${s.highlight("RECENT", true)}`);
+    for (const item of status.recent.slice(0, 10)) {
+      const icon =
+        item.status === "delivered"
+          ? s.ok("✓")
+          : item.status === "dropped"
+            ? s.warn("!")
+            : s.err("✕");
+      const target = item.targetApp === "*" ? s.dim("dropped") : s.text(item.targetApp);
+      const err = item.error ? ` ${s.err(item.error.split("\n")[0])}` : "";
+      lines.push(
+        `    ${icon} ${s.violet(item.topic)} ${s.dim(`from ${item.source} →`)} ${target}${err}`,
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export function formatSetup(
