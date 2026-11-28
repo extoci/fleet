@@ -368,56 +368,71 @@ export async function start(home: string, options: StartOptions = {}) {
   const aliasFor = (name: string) => aliases().find((alias) => alias.name === name);
   const routeExists = (name: string) => Boolean(aliasFor(name) || appFor(name));
 
-  function forwardEventToPeers(
+  async function forwardEventToPeers(
     event: EventMeta,
     payload: unknown,
     excludePeerId?: string,
-  ): Array<{ app: string; handler: string }> {
-    const matchedTargets: Array<{ app: string; handler: string }> = [];
-    const peerIds = new Set<string>();
+  ): Promise<Array<{ app: string; handler: string }>> {
+    const peerTargets = new Map<string, Array<{ app: string; handler: string }>>();
     for (const peerApp of peers.list()) {
       if (!peerApp.online || peerApp.peer === excludePeerId) continue;
       for (const handler of peerApp.operations.events || []) {
         if (matchesEventPattern(handler, event.topic)) {
-          matchedTargets.push({ app: peerApp.name, handler });
-          peerIds.add(peerApp.peer);
+          const list = peerTargets.get(peerApp.peer) || [];
+          list.push({ app: peerApp.name, handler });
+          peerTargets.set(peerApp.peer, list);
         }
       }
     }
-    for (const peerId of peerIds) {
-      const peer = peers.all().find((p) => p.id === peerId);
-      if (!peer) continue;
-      void peerRequest(peer, "event", { event, payload }).catch((error: unknown) => {
-        runtime.log(
-          "daemon",
-          `Peer event ${event.topic} to ${peer.id} failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-    }
-    return matchedTargets;
+    const accepted: Array<{ app: string; handler: string }> = [];
+    await Promise.all(
+      [...peerTargets.entries()].map(async ([peerId, targets]) => {
+        const peer = peers.all().find((p) => p.id === peerId);
+        if (!peer) return;
+        try {
+          await peerRequest(peer, "event", { event, payload });
+          accepted.push(...targets);
+        } catch (error) {
+          runtime.log(
+            "daemon",
+            `Peer event ${event.topic} to ${peer.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }),
+    );
+    return accepted;
   }
 
-  function forwardEventToGateway(event: EventMeta, payload: unknown): void {
-    if (config?.mode !== "node" || !config.gateway || !config.nodeId || !config.nodeToken) return;
-    void peerRequest(
-      {
-        ...config.gateway,
-        token: config.nodeToken,
-        route: "/__fleet/peers/event",
-      },
-      "event",
-      { peerId: config.nodeId, event, payload },
-    ).catch((error: unknown) => {
+  async function forwardEventToGateway(
+    event: EventMeta,
+    payload: unknown,
+  ): Promise<Array<{ app: string; handler: string }>> {
+    if (config?.mode !== "node" || !config.gateway || !config.nodeId || !config.nodeToken) {
+      return [];
+    }
+    try {
+      const result = (await peerRequest(
+        {
+          ...config.gateway,
+          token: config.nodeToken,
+          route: "/__fleet/peers/event",
+        },
+        "event",
+        { peerId: config.nodeId, event, payload },
+      )) as { targets?: Array<{ app: string; handler: string }> };
+      return Array.isArray(result.targets) ? result.targets : [];
+    } catch (error) {
       runtime.log(
         "daemon",
         `Gateway event ${event.topic} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-    });
+      return [];
+    }
   }
 
   runtime.onPublish(({ event, payload }) => {
-    if (config.mode === "node") forwardEventToGateway(event, payload);
-    else forwardEventToPeers(event, payload);
+    if (config.mode === "node") void forwardEventToGateway(event, payload);
+    else void forwardEventToPeers(event, payload);
   });
 
   let announceTimer: ReturnType<typeof setInterval> | undefined;
@@ -519,8 +534,14 @@ export async function start(home: string, options: StartOptions = {}) {
         if (
           !incoming ||
           typeof incoming.id !== "string" ||
+          !incoming.id ||
+          incoming.id.length > 128 ||
           typeof incoming.source !== "string" ||
+          !incoming.source ||
+          incoming.source.length > 128 ||
           typeof incoming.at !== "string" ||
+          incoming.at.length > 64 ||
+          Number.isNaN(Date.parse(incoming.at)) ||
           typeof incoming.depth !== "number" ||
           !Number.isInteger(incoming.depth) ||
           incoming.depth < 0 ||
@@ -529,16 +550,26 @@ export async function start(home: string, options: StartOptions = {}) {
           json(response, 400, { error: "Invalid peer event." });
           return;
         }
+        const ownsSourceApp = sender.apps.some((peerApp) => peerApp.name === incoming.source);
+        if (!ownsSourceApp && incoming.source !== "cli") {
+          json(response, 403, { error: "Peer is not authorized to emit as that source." });
+          return;
+        }
+        const verifiedSource = ownsSourceApp ? incoming.source : `peer:${sender.id.slice(0, 8)}`;
         const topic = validateEventTopic(incoming.topic);
         const result = runtime.emitEvent(
-          incoming.source,
+          verifiedSource,
           topic,
           message.args?.payload,
           incoming.depth,
           { notifyPeers: false, eventId: incoming.id, at: incoming.at },
         );
         const forwarded = !result.dropped
-          ? forwardEventToPeers({ ...incoming, topic }, message.args?.payload, sender.id)
+          ? await forwardEventToPeers(
+              { ...incoming, source: verifiedSource, topic },
+              message.args?.payload,
+              sender.id,
+            )
           : [];
         json(response, 200, {
           ...result,
@@ -992,7 +1023,7 @@ export async function start(home: string, options: StartOptions = {}) {
           }
         }
       }
-      if (!app.hasClient) {
+      if (app.hasClient === false) {
         send(
           response,
           200,
@@ -1178,30 +1209,19 @@ export async function start(home: string, options: StartOptions = {}) {
         const result = runtime.emitEvent("cli", args.topic as string, args.payload, 0, {
           notifyPeers: false,
         });
-        const peerTargets =
-          !result.dropped && config!.mode !== "node"
-            ? forwardEventToPeers(
-                {
-                  id: result.eventId,
-                  topic: result.topic,
-                  source: result.source,
-                  at: result.at,
-                  depth: 0,
-                },
-                args.payload,
-              )
-            : [];
-        if (!result.dropped && config!.mode === "node" && config!.gateway) {
-          forwardEventToGateway(
-            {
-              id: result.eventId,
-              topic: result.topic,
-              source: result.source,
-              at: result.at,
-              depth: 0,
-            },
-            args.payload,
-          );
+        let peerTargets: Array<{ app: string; handler: string }> = [];
+        if (!result.dropped) {
+          const eventMeta: EventMeta = {
+            id: result.eventId,
+            topic: result.topic,
+            source: result.source,
+            at: result.at,
+            depth: 0,
+          };
+          peerTargets =
+            config!.mode === "node"
+              ? await forwardEventToGateway(eventMeta, args.payload)
+              : await forwardEventToPeers(eventMeta, args.payload);
         }
         json(response, 200, {
           ...result,
@@ -1375,8 +1395,14 @@ export async function start(home: string, options: StartOptions = {}) {
                 if (
                   !incoming ||
                   typeof incoming.id !== "string" ||
+                  !incoming.id ||
+                  incoming.id.length > 128 ||
                   typeof incoming.source !== "string" ||
+                  !incoming.source ||
+                  incoming.source.length > 128 ||
                   typeof incoming.at !== "string" ||
+                  incoming.at.length > 64 ||
+                  Number.isNaN(Date.parse(incoming.at)) ||
                   typeof incoming.depth !== "number" ||
                   !Number.isInteger(incoming.depth) ||
                   incoming.depth < 0 ||

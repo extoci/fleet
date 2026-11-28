@@ -3,15 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "bun:test";
 import {
+  encodeEventPayload,
   eventRetryDelay,
   MAX_EVENT_ATTEMPTS,
   MAX_EVENT_DEPTH,
+  MAX_PENDING_EVENTS,
   matchesEventPattern,
   validateEventPattern,
   validateEventTopic,
 } from "../src/events.ts";
+import { peerRequest } from "../src/peers.ts";
 import { start } from "../src/server.ts";
-import { write } from "../src/state.ts";
+import { read, write } from "../src/state.ts";
 import {
   cleanups,
   fixture,
@@ -48,6 +51,9 @@ test("event topic and wildcard pattern validation and matching", () => {
   assert.equal(eventRetryDelay(2), 15_000);
   assert.equal(eventRetryDelay(3), 45_000);
   assert.ok(eventRetryDelay(10) <= 15 * 60_000);
+
+  // UTF-8 byte length is enforced (multi-byte characters cannot slip past 512 KB).
+  assert.throws(() => encodeEventPayload({ text: "😀".repeat(150_000) }), /512 KB/);
 });
 
 test("ctx.emit wakes subscribed apps, matches wildcards, stays atomic on rollback, and pushes SSE data updates", async () => {
@@ -501,4 +507,128 @@ test("events fan out between gateway and peer computers in both directions", asy
     payload: { ok: boolean };
   }>;
   assert.deepEqual(inbox, [{ topic: "peer.done", payload: { ok: true } }]);
+
+  // Peer spoofing an app it does not own is rejected with 403
+  await assert.rejects(
+    () =>
+      peerRequest(
+        {
+          address: "127.0.0.1",
+          port: gateway.httpsPort,
+          ca: invite.ca as string,
+          token: nodeConfig.nodeToken as string,
+          route: "/__fleet/peers/event",
+        },
+        "event",
+        {
+          peerId: nodeConfig.nodeId,
+          event: {
+            id: "spoof-1",
+            topic: "peer.spoof",
+            source: "notes",
+            at: new Date().toISOString(),
+            depth: 0,
+          },
+          payload: null,
+        },
+      ),
+    /not authorized to emit as that source/i,
+  );
+
+  // Legacy peers.json records without hasClient default to true (not headless)
+  const peersFile = path.join(gatewayHome, "peers.json");
+  const storedPeers = read<Array<{ apps: Array<Record<string, unknown>> }>>(peersFile, []);
+  delete storedPeers[0].apps[0].hasClient;
+  write(peersFile, storedPeers);
+  const listed = await runCli<Array<{ name: string; hasClient: boolean }>>(gatewayHome, "list");
+  assert.equal(listed.find((a) => a.name === "worker")?.hasClient, true);
+});
+
+test("bursts throttle cleanly without burning retries, capacity refuses without evicting, and removed handlers drop", async () => {
+  const { daemon, project } = await fixture({ pollMs: 3_600_000 });
+  write(
+    path.join(project, "server", "index.ts"),
+    `
+    export default {
+      queries: {
+        count(ctx) {
+          return ctx.db.get("count") ?? 0;
+        },
+      },
+      events: {
+        "burst.item"(ctx) {
+          ctx.db.set("count", (ctx.db.get("count") ?? 0) + 1);
+        },
+        "will.remove"(ctx) {
+          throw new Error("temporary");
+        },
+      },
+    };
+    `,
+  );
+  const app = daemon.runtime.find("notes")!;
+  await daemon.runtime.settleBuild(app);
+
+  // 40 concurrent emits exceed the worker's 32-call limit if unthrottled; all must succeed on attempt 1
+  for (let i = 0; i < 40; i++) {
+    daemon.runtime.emitEvent("cli", "burst.item", { i });
+  }
+  await daemon.runtime.settleEvents();
+  assert.equal(await daemon.runtime.call(app, "queries", "count", null), 40);
+  const recentBurst = daemon.runtime
+    .readEventStore()
+    .recent.filter((entry) => entry.topic === "burst.item");
+  assert.ok(recentBurst.length > 0);
+  assert.ok(recentBurst.every((entry) => entry.status === "delivered" && entry.attempts === 1));
+
+  // Removed handler drops pending retry to recent instead of stranding forever
+  daemon.runtime.emitEvent("cli", "will.remove", null);
+  await daemon.runtime.settleEvents();
+  assert.equal(daemon.runtime.readEventStore().pending.length, 1);
+
+  write(
+    path.join(project, "server", "index.ts"),
+    `
+    export default {
+      events: {
+        "burst.item"(ctx) {
+          ctx.db.set("count", (ctx.db.get("count") ?? 0) + 1);
+        },
+      },
+    };
+    `,
+  );
+  await daemon.runtime.settleBuild(app);
+  await daemon.runtime.tick();
+  const afterRemove = daemon.runtime.readEventStore();
+  assert.equal(afterRemove.pending.length, 0);
+  const dropped = afterRemove.recent.find(
+    (entry) => entry.topic === "will.remove" && entry.status === "dropped",
+  );
+  assert.ok(dropped);
+  assert.match(dropped.error || "", /removed/i);
+
+  // Full queue rejects new work explicitly without evicting accepted deliveries
+  const filled = Array.from({ length: MAX_PENDING_EVENTS }, (_, i) => ({
+    id: `queued-${i}`,
+    eventId: `evt-${i}`,
+    topic: "burst.item",
+    source: "cli",
+    payload: null,
+    at: new Date().toISOString(),
+    depth: 0,
+    targetAppId: app.id,
+    targetAppName: app.name,
+    handler: "burst.item",
+    due: Date.now() + 3_600_000,
+    failures: 0,
+  }));
+  daemon.runtime.writeEventStore({ pending: filled, recent: [] });
+  assert.throws(
+    () => daemon.runtime.emitEvent("cli", "burst.item", { overflow: true }),
+    /capacity/,
+  );
+  const preserved = daemon.runtime.readEventStore().pending;
+  assert.equal(preserved.length, MAX_PENDING_EVENTS);
+  assert.equal(preserved[0].id, "queued-0");
 });

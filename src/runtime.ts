@@ -18,6 +18,7 @@ import {
   type EventStore,
   encodeEventPayload,
   eventRetryDelay,
+  MAX_CONCURRENT_EVENTS_PER_APP,
   MAX_EVENT_ATTEMPTS,
   MAX_EVENT_DEPTH,
   MAX_PENDING_EVENTS,
@@ -747,7 +748,11 @@ export class Runtime {
               if (message.emitted?.length) {
                 const depth = message.depth ?? 0;
                 for (const item of message.emitted) {
-                  this.emitEvent(app.name, item.topic, item.payload, depth);
+                  try {
+                    this.emitEvent(app.name, item.topic, item.payload, depth);
+                  } catch (error) {
+                    this.log(app.id, `Dropped event ${item.topic}: ${formatBuildError(error)}`);
+                  }
                 }
               }
             } else if (message.id) {
@@ -885,12 +890,25 @@ export class Runtime {
     return false;
   }
 
-  hasRunningEvent(app: LocalAppState): boolean {
+  runningEventCount(app: LocalAppState): number {
     const prefix = `${app.id}/`;
+    let count = 0;
     for (const key of this.runningEvents.keys()) {
-      if (key.startsWith(prefix)) return true;
+      if (key.startsWith(prefix)) count++;
     }
-    return false;
+    return count;
+  }
+
+  hasRunningEvent(app: LocalAppState): boolean {
+    return this.runningEventCount(app) > 0;
+  }
+
+  canStartEvent(app: LocalAppState): boolean {
+    return (
+      !this.closed &&
+      this.runningEventCount(app) < MAX_CONCURRENT_EVENTS_PER_APP &&
+      app.pending.size < 16
+    );
   }
 
   readEventStore(): EventStore {
@@ -904,9 +922,26 @@ export class Runtime {
 
   writeEventStore(store: EventStore): void {
     write(path.join(this.home, "events.json"), {
-      pending: store.pending.slice(-MAX_PENDING_EVENTS),
+      pending: store.pending,
       recent: store.recent.slice(0, MAX_RECENT_EVENTS),
     });
+  }
+
+  pumpAppEvents(app: LocalAppState): void {
+    if (!this.canStartEvent(app)) return;
+    const now = Date.now();
+    const store = this.readEventStore();
+    for (const delivery of store.pending) {
+      if (!this.canStartEvent(app)) break;
+      if (
+        delivery.targetAppId === app.id &&
+        delivery.due <= now &&
+        !this.runningEvents.has(`${app.id}/${delivery.id}`) &&
+        app.operations?.events?.includes(delivery.handler)
+      ) {
+        this.startEventDelivery(app, delivery);
+      }
+    }
   }
 
   enqueueLocalEvent(event: EventMeta, payload: unknown): Array<{ app: string; handler: string }> {
@@ -938,10 +973,16 @@ export class Runtime {
     }
     if (!deliveries.length) return targets;
     const store = this.readEventStore();
+    if (store.pending.length + deliveries.length > MAX_PENDING_EVENTS) {
+      throw new Error(
+        `Event queue is at capacity (${MAX_PENDING_EVENTS} pending deliveries). Wait for pending events to drain.`,
+      );
+    }
     for (const { delivery } of deliveries) store.pending.push(delivery);
     this.writeEventStore(store);
     if (!this.closed) {
-      for (const { app, delivery } of deliveries) this.startEventDelivery(app, delivery);
+      const touched = new Set(deliveries.map((item) => item.app));
+      for (const app of touched) this.pumpAppEvents(app);
     }
     return targets;
   }
@@ -1100,6 +1141,7 @@ export class Runtime {
     this.runningEvents.set(key, running);
     const clear = () => {
       if (this.runningEvents.get(key) === running) this.runningEvents.delete(key);
+      if (!this.closed && this.apps.get(app.id) === app) this.pumpAppEvents(app);
     };
     running.then(clear, clear);
   }
@@ -1159,13 +1201,35 @@ export class Runtime {
       const eventStore = this.readEventStore();
       if (eventStore.pending.length) {
         const now = Date.now();
-        let pruned = false;
+        let mutated = false;
         const kept: EventDelivery[] = [];
-        const due: Array<{ app: LocalAppState; delivery: EventDelivery }> = [];
+        const appsToPump = new Set<LocalAppState>();
         for (const delivery of eventStore.pending) {
           const app = this.apps.get(delivery.targetAppId);
           if (!app) {
-            pruned = true;
+            mutated = true;
+            continue;
+          }
+          const handlerRemoved =
+            Boolean(app.revision) &&
+            !app.building &&
+            !app.buildError &&
+            !this.runningEvents.has(`${app.id}/${delivery.id}`) &&
+            !app.operations?.events?.includes(delivery.handler);
+          if (handlerRemoved) {
+            mutated = true;
+            eventStore.recent.unshift({
+              eventId: delivery.eventId,
+              topic: delivery.topic,
+              source: delivery.source,
+              targetApp: delivery.targetAppName,
+              handler: delivery.handler,
+              status: "dropped",
+              at: delivery.at,
+              finishedAt: new Date().toISOString(),
+              attempts: delivery.failures,
+              error: `Handler ${delivery.handler} was removed.`,
+            });
             continue;
           }
           kept.push(delivery);
@@ -1174,11 +1238,11 @@ export class Runtime {
             !this.runningEvents.has(`${app.id}/${delivery.id}`) &&
             app.operations?.events?.includes(delivery.handler)
           ) {
-            due.push({ app, delivery });
+            appsToPump.add(app);
           }
         }
-        if (pruned) this.writeEventStore({ ...eventStore, pending: kept });
-        for (const { app, delivery } of due) this.startEventDelivery(app, delivery);
+        if (mutated) this.writeEventStore({ ...eventStore, pending: kept });
+        for (const app of appsToPump) this.pumpAppEvents(app);
       }
 
       for (const app of this.apps.values()) {

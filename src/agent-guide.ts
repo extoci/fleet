@@ -15,7 +15,7 @@ ctx.db.get returns null for a missing key. ctx.db.delete returns true if it dele
 
 Fleet runs each mutation, job, or event handler in an implicit SQLite transaction. If the handler throws, Fleet rolls back all ctx.db writes and discards any ctx.emit calls from that run. Return a structured { ok: false, error } result to keep writes that record a failure.
 
-Apps communicate via events: call ctx.emit("topic.name", payload) inside a mutation, job, or event handler (payload up to 1 MB, only published after commit). Subscribe by exporting handlers under events in server/index.ts using exact topics ("workout.logged"), trailing wildcards ("alert.*"), or "*". Fleet wakes sleeping subscribers automatically, retries failed deliveries with backoff, passes ctx.event and ctx.eventId for idempotency, and stops event chains after 5 hops.
+Apps communicate via events: call ctx.emit("topic.name", payload) inside a mutation, job, or event handler (payload up to 512 KB UTF-8 JSON, only published after commit). Subscribe by exporting handlers under events in server/index.ts using exact topics ("workout.logged"), trailing wildcards ("alert.*"), or "*". Fleet wakes sleeping subscribers automatically, retries failed local deliveries with backoff, forwards to online peers, passes ctx.event and ctx.eventId for idempotency, and stops event chains after 5 hops.
 
 To schedule a job, add {"name":"dailyCheck","everySeconds":86400} to the jobs array in fleet.json — everySeconds must be an integer of at least 5. Jobs run without a browser. Fleet can retry an interrupted job with the same ctx.runId. Use that ID as the idempotency key for external API requests. App code runs with this computer user's permissions.
 

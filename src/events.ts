@@ -1,9 +1,10 @@
 export const MAX_EVENT_DEPTH = 5;
 export const MAX_EVENTS_PER_CALL = 32;
-export const MAX_EVENT_PAYLOAD_BYTES = 1_000_000;
+export const MAX_EVENT_PAYLOAD_BYTES = 512_000;
 export const MAX_EVENT_ATTEMPTS = 5;
 export const MAX_PENDING_EVENTS = 500;
 export const MAX_RECENT_EVENTS = 50;
+export const MAX_CONCURRENT_EVENTS_PER_APP = 4;
 
 const eventRetryBaseMs = 5_000;
 const eventRetryCapMs = 15 * 60_000;
@@ -94,8 +95,8 @@ export function matchesEventPattern(pattern: string, topic: string): boolean {
 
 export function encodeEventPayload(payload: unknown): unknown {
   const encoded = JSON.stringify(payload ?? null);
-  if (encoded === undefined || encoded.length > MAX_EVENT_PAYLOAD_BYTES) {
-    throw new Error("Event payload must be JSON of at most 1 MB.");
+  if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > MAX_EVENT_PAYLOAD_BYTES) {
+    throw new Error("Event payload must be UTF-8 JSON of at most 512 KB.");
   }
   return JSON.parse(encoded);
 }

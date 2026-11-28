@@ -17,10 +17,18 @@ export default {
     // Match exact topics ("workout.logged") or trailing wildcards ("alert.*", "*").
     'service.ping'(ctx, payload) {
       const recent = ctx.db.get('recent') ?? [];
-      ctx.db.set('recent', [
-        { id: ctx.eventId, topic: ctx.event?.topic, source: ctx.event?.source, payload },
-        ...recent.slice(0, 49),
-      ]);
+      const entry = {
+        id: ctx.eventId,
+        topic: ctx.event?.topic,
+        source: ctx.event?.source,
+        payload,
+      };
+      const next = [entry, ...recent.slice(0, 49)];
+      // Keep stored history well under the 2 MB ctx.db value limit even for large payloads.
+      while (next.length > 1 && JSON.stringify(next).length > 512_000) {
+        next.pop();
+      }
+      ctx.db.set('recent', next);
       ctx.log('Received', ctx.event?.topic, 'from', ctx.event?.source);
     },
   },

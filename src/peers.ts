@@ -211,6 +211,8 @@ export class Peers {
     return this.all().flatMap((peer) =>
       peer.apps.map((app) => ({
         ...app,
+        hasClient: app.hasClient !== false,
+        hasCss: app.hasClient === false ? false : app.hasCss !== false,
         peer: peer.id,
         directory: "(another Fleet computer)",
         online: Date.now() - peer.seen < 15_000,

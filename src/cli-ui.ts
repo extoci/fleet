@@ -571,7 +571,7 @@ export function formatInit(
     ? `${s.muted("Edit")} ${s.text("server/index.ts")}${s.muted(" — Fleet rebuilds on save.")}`
     : `${s.muted("Edit")} ${s.text("client/index.tsx")} ${s.muted("and")} ${s.text("server/index.ts")}${s.muted(" — Fleet rebuilds on save.")}`;
   const nextHint = opts.service
-    ? `${s.dim("Run")} ${s.violet(`fleet emit service.ping`)} ${s.dim("or")} ${s.violet(`fleet inspect ${name} --wait`)} ${s.dim("to test it.")}`
+    ? `${s.dim("Run")} ${s.violet(`fleet inspect ${name} --wait`)} ${s.dim("then")} ${s.violet("fleet emit service.ping")} ${s.dim("to test it.")}`
     : `${s.dim("Run")} ${s.violet(`fleet open ${name}`)} ${s.dim("to open it in your browser.")}`;
   return [
     brandHeader("init", { color }),
