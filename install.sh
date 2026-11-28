@@ -250,5 +250,6 @@ installed_version="$("$INSTALL_DIR/fleet" --version 2>/dev/null || printf 'Fleet
 printf '%s installed at %s/fleet\n' "$installed_version" "$INSTALL_DIR"
 printf '\nNext steps:\n'
 printf '  fleet setup --install\n'
+printf '  fleet agent --install\n'
 printf '  fleet init notes\n'
 printf '  fleet open notes\n'

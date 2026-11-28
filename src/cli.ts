@@ -397,14 +397,20 @@ async function main(): Promise<void> {
   if (command === "update") {
     const { updateFleet } = await import("./update.ts");
     const result = await updateFleet(home);
+    const hint = result.updated
+      ? "Run fleet agent --install to refresh any installed agent skill."
+      : undefined;
     out(
       values.json
-        ? result
+        ? hint
+          ? { ...result, hint }
+          : result
         : formatNotice(
             "ok",
             result.updated
               ? `Updated Fleet from ${result.previous} to ${result.version}.`
               : `Fleet ${result.version} is up to date.`,
+            hint,
           ),
     );
     return;
